@@ -1,5 +1,8 @@
 # Forge3D (working title)
 
+this is a repository to test out the abilities i can have with Claude - i am trying to remake Blender in Rust from the ground up. 
+Huge Thanks to the Blender Foundation making the Blender Project, have a visit at their site too: https://www.blender.org/
+
 Rust 3D suite for game assets.
 
 - Step 1: workspace, viewport, glTF viewer
