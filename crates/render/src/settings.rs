@@ -65,6 +65,10 @@ pub struct ViewSettings {
     pub env_strength: f32,
     /// radians around Y
     pub env_rotation: f32,
+    /// Real-time directional/spot shadow mapping (first suitable light).
+    pub shadows: bool,
+    /// Softness of the shadow PCF filter (0 = hard, higher = softer).
+    pub shadow_softness: f32,
 }
 
 impl Default for ViewSettings {
@@ -72,11 +76,15 @@ impl Default for ViewSettings {
         Self {
             shading: ShadingMode::Rendered,
             wireframe: WireMode::Off,
-            show_background: true,
+            // Off by default so the viewport behaves like a pure 3D engine / Blender solid mode.
+            // User can enable the procedural sky (or load an HDRI) from the View menu.
+            show_background: false,
             background_blur: 0.35,
             exposure: 1.0,
-            env_strength: 1.0,
+            env_strength: 0.0, // no IBL contribution until the user enables a sky/HDRI
             env_rotation: 0.0,
+            shadows: true,
+            shadow_softness: 1.5,
         }
     }
 }

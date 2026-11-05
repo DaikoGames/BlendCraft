@@ -438,7 +438,7 @@ impl App {
         let path = match (&self.doc.path, save_as) {
             (Some(p), false) => p.clone(),
             _ => {
-                let Some(mut p) = rfd::FileDialog::new().add_filter("Forge3D project", &["forge"]).set_file_name("untitled.forge").save_file() else {
+                let Some(mut p) = rfd::FileDialog::new().add_filter("BlendCraft project", &["forge"]).set_file_name("untitled.forge").save_file() else {
                     return;
                 };
                 if p.extension().is_none() {
@@ -487,7 +487,7 @@ impl App {
             }
             A::Open => {
                 if self.confirm_discard() {
-                    if let Some(p) = rfd::FileDialog::new().add_filter("Forge3D project", &["forge"]).pick_file() {
+                    if let Some(p) = rfd::FileDialog::new().add_filter("BlendCraft project", &["forge"]).pick_file() {
                         self.open_project(p);
                     }
                 }
@@ -660,9 +660,43 @@ impl App {
             A::ExposureDown => self.settings.exposure = (self.settings.exposure / 1.15).max(0.05),
             A::ExposureUp => self.settings.exposure = (self.settings.exposure * 1.15).min(20.0),
             A::EnvRotate(d) => self.settings.env_rotation += 0.1 * d as f32,
+            A::RenderImage => self.render_image(),
 
             A::ToggleShortcuts => self.ui.show_shortcuts = !self.ui.show_shortcuts,
             A::ShowAbout => self.ui.show_about = true,
+        }
+    }
+
+    /// Capture the current 3D viewport (no UI) to a PNG the user chooses.
+    fn render_image(&mut self) {
+        let Some(g) = self.gfx.as_mut() else {
+            self.status("Renderer not ready");
+            return;
+        };
+        let Some(mut path) = rfd::FileDialog::new()
+            .add_filter("PNG image", &["png"])
+            .set_file_name("render.png")
+            .save_file()
+        else {
+            return;
+        };
+        if path.extension().is_none() {
+            path.set_extension("png");
+        }
+        // Use current viewport size (physical)
+        let (w, h) = (
+            self.viewport[2].max(64.0) as u32,
+            self.viewport[3].max(64.0) as u32,
+        );
+        match g.renderer.capture(&self.camera, &self.settings, w, h) {
+            Ok(rgba) => {
+                if let Err(e) = image::save_buffer(&path, &rgba, w, h, image::ColorType::Rgba8) {
+                    self.status(&format!("Render failed: {e}"));
+                } else {
+                    self.status(&format!("Saved render to {}", path.display()));
+                }
+            }
+            Err(e) => self.status(&format!("Render failed: {e}")),
         }
     }
 
@@ -817,7 +851,7 @@ impl App {
 
         // 3) window title
         let name = self.doc.path.as_ref().and_then(|p| p.file_name()).map_or("Untitled".to_string(), |n| n.to_string_lossy().into_owned());
-        let title = format!("{}{} - Forge3D", name, if self.doc.dirty { "*" } else { "" });
+        let title = format!("{}{} - BlendCraft", name, if self.doc.dirty { "*" } else { "" });
         if title != self.title {
             if let Some(g) = &self.gfx {
                 g.window.set_title(&title);
@@ -877,10 +911,18 @@ impl ApplicationHandler for App {
         if self.gfx.is_some() {
             return;
         }
-        let window = Arc::new(
-            el.create_window(Window::default_attributes().with_title("Forge3D").with_inner_size(LogicalSize::new(1400, 850)))
-                .expect("create window"),
-        );
+        let mut attrs = Window::default_attributes()
+            .with_title("BlendCraft")
+            .with_inner_size(LogicalSize::new(1400, 850));
+        // Window icon from the bundled logo (hand-eye OK mark)
+        if let Ok(img) = image::load_from_memory(include_bytes!("../logo.png")) {
+            let rgba = img.to_rgba8();
+            let (w, h) = rgba.dimensions();
+            if let Ok(icon) = winit::window::Icon::from_rgba(rgba.into_raw(), w, h) {
+                attrs = attrs.with_window_icon(Some(icon));
+            }
+        }
+        let window = Arc::new(el.create_window(attrs).expect("create window"));
         let size = window.inner_size();
         let renderer = pollster::block_on(Renderer::new(window.clone(), size.width, size.height)).expect("init GPU");
         let egui_state = egui_winit::State::new(

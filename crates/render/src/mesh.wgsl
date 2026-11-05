@@ -145,34 +145,63 @@ fn fs_main(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f
     let prefiltered = sample_env(rdir, roughness * g.env.z);
     let spec = prefiltered * env_brdf_approx(f0, roughness, nov);
 
-    // scene lights (point / sun / spot), no shadows yet
+    // scene lights (point / sun / spot) with optional shadow for one light
     var direct = vec3<f32>(0.0);
     let light_count = u32(g.light_info.x + 0.5);
+    let shadow_idx = i32(g.light_info.y);
+    let shadow_enabled = g.opts.w >= 1.0;
+
+    // HARD RULE: light does not pass through geometry.
+    // One shadow factor from the primary light's depth map; applied to ALL lighting.
+    var shadow_factor = 1.0;
+    if (shadow_enabled && shadow_idx >= 0) {
+        let slt = g.lights[u32(shadow_idx)];
+        var light_dir = vec3<f32>(0.0, 1.0, 0.0);
+        if (slt.pos_type.w >= 0.5 && slt.pos_type.w <= 1.5) {
+            light_dir = -normalize(slt.dir.xyz); // sun
+        } else {
+            light_dir = normalize(slt.pos_type.xyz - in.world); // point / spot
+        }
+        shadow_factor = sample_shadow(in.world, n, light_dir);
+    }
+
     for (var i: u32 = 0u; i < light_count; i = i + 1u) {
         let lt = g.lights[i];
         var l = vec3<f32>(0.0, 1.0, 0.0);
         var atten = 1.0;
         if (lt.pos_type.w < 0.5 || lt.pos_type.w > 1.5) {
+            // Point / Spot
             let dvec = lt.pos_type.xyz - in.world;
-            let dist2 = max(dot(dvec, dvec), 1e-4);
-            l = dvec * inverseSqrt(dist2);
-            atten = 1.0 / dist2;
+            let dist2 = max(dot(dvec, dvec), 0.05 * 0.05);
+            let inv_dist = inverseSqrt(dist2);
+            l = dvec * inv_dist;
+            atten = inv_dist * inv_dist;
             if (lt.color.w > 0.0) {
-                let r2 = lt.color.w * lt.color.w;
-                let f = clamp(1.0 - (dist2 / r2) * (dist2 / r2), 0.0, 1.0);
-                atten = atten * f * f;
+                let r = lt.color.w;
+                let d = 1.0 / inv_dist;
+                let x = clamp(1.0 - (d / r) * (d / r) * (d / r) * (d / r), 0.0, 1.0);
+                atten = atten * x * x;
             }
             if (lt.pos_type.w > 1.5) {
-                let cd = dot(-l, lt.dir.xyz);
+                let cd = dot(-l, normalize(lt.dir.xyz));
                 atten = atten * smoothstep(lt.spot.x, lt.spot.y, cd);
             }
         } else {
-            l = -lt.dir.xyz;
+            // Sun
+            l = -normalize(lt.dir.xyz);
         }
-        direct = direct + ggx_direct(n, v, l, base.rgb, metallic, roughness) * lt.color.rgb * atten;
+        var contrib = ggx_direct(n, v, l, base.rgb, metallic, roughness) * lt.color.rgb * atten;
+        // RULE: blocked fragments receive no direct light
+        if (shadow_enabled && shadow_idx >= 0) {
+            contrib = contrib * shadow_factor;
+        }
+        direct = direct + contrib;
     }
 
-    let lit = (diffuse_color * irradiance + spec) * ao * g.opts.z + direct + em_s * u_mat.emissive.rgb;
+    // Ambient also respects the rule (no "glow through" walls)
+    let shade = mix(0.0, 1.0, shadow_factor);
+    let ambient = diffuse_color * 0.02 * ao * shade;
+    let lit = ambient + (diffuse_color * irradiance + spec) * ao * g.opts.z * shade + direct + em_s * u_mat.emissive.rgb;
 
     let mode = u32(g.env.w + 0.5);
     var rgb = finish_color(lit);

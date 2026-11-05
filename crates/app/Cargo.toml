@@ -21,3 +21,4 @@ egui.workspace = true
 egui-wgpu.workspace = true
 egui-winit.workspace = true
 rfd.workspace = true
+image.workspace = true

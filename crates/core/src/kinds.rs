@@ -59,6 +59,7 @@ pub enum LightType {
     Point,
     Sun,
     Spot,
+    Area,
 }
 
 impl LightType {
@@ -67,6 +68,7 @@ impl LightType {
             LightType::Point => "Point",
             LightType::Sun => "Sun",
             LightType::Spot => "Spot",
+            LightType::Area => "Area",
         }
     }
 }
@@ -87,12 +89,23 @@ pub struct LightData {
 
 impl LightData {
     pub fn new(kind: LightType) -> Self {
-        let intensity = match kind {
-            LightType::Point => 20.0,
-            LightType::Sun => 3.0,
-            LightType::Spot => 30.0,
+        // Point/Spot: candela-like; Sun: lux-like. Values kept moderate so a white
+        // material next to the light does not blow out to pure white after tonemapping.
+        // Range 0 = unlimited; a finite default range gives natural falloff for lamps.
+        let (intensity, range) = match kind {
+            LightType::Point => (20.0, 25.0),
+            LightType::Sun => (5.0, 0.0),
+            LightType::Spot => (25.0, 30.0),
+            LightType::Area => (30.0, 40.0),
         };
-        Self { kind, color: [1.0, 1.0, 1.0], intensity, range: 0.0, spot_angle_deg: 45.0, spot_blend: 0.15 }
+        Self {
+            kind,
+            color: [1.0, 1.0, 1.0],
+            intensity,
+            range,
+            spot_angle_deg: 45.0,
+            spot_blend: 0.15,
+        }
     }
 }
 
@@ -118,6 +131,7 @@ impl ObjectKind {
                 LightType::Point => "Point Light",
                 LightType::Sun => "Sun Light",
                 LightType::Spot => "Spot Light",
+                LightType::Area => "Area Light",
             },
         }
     }
@@ -256,6 +270,25 @@ fn light_lines(l: &LightData) -> Vec<Seg> {
                 v.push((Vec3::ZERO, c + p * r));
             }
             ring(&mut v, Vec3::ZERO, Vec3::X, Vec3::Y, 0.08, 16);
+        }
+        LightType::Area => {
+            // Rectangle helper in the XY plane facing -Z
+            let hx = 0.5;
+            let hy = 0.35;
+            let corners = [
+                Vec3::new(-hx, -hy, 0.0),
+                Vec3::new(hx, -hy, 0.0),
+                Vec3::new(hx, hy, 0.0),
+                Vec3::new(-hx, hy, 0.0),
+            ];
+            for i in 0..4 {
+                v.push((corners[i], corners[(i + 1) % 4]));
+            }
+            // Direction indicator
+            v.push((Vec3::ZERO, Vec3::new(0.0, 0.0, -0.6)));
+            // Cross
+            v.push((Vec3::new(-hx * 0.3, 0.0, 0.0), Vec3::new(hx * 0.3, 0.0, 0.0)));
+            v.push((Vec3::new(0.0, -hy * 0.3, 0.0), Vec3::new(0.0, hy * 0.3, 0.0)));
         }
     }
     v

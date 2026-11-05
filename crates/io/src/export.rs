@@ -197,7 +197,7 @@ pub fn export_glb(scene: &Scene, path: &Path, only: Option<&BTreeSet<u64>>) -> R
             }
             ObjectKind::Light(l) => {
                 let ty = match l.kind {
-                    LightType::Point => "point",
+                    LightType::Point | LightType::Area => "point",
                     LightType::Sun => "directional",
                     LightType::Spot => "spot",
                 };

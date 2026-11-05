@@ -126,7 +126,7 @@ pub fn draw(
     move_popup(ctx, doc, st, &mut actions);
     let mut about = st.show_about;
     egui::Window::new("About").open(&mut about).show(ctx, |ui| {
-        ui.heading("Forge3D (working title)");
+        ui.heading("BlendCraft");
         ui.label("A 3D suite for game assets, written in Rust.");
         ui.label("Press F1 for the keyboard shortcuts.");
     });
@@ -216,13 +216,13 @@ fn menu_bar(ui: &mut egui::Ui, doc: &mut Document, settings: &mut ViewSettings, 
                 }
             });
             ui.menu_button("Curve", |ui| {
-                for n in ["Bezier", "Circle", "Nurbs Curve", "Path"] {
-                    soon(ui, n);
+                for p in Primitive::curves() {
+                    mi(ui, actions, b, p.label(), Action::Add(p), true);
                 }
+                soon(ui, "Nurbs Curve");
             });
             soon(ui, "Surface");
-            soon(ui, "Metaball");
-            soon(ui, "Text");
+            // Metaball + Text are mesh approximations in Primitive::all()
             soon(ui, "Volume");
             soon(ui, "Grease Pencil");
             ui.separator();
@@ -240,10 +240,9 @@ fn menu_bar(ui: &mut egui::Ui, doc: &mut Document, settings: &mut ViewSettings, 
             });
             ui.separator();
             ui.menu_button("Light", |ui| {
-                for t in [LightType::Point, LightType::Sun, LightType::Spot] {
+                for t in [LightType::Point, LightType::Sun, LightType::Spot, LightType::Area] {
                     mi(ui, actions, b, t.name(), Action::AddKind(ObjectKind::Light(LightData::new(t))), true);
                 }
-                soon(ui, "Area");
             });
             soon(ui, "Light Probe");
             ui.menu_button("Camera", |ui| {
@@ -345,6 +344,10 @@ fn menu_bar(ui: &mut egui::Ui, doc: &mut Document, settings: &mut ViewSettings, 
                 }
             });
             ui.checkbox(&mut settings.show_background, "Show environment background");
+            ui.checkbox(&mut settings.shadows, "Real-time shadows");
+            if settings.shadows {
+                ui.add(egui::Slider::new(&mut settings.shadow_softness, 0.0..=4.0).text("Shadow softness"));
+            }
             ui.separator();
             ui.add(egui::Slider::new(&mut settings.exposure, 0.1..=8.0).logarithmic(true).text("Exposure"));
             ui.add(egui::Slider::new(&mut settings.background_blur, 0.0..=1.0).text("Background blur"));
@@ -357,6 +360,8 @@ fn menu_bar(ui: &mut egui::Ui, doc: &mut Document, settings: &mut ViewSettings, 
             mi(ui, actions, b, "Frame selected", Action::FrameSelected, true);
             mi(ui, actions, b, "Frame all", Action::FrameAll, true);
             mi(ui, actions, b, "Camera view", Action::CameraView, true);
+            ui.separator();
+            mi(ui, actions, b, "Render Image…", Action::RenderImage, true);
             ui.separator();
             mi(ui, actions, b, "Toggle snapping", Action::ToggleSnap, true);
             ui.checkbox(&mut ts.snap.enabled, "Snapping enabled");
@@ -567,8 +572,16 @@ fn object_row(ui: &mut egui::Ui, doc: &mut Document, st: &mut UiState, actions: 
         push(ui, "Duplicate", Action::Duplicate);
         push(ui, "Delete", Action::Delete);
         push(ui, "Hide", Action::Hide);
+        ui.separator();
         push(ui, "Select Children", Action::SelectChildren);
+        push(ui, "Select Parent", Action::SelectParent);
+        ui.separator();
+        // Parenting (Blender-style): make the active object the parent of the selection,
+        // or clear the parent relationship.
+        push(ui, "Set Parent (to Active)", Action::ParentSet);
         push(ui, "Clear Parent (keep transform)", Action::ParentClearKeep);
+        push(ui, "Clear Parent", Action::ParentClear);
+        ui.separator();
         push(ui, "Move to Collection…", Action::OpenMoveToCollection);
     });
 }
@@ -989,6 +1002,32 @@ fn properties(ui: &mut egui::Ui, doc: &mut Document, actions: &mut Vec<Action>) 
                     n(ui, "Major segments", major_segments, 3, 256);
                     n(ui, "Minor segments", minor_segments, 3, 256);
                 }
+                Primitive::Monkey { size } | Primitive::Text { size } => f(ui, "Size", size),
+                Primitive::Pyramid { size, height } => {
+                    f(ui, "Base size", size);
+                    f(ui, "Height", height);
+                }
+                Primitive::Prism { radius, height, segments } | Primitive::Tube { radius, height, segments } => {
+                    f(ui, "Radius", radius);
+                    f(ui, "Height", height);
+                    n(ui, "Segments", segments, 3, 256);
+                }
+                Primitive::CurveBezier { size, segments } => {
+                    f(ui, "Size", size);
+                    n(ui, "Segments", segments, 4, 256);
+                }
+                Primitive::CurveCircle { radius, segments } => {
+                    f(ui, "Radius", radius);
+                    n(ui, "Segments", segments, 8, 256);
+                }
+                Primitive::CurvePath { length, segments } => {
+                    f(ui, "Length", length);
+                    n(ui, "Segments", segments, 2, 256);
+                }
+                Primitive::Metaball { radius, subdivisions } => {
+                    f(ui, "Radius", radius);
+                    n(ui, "Subdivisions", subdivisions, 1, 5);
+                }
             }
             for r in rs.iter().chain(rs_i.iter()) {
                 let p2 = p.clone();
@@ -1053,7 +1092,7 @@ fn properties(ui: &mut egui::Ui, doc: &mut Document, actions: &mut Vec<Action>) 
                 ui.label(RichText::new("Light").strong());
                 let mut l2 = l;
                 egui::ComboBox::from_label("Type").selected_text(l2.kind.name()).show_ui(ui, |ui| {
-                    for t in [LightType::Point, LightType::Sun, LightType::Spot] {
+                    for t in [LightType::Point, LightType::Sun, LightType::Spot, LightType::Area] {
                         ui.selectable_value(&mut l2.kind, t, t.name());
                     }
                 });

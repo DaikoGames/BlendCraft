@@ -91,6 +91,7 @@ pub enum Action {
     ExposureDown,
     ExposureUp,
     EnvRotate(i8),
+    RenderImage,
     // help
     ToggleShortcuts,
     ShowAbout,

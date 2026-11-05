@@ -32,7 +32,7 @@ mod tests {
     fn roundtrip() {
         let d = Document::new();
         let back = from_bytes(&to_bytes(&d.scene).unwrap()).unwrap();
-        assert_eq!(back.objects.len(), 1);
+        assert_eq!(back.objects.len(), 3); // Cube + Sun + Camera
         assert_eq!(back.objects[0].mesh.vertices.len(), d.scene.objects[0].mesh.vertices.len());
     }
 }

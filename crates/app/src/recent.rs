@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 const MAX_RECENT: usize = 10;
 
-/// <config dir>/Forge3D/recent.txt (APPDATA on Windows, ~/Library/Application Support on macOS,
+/// <config dir>/BlendCraft/recent.txt (APPDATA on Windows, ~/Library/Application Support on macOS,
 /// $XDG_CONFIG_HOME or ~/.config elsewhere).
 fn config_file() -> Option<PathBuf> {
     let base = if cfg!(target_os = "windows") {
@@ -15,7 +15,7 @@ fn config_file() -> Option<PathBuf> {
             .map(PathBuf::from)
             .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?
     };
-    Some(base.join("Forge3D").join("recent.txt"))
+    Some(base.join("BlendCraft").join("recent.txt"))
 }
 
 /// Move `p` to the front (no duplicates), keep at most MAX_RECENT entries.

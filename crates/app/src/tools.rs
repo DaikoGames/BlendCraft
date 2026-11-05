@@ -103,7 +103,9 @@ pub struct ToolState {
 
 impl ToolState {
     pub fn new() -> Self {
-        Self { tool: Tool::Select, pivot: Pivot::Median, orient: Orientation::Global, snap: SnapSettings::default(), circle_radius: 40.0 }
+        // Default to Move so the transform gizmo (arrows) appears immediately when an object is selected,
+        // matching common DCC expectations (Blender / Unity style).
+        Self { tool: Tool::Move, pivot: Pivot::Median, orient: Orientation::Global, snap: SnapSettings::default(), circle_radius: 40.0 }
     }
 }
 

@@ -1,6 +1,6 @@
 //! The open document: scene + selection + undo/redo + file state, and all object-mode operations.
 //! Undo is snapshot based; snapshots are cheap because meshes/textures are `Arc`-shared.
-use crate::kinds::LightType;
+use crate::kinds::{CameraData, LightData, LightType};
 use crate::mesh::Aabb;
 use crate::{Collection, Material, MeshData, Object, ObjectKind, Primitive, Scene, TextureData, Vertex};
 use glam::{Mat4, Quat, Vec3};
@@ -61,12 +61,33 @@ pub struct Document {
 const MAX_UNDO: usize = 200;
 
 impl Document {
-    /// New document with a default cube.
+    /// New document with a Blender-like default scene: Cube + Sun Light + Camera.
     pub fn new() -> Self {
         let mut d = Self::from_scene(Scene::default(), None);
-        let mut o = Object::new("Cube", Primitive::Cube { size: 1.0 }.build());
-        o.primitive = Some(Primitive::Cube { size: 1.0 });
-        d.scene.objects.push(o);
+
+        // Default cube at origin
+        let mut cube = Object::new("Cube", Primitive::Cube { size: 1.0 }.build());
+        cube.primitive = Some(Primitive::Cube { size: 1.0 });
+        d.scene.objects.push(cube);
+
+        // Sun light above and slightly offset
+        let mut light = Object::new(
+            "Sun Light",
+            MeshData::default(),
+        );
+        light.translation = Vec3::new(0.0, 4.0, 0.0);
+        light.rotation = Quat::from_rotation_arc(Vec3::NEG_Z, Vec3::new(-0.4, -0.8, -0.4).normalize());
+        light.kind = ObjectKind::Light(LightData::new(LightType::Sun));
+        d.scene.objects.push(light);
+
+        // Perspective camera looking at origin
+        let eye = Vec3::new(4.0, 3.0, 6.0);
+        let mut cam = Object::new("Camera", MeshData::default());
+        cam.translation = eye;
+        cam.rotation = Quat::from_mat4(&Mat4::look_at_rh(eye, Vec3::ZERO, Vec3::Y).inverse());
+        cam.kind = ObjectKind::Camera(CameraData::default());
+        d.scene.objects.push(cam);
+
         d.scene.fix_ids();
         d.dirty = false;
         d
@@ -350,7 +371,7 @@ impl Document {
                     o.translation = Vec3::new(0.0, 4.0, 0.0);
                     o.rotation = Quat::from_rotation_arc(Vec3::NEG_Z, Vec3::new(-0.4, -0.8, -0.4).normalize());
                 }
-                LightType::Spot => {
+                LightType::Spot | LightType::Area => {
                     o.translation = Vec3::new(2.0, 4.0, 2.0);
                     o.rotation = Quat::from_rotation_arc(Vec3::NEG_Z, (-o.translation).normalize());
                 }
@@ -968,32 +989,33 @@ mod tests {
     #[test]
     fn undo_redo_add_delete() {
         let mut d = Document::new();
-        assert_eq!(d.scene.objects.len(), 1);
+        assert_eq!(d.scene.objects.len(), 3); // Cube + Sun + Camera
         d.add_primitive(Primitive::Sphere { radius: 0.5, segments: 8, rings: 4 });
-        assert_eq!(d.scene.objects.len(), 2);
+        assert_eq!(d.scene.objects.len(), 4);
         d.delete_selected();
-        assert_eq!(d.scene.objects.len(), 1);
+        assert_eq!(d.scene.objects.len(), 3);
         assert!(d.undo());
-        assert_eq!(d.scene.objects.len(), 2);
+        assert_eq!(d.scene.objects.len(), 4);
         assert!(d.redo());
-        assert_eq!(d.scene.objects.len(), 1);
+        assert_eq!(d.scene.objects.len(), 3);
     }
 
     #[test]
     fn unique_names() {
         let mut d = Document::new();
         d.add_primitive(Primitive::Cube { size: 1.0 });
-        assert_eq!(d.scene.objects[1].name, "Cube.001");
+        assert_eq!(d.scene.objects[3].name, "Cube.001");
     }
 
     #[test]
     fn parent_keeps_world_position() {
         let mut d = Document::new();
+        // Use the default cube (index 0) as parent and add a child
         d.add_primitive(Primitive::Cube { size: 1.0 });
         d.scene.objects[0].translation = Vec3::new(5.0, 0.0, 0.0);
-        d.scene.objects[1].translation = Vec3::new(0.0, 3.0, 0.0);
-        let child = d.scene.objects[1].id;
-        d.select_only(1);
+        d.scene.objects[3].translation = Vec3::new(0.0, 3.0, 0.0);
+        let child = d.scene.objects[3].id;
+        d.select_only(3);
         let parent = d.scene.objects[0].id;
         d.selection.insert(parent);
         d.active = Some(parent);
@@ -1007,12 +1029,17 @@ mod tests {
     fn join_and_separate_roundtrip() {
         let mut d = Document::new();
         d.add_primitive(Primitive::Sphere { radius: 0.3, segments: 8, rings: 4 });
-        d.scene.objects[1].translation = Vec3::new(3.0, 0.0, 0.0);
-        d.select_all();
+        d.scene.objects[3].translation = Vec3::new(3.0, 0.0, 0.0);
+        // Select only the two meshes
+        d.selection.clear();
+        d.selection.insert(d.scene.objects[0].id);
+        d.selection.insert(d.scene.objects[3].id);
+        d.active = Some(d.scene.objects[0].id);
         d.join().unwrap();
-        assert_eq!(d.scene.objects.len(), 1);
+        // After join: original non-mesh objects remain + 1 joined mesh
+        assert_eq!(d.scene.objects.len(), 3);
         d.select_all();
         assert_eq!(d.separate_loose(), 1);
-        assert_eq!(d.scene.objects.len(), 2);
+        assert_eq!(d.scene.objects.len(), 4);
     }
 }
