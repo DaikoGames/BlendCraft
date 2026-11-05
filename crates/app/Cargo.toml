@@ -1,0 +1,23 @@
+[package]
+name = "forge-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "forge3d"
+path = "src/main.rs"
+
+[dependencies]
+forge-core.workspace = true
+forge-io.workspace = true
+forge-render.workspace = true
+glam.workspace = true
+winit.workspace = true
+pollster.workspace = true
+env_logger.workspace = true
+log.workspace = true
+egui.workspace = true
+egui-wgpu.workspace = true
+egui-winit.workspace = true
+rfd.workspace = true

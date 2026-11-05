@@ -1,0 +1,1018 @@
+//! The open document: scene + selection + undo/redo + file state, and all object-mode operations.
+//! Undo is snapshot based; snapshots are cheap because meshes/textures are `Arc`-shared.
+use crate::kinds::LightType;
+use crate::mesh::Aabb;
+use crate::{Collection, Material, MeshData, Object, ObjectKind, Primitive, Scene, TextureData, Vertex};
+use glam::{Mat4, Quat, Vec3};
+use std::collections::{BTreeSet, HashMap, HashSet};
+use std::path::PathBuf;
+use std::sync::Arc;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OriginMode {
+    /// center of the bounding box
+    Geometry,
+    /// average of all vertices
+    Median,
+    Cursor,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AlignMode {
+    Min,
+    Center,
+    Max,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AlignTo {
+    Active,
+    Selection,
+    Cursor,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SameKind {
+    Type,
+    Collection,
+    Material,
+    Linked,
+}
+
+pub struct Document {
+    pub scene: Scene,
+    /// Ids of selected objects.
+    pub selection: BTreeSet<u64>,
+    /// The active object (shown in Properties). Usually part of the selection.
+    pub active: Option<u64>,
+    /// Collection new objects are added to.
+    pub active_collection: Option<u64>,
+    pub path: Option<PathBuf>,
+    pub dirty: bool,
+    /// Bumped on every change (including selection) so the renderer knows when to re-sync.
+    pub version: u64,
+    /// UI bookkeeping: a continuous edit (slider drag, typing) already has its undo snapshot.
+    pub edit_open: bool,
+    rng: u32,
+    undo: Vec<Scene>,
+    redo: Vec<Scene>,
+}
+
+const MAX_UNDO: usize = 200;
+
+impl Document {
+    /// New document with a default cube.
+    pub fn new() -> Self {
+        let mut d = Self::from_scene(Scene::default(), None);
+        let mut o = Object::new("Cube", Primitive::Cube { size: 1.0 }.build());
+        o.primitive = Some(Primitive::Cube { size: 1.0 });
+        d.scene.objects.push(o);
+        d.scene.fix_ids();
+        d.dirty = false;
+        d
+    }
+
+    pub fn from_scene(mut scene: Scene, path: Option<PathBuf>) -> Self {
+        scene.fix_ids();
+        Self {
+            scene,
+            selection: BTreeSet::new(),
+            active: None,
+            active_collection: None,
+            path,
+            dirty: false,
+            version: 1,
+            edit_open: false,
+            rng: 0x9E37_79B9,
+            undo: Vec::new(),
+            redo: Vec::new(),
+        }
+    }
+
+    pub fn touch(&mut self) {
+        self.dirty = true;
+        self.version += 1;
+    }
+
+    fn sel_changed(&mut self) {
+        self.version += 1;
+    }
+
+    // ------------------------------------------------------------------ undo
+    /// Call BEFORE mutating the scene.
+    pub fn checkpoint(&mut self) {
+        self.undo.push(self.scene.clone());
+        if self.undo.len() > MAX_UNDO {
+            self.undo.remove(0);
+        }
+        self.redo.clear();
+        self.touch();
+    }
+
+    /// Forget the most recent snapshot without restoring it (used when a modal operation is cancelled).
+    pub fn drop_last_checkpoint(&mut self) {
+        self.undo.pop();
+    }
+
+    pub fn can_undo(&self) -> bool {
+        !self.undo.is_empty()
+    }
+    pub fn can_redo(&self) -> bool {
+        !self.redo.is_empty()
+    }
+
+    pub fn undo(&mut self) -> bool {
+        match self.undo.pop() {
+            Some(prev) => {
+                self.redo.push(std::mem::replace(&mut self.scene, prev));
+                self.after_history();
+                true
+            }
+            None => false,
+        }
+    }
+
+    pub fn redo(&mut self) -> bool {
+        match self.redo.pop() {
+            Some(next) => {
+                self.undo.push(std::mem::replace(&mut self.scene, next));
+                self.after_history();
+                true
+            }
+            None => false,
+        }
+    }
+
+    fn after_history(&mut self) {
+        let ids: HashSet<u64> = self.scene.objects.iter().map(|o| o.id).collect();
+        self.selection.retain(|id| ids.contains(id));
+        if self.active.map_or(false, |a| !ids.contains(&a)) {
+            self.active = None;
+        }
+        self.touch();
+    }
+
+    pub fn unique_name(&self, base: &str) -> String {
+        let exists = |n: &str| self.scene.objects.iter().any(|o| o.name == n);
+        if !exists(base) {
+            return base.to_string();
+        }
+        let root = base.rsplit_once('.').filter(|(_, n)| n.chars().all(|c| c.is_ascii_digit())).map_or(base, |(r, _)| r);
+        (1..).map(|i| format!("{root}.{i:03}")).find(|n| !exists(n)).unwrap()
+    }
+
+    // ------------------------------------------------------------------ selection
+    pub fn active_index(&self) -> Option<usize> {
+        self.active.and_then(|id| self.scene.index_of(id))
+    }
+
+    pub fn selected_indices(&self) -> Vec<usize> {
+        self.scene.objects.iter().enumerate().filter(|(_, o)| self.selection.contains(&o.id)).map(|(i, _)| i).collect()
+    }
+
+    pub fn is_selected(&self, i: usize) -> bool {
+        self.scene.objects.get(i).map_or(false, |o| self.selection.contains(&o.id))
+    }
+
+    pub fn select_only(&mut self, i: usize) {
+        self.selection.clear();
+        if let Some(o) = self.scene.objects.get(i) {
+            self.selection.insert(o.id);
+            self.active = Some(o.id);
+        }
+        self.sel_changed();
+    }
+
+    pub fn select_add(&mut self, i: usize) {
+        if let Some(o) = self.scene.objects.get(i) {
+            self.selection.insert(o.id);
+            self.active = Some(o.id);
+        }
+        self.sel_changed();
+    }
+
+    pub fn select_remove(&mut self, i: usize) {
+        if let Some(o) = self.scene.objects.get(i) {
+            let id = o.id;
+            self.selection.remove(&id);
+            if self.active == Some(id) {
+                self.active = self.selection.iter().next().copied();
+            }
+        }
+        self.sel_changed();
+    }
+
+    /// Shift-click behaviour: add, or make active, or remove if it is already the active one.
+    pub fn select_toggle(&mut self, i: usize) {
+        let Some(o) = self.scene.objects.get(i) else { return };
+        let id = o.id;
+        if self.selection.contains(&id) {
+            if self.active == Some(id) {
+                self.select_remove(i);
+            } else {
+                self.active = Some(id);
+                self.sel_changed();
+            }
+        } else {
+            self.select_add(i);
+        }
+    }
+
+    pub fn select_none(&mut self) {
+        self.selection.clear();
+        self.sel_changed();
+    }
+
+    pub fn select_all(&mut self) {
+        let ids: Vec<u64> = (0..self.scene.objects.len()).filter(|&i| self.scene.is_visible(i)).map(|i| self.scene.objects[i].id).collect();
+        for id in &ids {
+            self.selection.insert(*id);
+        }
+        if self.active.is_none() {
+            self.active = ids.first().copied();
+        }
+        self.sel_changed();
+    }
+
+    pub fn select_invert(&mut self) {
+        let ids: Vec<u64> = (0..self.scene.objects.len()).filter(|&i| self.scene.is_visible(i)).map(|i| self.scene.objects[i].id).collect();
+        for id in ids {
+            if !self.selection.remove(&id) {
+                self.selection.insert(id);
+            }
+        }
+        self.sel_changed();
+    }
+
+    pub fn select_random(&mut self, ratio: f32) {
+        let ids: Vec<u64> = (0..self.scene.objects.len()).filter(|&i| self.scene.is_visible(i)).map(|i| self.scene.objects[i].id).collect();
+        for id in ids {
+            self.rng = self.rng.wrapping_mul(1664525).wrapping_add(1013904223);
+            if ((self.rng >> 8) as f32 / (1u32 << 24) as f32) < ratio {
+                self.selection.insert(id);
+            }
+        }
+        self.sel_changed();
+    }
+
+    pub fn select_children(&mut self) {
+        let mut frontier: Vec<u64> = self.selection.iter().copied().collect();
+        while let Some(id) = frontier.pop() {
+            for c in self.scene.children_of(id) {
+                let cid = self.scene.objects[c].id;
+                if self.selection.insert(cid) {
+                    frontier.push(cid);
+                }
+            }
+        }
+        self.sel_changed();
+    }
+
+    pub fn select_parent(&mut self) {
+        let parents: Vec<u64> = self.selected_indices().iter().filter_map(|&i| self.scene.objects[i].parent).collect();
+        if parents.is_empty() {
+            return;
+        }
+        self.selection.clear();
+        for p in &parents {
+            self.selection.insert(*p);
+        }
+        self.active = parents.first().copied();
+        self.sel_changed();
+    }
+
+    pub fn select_same(&mut self, k: SameKind) {
+        let Some(a) = self.active_index() else { return };
+        let ids: Vec<u64> = {
+            let ao = &self.scene.objects[a];
+            self.scene
+                .objects
+                .iter()
+                .enumerate()
+                .filter(|(i, o)| {
+                    self.scene.is_visible(*i)
+                        && match k {
+                            SameKind::Type => std::mem::discriminant(&o.kind) == std::mem::discriminant(&ao.kind),
+                            SameKind::Collection => o.collection == ao.collection,
+                            SameKind::Material => o.material == ao.material,
+                            SameKind::Linked => (o.link_group.is_some() && o.link_group == ao.link_group) || Arc::ptr_eq(&o.mesh, &ao.mesh),
+                        }
+                })
+                .map(|(_, o)| o.id)
+                .collect()
+        };
+        for id in ids {
+            self.selection.insert(id);
+        }
+        self.sel_changed();
+    }
+
+    // ------------------------------------------------------------------ bounds
+    pub fn selected_bounds(&self) -> Option<Aabb> {
+        let w = self.scene.world_matrices();
+        self.selected_indices().into_iter().filter_map(|i| self.scene.object_world_bounds(i, &w[i])).reduce(Aabb::union)
+    }
+
+    // ------------------------------------------------------------------ adding
+    fn add_object_select(&mut self, mut o: Object) {
+        o.id = self.scene.alloc_id();
+        o.collection = self.active_collection.filter(|c| self.scene.collections.iter().any(|x| x.id == *c));
+        let id = o.id;
+        self.scene.objects.push(o);
+        self.selection.clear();
+        self.selection.insert(id);
+        self.active = Some(id);
+        self.sel_changed();
+    }
+
+    pub fn add_primitive(&mut self, p: Primitive) {
+        self.checkpoint();
+        let mut o = Object::new(self.unique_name(p.name()), p.build());
+        o.translation = self.scene.cursor;
+        o.primitive = Some(p);
+        self.add_object_select(o);
+    }
+
+    /// Add a camera, light or empty.
+    pub fn add_kind(&mut self, kind: ObjectKind) {
+        self.checkpoint();
+        let mut o = Object::new(self.unique_name(kind.default_name()), MeshData::default());
+        o.translation = self.scene.cursor;
+        match &kind {
+            ObjectKind::Camera(_) => {
+                let eye = Vec3::new(4.0, 3.0, 6.0);
+                o.translation = eye;
+                o.rotation = Quat::from_mat4(&Mat4::look_at_rh(eye, Vec3::ZERO, Vec3::Y).inverse());
+            }
+            ObjectKind::Light(l) => match l.kind {
+                LightType::Point => o.translation = Vec3::new(2.0, 3.0, 2.0),
+                LightType::Sun => {
+                    o.translation = Vec3::new(0.0, 4.0, 0.0);
+                    o.rotation = Quat::from_rotation_arc(Vec3::NEG_Z, Vec3::new(-0.4, -0.8, -0.4).normalize());
+                }
+                LightType::Spot => {
+                    o.translation = Vec3::new(2.0, 4.0, 2.0);
+                    o.rotation = Quat::from_rotation_arc(Vec3::NEG_Z, (-o.translation).normalize());
+                }
+            },
+            _ => {}
+        }
+        o.kind = kind;
+        self.add_object_select(o);
+    }
+
+    /// Upright textured quad (faces +Z) with the image's aspect ratio. Handy for sprites / references.
+    pub fn add_image_plane(&mut self, name: &str, tex: TextureData) {
+        self.checkpoint();
+        let aspect = tex.width.max(1) as f32 / tex.height.max(1) as f32;
+        let (hw, hh) = (aspect * 0.5, 0.5);
+        let n = [0.0, 0.0, 1.0];
+        let mesh = MeshData {
+            name: name.to_string(),
+            vertices: vec![
+                Vertex { position: [-hw, hh, 0.0], normal: n, uv: [0.0, 0.0] },
+                Vertex { position: [hw, hh, 0.0], normal: n, uv: [1.0, 0.0] },
+                Vertex { position: [hw, -hh, 0.0], normal: n, uv: [1.0, 1.0] },
+                Vertex { position: [-hw, -hh, 0.0], normal: n, uv: [0.0, 1.0] },
+            ],
+            indices: vec![0, 3, 2, 0, 2, 1],
+            ..Default::default()
+        };
+        let mut texs: Vec<TextureData> = (*self.scene.textures).clone();
+        let ti = texs.len();
+        texs.push(tex);
+        self.scene.textures = Arc::new(texs);
+        let mat = Material {
+            name: name.to_string(),
+            base_color: [1.0, 1.0, 1.0, 1.0],
+            roughness: 1.0,
+            alpha_mode: crate::AlphaMode::Blend,
+            double_sided: true,
+            base_color_tex: Some(ti),
+            ..Material::default()
+        };
+        self.scene.materials.push(mat);
+        let mut o = Object::new(self.unique_name(name), mesh);
+        o.material = Some(self.scene.materials.len() - 1);
+        o.translation = self.scene.cursor + Vec3::new(0.0, 0.5, 0.0);
+        self.add_object_select(o);
+    }
+
+    /// Merge another scene into this one (import).
+    pub fn import_scene(&mut self, other: Scene) {
+        if other.objects.is_empty() {
+            return;
+        }
+        self.checkpoint();
+        let mat_off = self.scene.materials.len();
+        let tex_off = self.scene.textures.len();
+        let mut tex: Vec<_> = (*self.scene.textures).clone();
+        tex.extend(other.textures.iter().cloned());
+        self.scene.textures = Arc::new(tex);
+        for mut m in other.materials {
+            m.offset_textures(tex_off);
+            self.scene.materials.push(m);
+        }
+        let mut new_ids = Vec::new();
+        for mut o in other.objects {
+            o.material = o.material.map(|i| i + mat_off);
+            for g in Arc::make_mut(&mut o.mesh).groups.iter_mut() {
+                g.material = g.material.map(|i| i + mat_off);
+            }
+            o.name = self.unique_name(&o.name);
+            o.id = self.scene.alloc_id();
+            o.parent = None;
+            o.collection = self.active_collection;
+            new_ids.push(o.id);
+            self.scene.objects.push(o);
+        }
+        self.selection = new_ids.iter().copied().collect();
+        self.active = new_ids.last().copied();
+        self.sel_changed();
+    }
+
+    // ------------------------------------------------------------------ delete / duplicate
+    fn remove_objects(&mut self, ids: &HashSet<u64>) {
+        let worlds = self.scene.world_matrices();
+        for i in 0..self.scene.objects.len() {
+            let o = &self.scene.objects[i];
+            if ids.contains(&o.id) {
+                continue;
+            }
+            if let Some(p) = o.parent {
+                if ids.contains(&p) {
+                    let (s, r, t) = worlds[i].to_scale_rotation_translation();
+                    let o = &mut self.scene.objects[i];
+                    o.parent = None;
+                    o.scale = s;
+                    o.rotation = r;
+                    o.translation = t;
+                }
+            }
+        }
+        self.scene.objects.retain(|o| !ids.contains(&o.id));
+        self.selection.retain(|id| !ids.contains(id));
+        if self.active.map_or(false, |a| ids.contains(&a)) {
+            self.active = None;
+        }
+        self.sel_changed();
+    }
+
+    pub fn delete_selected(&mut self) {
+        let ids: HashSet<u64> = self.selection.iter().copied().collect();
+        if ids.is_empty() {
+            return;
+        }
+        self.checkpoint();
+        self.remove_objects(&ids);
+    }
+
+    /// Duplicate the selection (linked = share parametric data). The copies become the selection.
+    pub fn duplicate(&mut self, linked: bool) -> bool {
+        let sel = self.selected_indices();
+        if sel.is_empty() {
+            return false;
+        }
+        self.checkpoint();
+        let active_old = self.active;
+        let mut map: HashMap<u64, u64> = HashMap::new();
+        let mut news: Vec<u64> = Vec::new();
+        for &i in &sel {
+            let mut o = self.scene.objects[i].clone();
+            let old = o.id;
+            if linked {
+                let g = match self.scene.objects[i].link_group {
+                    Some(g) => g,
+                    None => {
+                        let g = self.scene.alloc_id();
+                        self.scene.objects[i].link_group = Some(g);
+                        g
+                    }
+                };
+                o.link_group = Some(g);
+            } else {
+                o.mesh = Arc::new((*o.mesh).clone());
+                o.link_group = None;
+            }
+            o.id = self.scene.alloc_id();
+            o.name = self.unique_name(&o.name);
+            map.insert(old, o.id);
+            news.push(o.id);
+            self.scene.objects.push(o);
+        }
+        for id in &news {
+            if let Some(idx) = self.scene.index_of(*id) {
+                if let Some(p) = self.scene.objects[idx].parent {
+                    if let Some(&np) = map.get(&p) {
+                        self.scene.objects[idx].parent = Some(np);
+                    }
+                }
+            }
+        }
+        self.selection = news.iter().copied().collect();
+        self.active = active_old.and_then(|a| map.get(&a).copied()).or(news.last().copied());
+        self.sel_changed();
+        true
+    }
+
+    pub fn make_single_user(&mut self) {
+        let sel = self.selected_indices();
+        if sel.is_empty() {
+            return;
+        }
+        self.checkpoint();
+        for i in sel {
+            let o = &mut self.scene.objects[i];
+            o.mesh = Arc::new((*o.mesh).clone());
+            o.link_group = None;
+        }
+    }
+
+    // ------------------------------------------------------------------ visibility
+    pub fn hide_selected(&mut self) {
+        let sel = self.selected_indices();
+        if sel.is_empty() {
+            return;
+        }
+        self.checkpoint();
+        for i in sel {
+            self.scene.objects[i].visible = false;
+        }
+        self.selection.clear();
+        self.sel_changed();
+    }
+
+    pub fn hide_unselected(&mut self) {
+        self.checkpoint();
+        for o in self.scene.objects.iter_mut() {
+            if !self.selection.contains(&o.id) {
+                o.visible = false;
+            }
+        }
+    }
+
+    pub fn show_all(&mut self) {
+        self.checkpoint();
+        for o in self.scene.objects.iter_mut() {
+            o.visible = true;
+        }
+        for c in self.scene.collections.iter_mut() {
+            c.visible = true;
+        }
+    }
+
+    // ------------------------------------------------------------------ parenting
+    /// Make `child` a child of `parent` (None = unparent), keeping its world transform.
+    pub fn set_parent_of(&mut self, child: usize, parent: Option<u64>) -> Result<(), String> {
+        if let Some(pid) = parent {
+            let Some(pi) = self.scene.index_of(pid) else { return Err("Parent not found".into()) };
+            if pi == child || self.scene.is_ancestor(child, pi) {
+                return Err("That would create a parent loop".into());
+            }
+        }
+        self.checkpoint();
+        let worlds = self.scene.world_matrices();
+        let w = worlds[child];
+        self.scene.objects[child].parent = parent;
+        self.scene.set_world(child, w, &worlds);
+        Ok(())
+    }
+
+    /// Selected objects become children of the active object.
+    pub fn parent_set(&mut self) -> Result<(), String> {
+        let Some(ai) = self.active_index() else { return Err("No active object (select the parent last)".into()) };
+        let children: Vec<usize> = self.selected_indices().into_iter().filter(|&i| i != ai).collect();
+        if children.is_empty() {
+            return Err("Select the children first, then the parent last (active)".into());
+        }
+        self.checkpoint();
+        let worlds = self.scene.world_matrices();
+        let pid = self.scene.objects[ai].id;
+        let mut n = 0;
+        for ci in children {
+            if self.scene.is_ancestor(ci, ai) {
+                continue; // would create a loop
+            }
+            let w = worlds[ci];
+            self.scene.objects[ci].parent = Some(pid);
+            self.scene.set_world(ci, w, &worlds);
+            n += 1;
+        }
+        if n == 0 {
+            return Err("Nothing parented (parent loop)".into());
+        }
+        Ok(())
+    }
+
+    pub fn parent_clear(&mut self, keep_transform: bool) {
+        let sel: Vec<usize> = self.selected_indices().into_iter().filter(|&i| self.scene.objects[i].parent.is_some()).collect();
+        if sel.is_empty() {
+            return;
+        }
+        self.checkpoint();
+        let worlds = self.scene.world_matrices();
+        for i in sel {
+            self.scene.objects[i].parent = None;
+            if keep_transform {
+                self.scene.set_world(i, worlds[i], &worlds);
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------ collections
+    pub fn new_collection(&mut self) -> u64 {
+        self.checkpoint();
+        let mut n = self.scene.collections.len() + 1;
+        let name = loop {
+            let cand = format!("Collection {n}");
+            if !self.scene.collections.iter().any(|c| c.name == cand) {
+                break cand;
+            }
+            n += 1;
+        };
+        let id = self.scene.alloc_id();
+        self.scene.collections.push(Collection { id, name, visible: true });
+        self.active_collection = Some(id);
+        id
+    }
+
+    pub fn delete_collection(&mut self, id: u64) {
+        self.checkpoint();
+        for o in self.scene.objects.iter_mut() {
+            if o.collection == Some(id) {
+                o.collection = None;
+            }
+        }
+        self.scene.collections.retain(|c| c.id != id);
+        if self.active_collection == Some(id) {
+            self.active_collection = None;
+        }
+    }
+
+    pub fn move_selected_to_collection(&mut self, c: Option<u64>) {
+        let sel = self.selected_indices();
+        if sel.is_empty() {
+            return;
+        }
+        self.checkpoint();
+        for i in sel {
+            self.scene.objects[i].collection = c;
+        }
+    }
+
+    // ------------------------------------------------------------------ transforms
+    pub fn clear_transform(&mut self, loc: bool, rot: bool, scale: bool) {
+        let sel = self.selected_indices();
+        if sel.is_empty() {
+            return;
+        }
+        self.checkpoint();
+        for i in sel {
+            let o = &mut self.scene.objects[i];
+            if loc {
+                o.translation = Vec3::ZERO;
+            }
+            if rot {
+                o.rotation = Quat::IDENTITY;
+            }
+            if scale {
+                o.scale = Vec3::ONE;
+            }
+        }
+    }
+
+    /// Keep the world transform of `i`'s children after `i` changed (old worlds given).
+    fn keep_children_world(&mut self, i: usize, old_worlds: &[Mat4]) {
+        let nw = self.scene.world_matrices();
+        let id = self.scene.objects[i].id;
+        for c in self.scene.children_of(id) {
+            self.scene.set_world(c, old_worlds[c], &nw);
+        }
+    }
+
+    /// Bake location / rotation / scale into the mesh (the object keeps looking the same).
+    pub fn apply_transform(&mut self, loc: bool, rot: bool, scale: bool) {
+        let sel: Vec<usize> = self.selected_indices().into_iter().filter(|&i| self.scene.objects[i].kind.is_mesh()).collect();
+        if sel.is_empty() {
+            return;
+        }
+        self.checkpoint();
+        for i in sel {
+            let old_worlds = self.scene.world_matrices();
+            let o = &self.scene.objects[i];
+            let old_local = o.matrix();
+            let (mut t, mut r, mut s) = (o.translation, o.rotation, o.scale);
+            if loc {
+                t = Vec3::ZERO;
+            }
+            if rot {
+                r = Quat::IDENTITY;
+            }
+            if scale {
+                s = Vec3::ONE;
+            }
+            let new_local = Mat4::from_scale_rotation_translation(s, r, t);
+            let vm = new_local.inverse() * old_local;
+            let mesh = Arc::new(o.mesh.transformed(vm));
+            let o = &mut self.scene.objects[i];
+            o.mesh = mesh;
+            o.translation = t;
+            o.rotation = r;
+            o.scale = s;
+            o.primitive = None;
+            o.link_group = None;
+            self.keep_children_world(i, &old_worlds);
+        }
+    }
+
+    /// Move the object origin (the mesh stays where it is in the world).
+    pub fn set_origin(&mut self, mode: OriginMode) {
+        let sel: Vec<usize> = self.selected_indices().into_iter().filter(|&i| self.scene.objects[i].kind.is_mesh()).collect();
+        if sel.is_empty() {
+            return;
+        }
+        self.checkpoint();
+        for i in sel {
+            let old_worlds = self.scene.world_matrices();
+            let o = &self.scene.objects[i];
+            let off = match mode {
+                OriginMode::Geometry => o.mesh.bounds().map_or(Vec3::ZERO, |b| b.center()),
+                OriginMode::Median => o.mesh.centroid(),
+                OriginMode::Cursor => {
+                    let w = old_worlds[i];
+                    if w.determinant().abs() < 1e-12 { Vec3::ZERO } else { w.inverse().transform_point3(self.scene.cursor) }
+                }
+            };
+            let new_t = o.matrix().transform_point3(off);
+            let mesh = Arc::new(o.mesh.transformed(Mat4::from_translation(-off)));
+            let o = &mut self.scene.objects[i];
+            o.mesh = mesh;
+            o.translation = new_t;
+            o.primitive = None;
+            o.link_group = None;
+            self.keep_children_world(i, &old_worlds);
+        }
+    }
+
+    /// Move the mesh so its bounding-box center sits on the object origin (the object moves visually).
+    pub fn geometry_to_origin(&mut self) {
+        let sel: Vec<usize> = self.selected_indices().into_iter().filter(|&i| self.scene.objects[i].kind.is_mesh()).collect();
+        if sel.is_empty() {
+            return;
+        }
+        self.checkpoint();
+        for i in sel {
+            let o = &mut self.scene.objects[i];
+            let c = o.mesh.bounds().map_or(Vec3::ZERO, |b| b.center());
+            o.mesh = Arc::new(o.mesh.transformed(Mat4::from_translation(-c)));
+            o.primitive = None;
+            o.link_group = None;
+        }
+    }
+
+    // ------------------------------------------------------------------ align / snap
+    pub fn align(&mut self, axis: usize, mode: AlignMode, to: AlignTo) {
+        let sel = self.selected_indices();
+        if sel.is_empty() {
+            return;
+        }
+        let worlds = self.scene.world_matrices();
+        let target: Option<(f32, f32, f32)> = {
+            let b = |i: usize| self.scene.object_world_bounds(i, &worlds[i]);
+            match to {
+                AlignTo::Active => self.active_index().and_then(b).map(|bb| (bb.min[axis], bb.center()[axis], bb.max[axis])),
+                AlignTo::Selection => sel.iter().filter_map(|&i| b(i)).reduce(Aabb::union).map(|bb| (bb.min[axis], bb.center()[axis], bb.max[axis])),
+                AlignTo::Cursor => {
+                    let c = self.scene.cursor[axis];
+                    Some((c, c, c))
+                }
+            }
+        };
+        let Some((tmin, tc, tmax)) = target else { return };
+        self.checkpoint();
+        for i in self.scene.roots(&sel) {
+            let Some(bb) = self.scene.object_world_bounds(i, &worlds[i]) else { continue };
+            let delta = match mode {
+                AlignMode::Min => tmin - bb.min[axis],
+                AlignMode::Center => tc - bb.center()[axis],
+                AlignMode::Max => tmax - bb.max[axis],
+            };
+            let mut d = Vec3::ZERO;
+            d[axis] = delta;
+            self.scene.set_world(i, Mat4::from_translation(d) * worlds[i], &worlds);
+        }
+    }
+
+    fn move_roots_to(&mut self, target: Vec3, skip: Option<usize>) {
+        let sel: Vec<usize> = self.selected_indices().into_iter().filter(|&i| Some(i) != skip).collect();
+        if sel.is_empty() {
+            return;
+        }
+        self.checkpoint();
+        let worlds = self.scene.world_matrices();
+        for i in self.scene.roots(&sel) {
+            let mut w = worlds[i];
+            w.w_axis = target.extend(1.0);
+            self.scene.set_world(i, w, &worlds);
+        }
+    }
+
+    pub fn selection_to_cursor(&mut self) {
+        let c = self.scene.cursor;
+        self.move_roots_to(c, None);
+    }
+
+    pub fn selection_to_active(&mut self) {
+        let Some(a) = self.active_index() else { return };
+        let t = self.scene.world_matrices()[a].w_axis.truncate();
+        self.move_roots_to(t, Some(a));
+    }
+
+    pub fn cursor_to_selection(&mut self) {
+        let sel = self.selected_indices();
+        if sel.is_empty() {
+            return;
+        }
+        let w = self.scene.world_matrices();
+        let sum: Vec3 = sel.iter().map(|&i| w[i].w_axis.truncate()).sum();
+        self.scene.cursor = sum / sel.len() as f32;
+        self.sel_changed();
+    }
+
+    pub fn cursor_to_active(&mut self) {
+        if let Some(a) = self.active_index() {
+            self.scene.cursor = self.scene.world_matrices()[a].w_axis.truncate();
+            self.sel_changed();
+        }
+    }
+
+    pub fn cursor_to_origin(&mut self) {
+        self.scene.cursor = Vec3::ZERO;
+        self.sel_changed();
+    }
+
+    // ------------------------------------------------------------------ join / separate
+    /// Merge the selected meshes into the active mesh object.
+    pub fn join(&mut self) -> Result<(), String> {
+        let Some(ai) = self.active_index() else { return Err("No active object".into()) };
+        if !self.scene.objects[ai].kind.is_mesh() {
+            return Err("The active object must be a mesh".into());
+        }
+        let others: Vec<usize> = self.selected_indices().into_iter().filter(|&i| i != ai && self.scene.objects[i].kind.is_mesh()).collect();
+        if others.is_empty() {
+            return Err("Select at least two mesh objects (active one last)".into());
+        }
+        self.checkpoint();
+        let worlds = self.scene.world_matrices();
+        let inv_a = if worlds[ai].determinant().abs() < 1e-12 { Mat4::IDENTITY } else { worlds[ai].inverse() };
+        let mut dst = (*self.scene.objects[ai].mesh).clone();
+        dst.ensure_groups(self.scene.objects[ai].material);
+        for &i in &others {
+            let o = &self.scene.objects[i];
+            dst.append(&o.mesh, inv_a * worlds[i], o.material);
+        }
+        dst.merge_adjacent_groups();
+        let ids: HashSet<u64> = others.iter().map(|&i| self.scene.objects[i].id).collect();
+        {
+            let a = &mut self.scene.objects[ai];
+            a.mesh = Arc::new(dst);
+            a.primitive = None;
+            a.link_group = None;
+        }
+        self.remove_objects(&ids);
+        Ok(())
+    }
+
+    fn add_split_copy(&mut self, src: usize, mesh: MeshData, material: Option<usize>) -> u64 {
+        let mut n = self.scene.objects[src].clone();
+        n.id = self.scene.alloc_id();
+        n.name = self.unique_name(&mesh.name);
+        n.mesh = Arc::new(mesh);
+        n.material = material;
+        n.primitive = None;
+        n.link_group = None;
+        n.parent = self.scene.objects[src].parent;
+        let id = n.id;
+        self.scene.objects.push(n);
+        id
+    }
+
+    /// Split each selected mesh into its disconnected pieces.
+    pub fn separate_loose(&mut self) -> usize {
+        let sel: Vec<usize> = self.selected_indices().into_iter().filter(|&i| self.scene.objects[i].kind.is_mesh()).collect();
+        let jobs: Vec<(usize, Vec<MeshData>)> = sel.iter().map(|&i| (i, self.scene.objects[i].mesh.loose_parts())).filter(|(_, p)| p.len() > 1).collect();
+        if jobs.is_empty() {
+            return 0;
+        }
+        self.checkpoint();
+        let mut count = 0;
+        for (i, parts) in jobs {
+            let mat = self.scene.objects[i].material;
+            let mut it = parts.into_iter();
+            let first = it.next().unwrap();
+            self.scene.objects[i].mesh = Arc::new(first);
+            self.scene.objects[i].primitive = None;
+            self.scene.objects[i].link_group = None;
+            for p in it {
+                let id = self.add_split_copy(i, p, mat);
+                self.selection.insert(id);
+                count += 1;
+            }
+        }
+        self.sel_changed();
+        count
+    }
+
+    /// Split each selected multi-material mesh into one object per material.
+    pub fn separate_material(&mut self) -> usize {
+        let sel: Vec<usize> = self.selected_indices().into_iter().filter(|&i| self.scene.objects[i].kind.is_mesh() && !self.scene.objects[i].mesh.groups.is_empty()).collect();
+        let jobs: Vec<(usize, Vec<(Option<usize>, MeshData)>)> =
+            sel.iter().map(|&i| (i, self.scene.objects[i].mesh.split_by_material())).filter(|(_, p)| p.len() > 1).collect();
+        if jobs.is_empty() {
+            // single material: just flatten groups
+            return 0;
+        }
+        self.checkpoint();
+        let mut count = 0;
+        for (i, parts) in jobs {
+            let mut it = parts.into_iter();
+            let (m0, first) = it.next().unwrap();
+            {
+                let o = &mut self.scene.objects[i];
+                o.mesh = Arc::new(first);
+                o.material = m0;
+                o.primitive = None;
+                o.link_group = None;
+            }
+            for (m, p) in it {
+                let id = self.add_split_copy(i, p, m);
+                self.selection.insert(id);
+                count += 1;
+            }
+        }
+        self.sel_changed();
+        count
+    }
+}
+
+impl Default for Document {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn undo_redo_add_delete() {
+        let mut d = Document::new();
+        assert_eq!(d.scene.objects.len(), 1);
+        d.add_primitive(Primitive::Sphere { radius: 0.5, segments: 8, rings: 4 });
+        assert_eq!(d.scene.objects.len(), 2);
+        d.delete_selected();
+        assert_eq!(d.scene.objects.len(), 1);
+        assert!(d.undo());
+        assert_eq!(d.scene.objects.len(), 2);
+        assert!(d.redo());
+        assert_eq!(d.scene.objects.len(), 1);
+    }
+
+    #[test]
+    fn unique_names() {
+        let mut d = Document::new();
+        d.add_primitive(Primitive::Cube { size: 1.0 });
+        assert_eq!(d.scene.objects[1].name, "Cube.001");
+    }
+
+    #[test]
+    fn parent_keeps_world_position() {
+        let mut d = Document::new();
+        d.add_primitive(Primitive::Cube { size: 1.0 });
+        d.scene.objects[0].translation = Vec3::new(5.0, 0.0, 0.0);
+        d.scene.objects[1].translation = Vec3::new(0.0, 3.0, 0.0);
+        let child = d.scene.objects[1].id;
+        d.select_only(1);
+        let parent = d.scene.objects[0].id;
+        d.selection.insert(parent);
+        d.active = Some(parent);
+        d.parent_set().unwrap();
+        let w = d.scene.world_matrices();
+        let ci = d.scene.index_of(child).unwrap();
+        assert!((w[ci].w_axis.y - 3.0).abs() < 1e-4 && w[ci].w_axis.x.abs() < 1e-4);
+    }
+
+    #[test]
+    fn join_and_separate_roundtrip() {
+        let mut d = Document::new();
+        d.add_primitive(Primitive::Sphere { radius: 0.3, segments: 8, rings: 4 });
+        d.scene.objects[1].translation = Vec3::new(3.0, 0.0, 0.0);
+        d.select_all();
+        d.join().unwrap();
+        assert_eq!(d.scene.objects.len(), 1);
+        d.select_all();
+        assert_eq!(d.separate_loose(), 1);
+        assert_eq!(d.scene.objects.len(), 2);
+    }
+}
