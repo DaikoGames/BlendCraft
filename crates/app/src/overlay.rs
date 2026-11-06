@@ -54,7 +54,7 @@ pub fn draw(ctx: &egui::Context, cam: &OrbitCamera, rect: egui::Rect, doc: &Docu
             } else {
                 Color32::from_rgb(190, 190, 205)
             };
-            let stroke = Stroke::new(if sel { 2.0 } else { 1.4 }, col);
+            let stroke = Stroke::new(if sel { 2.0_f32 } else { 1.4_f32 }, col);
             for (a, b) in helper_lines(o, &worlds[i]) {
                 if let Some((p0, p1)) = clip_project(m, vp, a, b) {
                     painter.line_segment([pt(p0), pt(p1)], stroke);
@@ -66,15 +66,15 @@ pub fn draw(ctx: &egui::Context, cam: &OrbitCamera, rect: egui::Rect, doc: &Docu
     // 3D cursor
     if let Some(c) = project_px(cam, vp, doc.scene.cursor) {
         let c = pt(c);
-        painter.circle_stroke(c, 10.0, Stroke::new(3.0, Color32::WHITE));
-        painter.circle_stroke(c, 10.0, Stroke::new(1.5, Color32::from_rgb(230, 40, 40)));
+        painter.circle_stroke(c, 10.0, Stroke::new(3.0_f32, Color32::WHITE));
+        painter.circle_stroke(c, 10.0, Stroke::new(1.5_f32, Color32::from_rgb(230, 40, 40)));
         for (dx, dy) in [(1.0, 0.0), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0)] {
-            painter.line_segment([c + egui::vec2(dx * 6.0, dy * 6.0), c + egui::vec2(dx * 15.0, dy * 15.0)], Stroke::new(1.5, Color32::WHITE));
+            painter.line_segment([c + egui::vec2(dx * 6.0, dy * 6.0), c + egui::vec2(dx * 15.0, dy * 15.0)], Stroke::new(1.5_f32, Color32::WHITE));
         }
     }
 
     // selection shapes
-    let sel_stroke = Stroke::new(1.5, Color32::from_rgb(255, 255, 255));
+    let sel_stroke = Stroke::new(1.5_f32, Color32::from_rgb(255, 255, 255));
     match extra.shape {
         Some(SelShape::Box { a, b }) => {
             let r = egui::Rect::from_two_pos(pt(*a), pt(*b));

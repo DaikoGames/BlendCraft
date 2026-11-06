@@ -874,6 +874,45 @@ impl Document {
 
     // ------------------------------------------------------------------ join / separate
     /// Merge the selected meshes into the active mesh object.
+
+    /// Shade Smooth — average normals so curved meshes look smooth.
+    pub fn shade_smooth_selected(&mut self) {
+        let sel: Vec<usize> = self.selected_indices();
+        if sel.is_empty() {
+            return;
+        }
+        self.checkpoint();
+        for i in sel {
+            if !self.scene.objects[i].kind.is_mesh() {
+                continue;
+            }
+            let mut mesh = (*self.scene.objects[i].mesh).clone();
+            mesh.shade_smooth();
+            self.scene.objects[i].mesh = std::sync::Arc::new(mesh);
+            self.scene.objects[i].primitive = None; // baked shading
+        }
+        self.touch();
+    }
+
+    /// Shade Flat — per-face normals (faceted look).
+    pub fn shade_flat_selected(&mut self) {
+        let sel: Vec<usize> = self.selected_indices();
+        if sel.is_empty() {
+            return;
+        }
+        self.checkpoint();
+        for i in sel {
+            if !self.scene.objects[i].kind.is_mesh() {
+                continue;
+            }
+            let mut mesh = (*self.scene.objects[i].mesh).clone();
+            mesh.shade_flat();
+            self.scene.objects[i].mesh = std::sync::Arc::new(mesh);
+            self.scene.objects[i].primitive = None;
+        }
+        self.touch();
+    }
+
     pub fn join(&mut self) -> Result<(), String> {
         let Some(ai) = self.active_index() else { return Err("No active object".into()) };
         if !self.scene.objects[ai].kind.is_mesh() {

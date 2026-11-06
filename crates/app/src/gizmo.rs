@@ -201,7 +201,7 @@ impl Gizmo {
         for a in 0..3 {
             let on = active == Some(a);
             let col = if on { ACTIVE } else { COLORS[a] };
-            let stroke = Stroke::new(if on { 3.5 } else { 2.5 }, col);
+            let stroke = Stroke::new(if on { 3.5_f32 } else { 2.5_f32 }, col);
             let dir = orient * AXES[a];
             match ts.tool {
                 Tool::Move | Tool::Scale => {

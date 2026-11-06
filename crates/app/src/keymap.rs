@@ -59,6 +59,8 @@ pub enum Action {
     OpenMoveToCollection,
     MoveToCollection(Option<u64>),
     Join,
+    ShadeSmooth,
+    ShadeFlat,
     SeparateLoose,
     SeparateMaterial,
     SetOrigin(OriginMode),
@@ -187,6 +189,8 @@ pub fn bindings() -> Vec<Binding> {
     b("Object", "Move to collection", "", K::KeyM, A::OpenMoveToCollection);
     b("Object", "New collection", "c", K::KeyG, A::NewCollection);
     b("Object", "Join selected meshes", "c", K::KeyJ, A::Join);
+    b("Object", "Shade Smooth", "", K::F3, A::ShadeSmooth);
+    b("Object", "Shade Flat", "s", K::F3, A::ShadeFlat);
 
     b("View", "Frame selected", "", K::KeyF, A::FrameSelected);
     b("View", "Frame all", "", K::Home, A::FrameAll);

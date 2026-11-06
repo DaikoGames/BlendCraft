@@ -94,6 +94,76 @@ impl MeshData {
             v.normal = n.normalize_or_zero().to_array();
         }
     }
+
+    /// Weld vertices that share the same position, then average normals.
+    /// Makes spheres/cylinders look smooth even if they were built with split verts.
+    pub fn shade_smooth(&mut self) {
+        if self.vertices.is_empty() || self.indices.is_empty() {
+            return;
+        }
+        // Quantize positions so "same" points weld reliably
+        let key = |p: [f32; 3]| -> (i32, i32, i32) {
+            (
+                (p[0] * 1_000_000.0).round() as i32,
+                (p[1] * 1_000_000.0).round() as i32,
+                (p[2] * 1_000_000.0).round() as i32,
+            )
+        };
+        let mut map: std::collections::HashMap<(i32, i32, i32), u32> = std::collections::HashMap::new();
+        let mut new_verts: Vec<Vertex> = Vec::new();
+        let mut remap = vec![0u32; self.vertices.len()];
+        for (i, v) in self.vertices.iter().enumerate() {
+            let k = key(v.position);
+            if let Some(&ni) = map.get(&k) {
+                remap[i] = ni;
+            } else {
+                let ni = new_verts.len() as u32;
+                map.insert(k, ni);
+                new_verts.push(*v);
+                remap[i] = ni;
+            }
+        }
+        for idx in &mut self.indices {
+            *idx = remap[*idx as usize];
+        }
+        self.vertices = new_verts;
+        self.compute_normals();
+    }
+
+    /// Flat shading: each triangle gets its own vertices with the face normal.
+    pub fn shade_flat(&mut self) {
+        if self.indices.is_empty() {
+            return;
+        }
+        let mut new_verts = Vec::with_capacity(self.indices.len());
+        let mut new_idx = Vec::with_capacity(self.indices.len());
+        for tri in self.indices.chunks_exact(3) {
+            let (ia, ib, ic) = (tri[0] as usize, tri[1] as usize, tri[2] as usize);
+            let pa = Vec3::from(self.vertices[ia].position);
+            let pb = Vec3::from(self.vertices[ib].position);
+            let pc = Vec3::from(self.vertices[ic].position);
+            let n = (pb - pa).cross(pc - pa).normalize_or_zero().to_array();
+            let base = new_verts.len() as u32;
+            for &src in &[ia, ib, ic] {
+                let mut v = self.vertices[src];
+                v.normal = n;
+                new_verts.push(v);
+            }
+            new_idx.extend_from_slice(&[base, base + 1, base + 2]);
+        }
+        self.vertices = new_verts;
+        self.indices = new_idx;
+        // Rebuild groups as one group if needed
+        if !self.groups.is_empty() {
+            let mat = self.groups[0].material;
+            self.groups.clear();
+            self.groups.push(MeshGroup {
+                first_index: 0,
+                index_count: self.indices.len() as u32,
+                material: mat,
+            });
+        }
+    }
 }
 
 impl MeshData {

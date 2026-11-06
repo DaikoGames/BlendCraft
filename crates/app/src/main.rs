@@ -593,6 +593,14 @@ impl App {
                 Ok(()) => self.status("Joined meshes"),
                 Err(e) => self.status(e),
             },
+            A::ShadeSmooth => {
+                self.doc.shade_smooth_selected();
+                self.status("Shade Smooth");
+            }
+            A::ShadeFlat => {
+                self.doc.shade_flat_selected();
+                self.status("Shade Flat");
+            }
             A::SeparateLoose => {
                 let n = self.doc.separate_loose();
                 self.status(if n == 0 { "Nothing to separate (mesh is one piece)".to_string() } else { format!("Separated {n} new object(s)") });

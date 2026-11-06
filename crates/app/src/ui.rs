@@ -322,6 +322,10 @@ fn menu_bar(ui: &mut egui::Ui, doc: &mut Document, settings: &mut ViewSettings, 
             });
             ui.separator();
             mi(ui, actions, b, "Join", Action::Join, has_sel);
+            ui.separator();
+            mi(ui, actions, b, "Shade Smooth", Action::ShadeSmooth, has_sel);
+            mi(ui, actions, b, "Shade Flat", Action::ShadeFlat, has_sel);
+            ui.separator();
             ui.menu_button("Separate", |ui| {
                 mi(ui, actions, b, "By Loose Parts", Action::SeparateLoose, has_sel);
                 mi(ui, actions, b, "By Material", Action::SeparateMaterial, has_sel);

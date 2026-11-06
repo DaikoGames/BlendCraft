@@ -71,8 +71,8 @@ fn finish_color(c: vec3<f32>) -> vec3<f32> {
     return tonemap_aces(c * g.env.x);
 }
 
-// UNIVERSAL RULE (every object, every contact):
-// Light does not pass through geometry. 1 = lit, 0 = blocked.
+// UNIVERSAL RULE: light does not pass through geometry (1 = lit, 0 = blocked).
+// Soft PCF so round meshes don't show triangular shadow edges.
 fn sample_shadow(world: vec3<f32>, n: vec3<f32>, light_dir: vec3<f32>) -> f32 {
     let ndotl = max(dot(n, light_dir), 0.0);
     if (ndotl <= 0.0) {
@@ -88,29 +88,35 @@ fn sample_shadow(world: vec3<f32>, n: vec3<f32>, light_dir: vec3<f32>) -> f32 {
     var outside = 1.0;
     if (shadow_idx >= 0) {
         let t = g.lights[u32(shadow_idx)].pos_type.w;
-        // Spot: outside beam is dark. Point/Sun: outside map stays lit.
-        if (t > 1.5) { outside = 0.0; }
+        if (t > 1.5) { outside = 0.0; } // spot outside beam
     }
     if (uv.x <= 0.0 || uv.x >= 1.0 || uv.y <= 0.0 || uv.y >= 1.0 || z <= 0.0 || z >= 1.0) {
         return outside;
     }
 
-    // Minimal bias — same for every receiver, no per-object hacks
-    let bias = 0.0002 + 0.001 * (1.0 - ndotl);
+    // Gentle slope bias — enough against acne, low enough for soft contact
+    let bias = 0.0004 + 0.0025 * (1.0 - ndotl);
     let ref_z = clamp(z - bias, 0.0, 0.999);
 
-    // Small PCF for stable edges, then harden so contact leaks die
+    // Softness from UI (opts.w = 1 + softness); keep a visible penumbra on curves
+    let softness = max(g.opts.w - 1.0, 0.75);
     let texel = 1.0 / 4096.0;
-    let radius = 0.4 * texel;
+    // Wider kernel = softer silhouette (hides triangle edges on spheres/capsules)
+    let radius = (1.25 + softness * 1.75) * texel;
+
+    // 5x5 PCF with gaussian-ish weights
     var sum = 0.0;
-    for (var dy = -1; dy <= 1; dy = dy + 1) {
-        for (var dx = -1; dx <= 1; dx = dx + 1) {
-            let off = vec2<f32>(f32(dx), f32(dy)) * radius;
-            sum += textureSampleCompare(shadow_map, shadow_samp, uv + off, ref_z);
+    var wsum = 0.0;
+    for (var dy = -2; dy <= 2; dy = dy + 1) {
+        for (var dx = -2; dx <= 2; dx = dx + 1) {
+            let fx = f32(dx);
+            let fy = f32(dy);
+            // Center-weighted disc
+            let w = exp(-0.35 * (fx * fx + fy * fy));
+            let off = vec2<f32>(fx, fy) * radius;
+            sum += textureSampleCompare(shadow_map, shadow_samp, uv + off, ref_z) * w;
+            wsum += w;
         }
     }
-    var s = sum / 9.0;
-    // Crush partial samples at contacts (universal, all objects)
-    s = s * s * s;
-    return s;
+    return sum / wsum;
 }

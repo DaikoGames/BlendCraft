@@ -131,6 +131,22 @@ impl Primitive {
         };
         m.name = self.name().into();
         fix_winding(&mut m);
+        // Curved primitives default to smooth shading
+        match self {
+            Primitive::Sphere { .. }
+            | Primitive::IcoSphere { .. }
+            | Primitive::Cylinder { .. }
+            | Primitive::Cone { .. }
+            | Primitive::Torus { .. }
+            | Primitive::Capsule { .. }
+            | Primitive::Monkey { .. }
+            | Primitive::Metaball { .. }
+            | Primitive::Tube { .. }
+            | Primitive::CurveBezier { .. }
+            | Primitive::CurveCircle { .. }
+            | Primitive::CurvePath { .. } => m.shade_smooth(),
+            _ => {}
+        }
         m
     }
 }
