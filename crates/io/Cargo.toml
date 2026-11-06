@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+getrandom = { version = "0.3.4", features = ["wasm_js"] }
 forge-core.workspace = true
 glam.workspace = true
 bytemuck.workspace = true
