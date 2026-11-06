@@ -1,5 +1,14 @@
 # BlendCraft
 
+BlendCraft is an open-source clone of Blender, written from scratch in Rust.
+It is an independent project: it contains no Blender source code or artwork, and it is
+not affiliated with or endorsed by the Blender Foundation. "Blender" is a trademark of
+the Blender Foundation.
+
+BlendCraft is early and incomplete. If you want the real, mature 3D suite,
+please visit and support the original at https://www.blender.org.
+
+
 Rust 3D suite for game assets (formerly Forge3D).
 
 - Step 1: workspace, viewport, glTF viewer
