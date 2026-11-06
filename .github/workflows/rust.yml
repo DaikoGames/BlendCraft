@@ -1,30 +1,45 @@
-# BlendCraft — multi-platform builds
-# Triggers on push/PR to main and on manual run.
+# BlendCraft - multi-platform builds
+# Runs on push / PR to main (or master), on manual run, and attaches binaries to tagged releases (v*).
 name: Build
 
 on:
   push:
     branches: [main, master]
+    tags: ["v*"]
   pull_request:
     branches: [main, master]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
-  RUSTFLAGS: -Dwarnings
+  CARGO_INCREMENTAL: 0
+  # Change these two lines if you rename the crate / binary in Cargo.toml.
+  PKG: forge-app
+  BIN: forge3d
+  # NOTE: do NOT set RUSTFLAGS=-Dwarnings here. It turns every compiler warning into an error
+  # (also in `cargo install` of build tools) and breaks the build.
 
 jobs:
   # ---------------------------------------------------------------------------
-  # Native desktop targets (host OS = target OS where possible)
+  # Native desktop builds
   # ---------------------------------------------------------------------------
   desktop:
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
+    # Targets marked experimental may fail without turning the whole workflow red.
+    continue-on-error: ${{ matrix.experimental == true }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          # Linux
+          # ---- Linux
           - name: Linux x64
             os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
@@ -34,18 +49,21 @@ jobs:
             target: aarch64-unknown-linux-gnu
             artifact: blendcraft-linux-arm64
             cross: true
+            experimental: true
           - name: Linux x86
             os: ubuntu-latest
             target: i686-unknown-linux-gnu
             artifact: blendcraft-linux-x86
             cross: true
+            experimental: true
           - name: Linux ARMv7
             os: ubuntu-latest
             target: armv7-unknown-linux-gnueabihf
             artifact: blendcraft-linux-armv7
             cross: true
+            experimental: true
 
-          # Windows
+          # ---- Windows
           - name: Windows x64
             os: windows-latest
             target: x86_64-pc-windows-msvc
@@ -54,15 +72,17 @@ jobs:
             os: windows-latest
             target: aarch64-pc-windows-msvc
             artifact: blendcraft-windows-arm64
-            cross: true
+            experimental: true
           - name: Windows x86
             os: windows-latest
             target: i686-pc-windows-msvc
             artifact: blendcraft-windows-x86
+            experimental: true
 
-          # macOS
+          # ---- macOS (both built on Apple Silicon runners; the Intel build is cross-compiled,
+          #      because the old macos-13 Intel runner image has been retired)
           - name: macOS x64 (Intel)
-            os: macos-13
+            os: macos-14
             target: x86_64-apple-darwin
             artifact: blendcraft-macos-x64
           - name: macOS ARM64 (Apple Silicon)
@@ -79,41 +99,46 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
       - name: Linux dependencies (native)
         if: runner.os == 'Linux' && matrix.cross != true
         run: |
           sudo apt-get update
-          sudo apt-get install -y \
+          sudo apt-get install -y pkg-config \
             libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev \
-            libxrandr-dev libxi-dev libgl1-mesa-dev libasound2-dev
+            libxrandr-dev libxi-dev libgl1-mesa-dev
 
-      - name: Install cross (for cross-compiles)
+      - name: Install cross (prebuilt)
         if: matrix.cross == true
-        run: cargo install cross --git https://github.com/cross-rs/cross
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross
 
       - name: Build (native)
         if: matrix.cross != true
-        run: cargo build --release -p forge-app --target ${{ matrix.target }}
+        run: cargo build --release -p ${{ env.PKG }} --target ${{ matrix.target }}
 
       - name: Build (cross)
         if: matrix.cross == true
-        run: cross build --release -p forge-app --target ${{ matrix.target }}
+        run: cross build --release -p ${{ env.PKG }} --target ${{ matrix.target }}
 
-      - name: Stage artifact (Unix)
+      - name: Stage artifact (Linux / macOS)
         if: runner.os != 'Windows'
         run: |
           mkdir -p dist
-          BIN="target/${{ matrix.target }}/release/forge3d"
-          cp "$BIN" "dist/${{ matrix.artifact }}"
+          cp "target/${{ matrix.target }}/release/${{ env.BIN }}" "dist/${{ matrix.artifact }}"
           chmod +x "dist/${{ matrix.artifact }}"
-          # Universal binary helper note for macOS is optional later
 
       - name: Stage artifact (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path dist | Out-Null
-          Copy-Item "target/${{ matrix.target }}/release/forge3d.exe" "dist/${{ matrix.artifact }}.exe"
+          Copy-Item "target/${{ matrix.target }}/release/${{ env.BIN }}.exe" "dist/${{ matrix.artifact }}.exe"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -123,11 +148,26 @@ jobs:
           if-no-files-found: error
 
   # ---------------------------------------------------------------------------
-  # FreeBSD (VM via vmactions)
+  # Unit tests (informational: a failing test does not block the binaries)
+  # ---------------------------------------------------------------------------
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run tests (core, io)
+        run: cargo test -p forge-core -p forge-io
+
+  # ---------------------------------------------------------------------------
+  # FreeBSD (VM). Experimental: reported but never fails the workflow.
   # ---------------------------------------------------------------------------
   freebsd:
     name: FreeBSD x64
     runs-on: ubuntu-latest
+    continue-on-error: true
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -135,21 +175,15 @@ jobs:
       - name: Build on FreeBSD
         uses: vmactions/freebsd-vm@v1
         with:
-          release: "14.1"
+          release: "14.3"
           usesh: true
+          envs: "PKG BIN"
           prepare: |
             pkg install -y rust pkgconf libxkbcommon wayland libX11 libXcursor libXrandr libXi mesa-libs
           run: |
-            rustc --version || true
-            # Install rustup if the image only has a minimal toolchain
-            if ! command -v cargo >/dev/null 2>&1; then
-              fetch -o /tmp/rustup.sh https://sh.rustup.rs
-              sh /tmp/rustup.sh -y
-              . "$HOME/.cargo/env"
-            fi
-            cargo build --release -p forge-app --target x86_64-unknown-freebsd
+            cargo build --release -p "$PKG"
             mkdir -p dist
-            cp target/x86_64-unknown-freebsd/release/forge3d dist/blendcraft-freebsd-x64
+            cp "target/release/$BIN" dist/blendcraft-freebsd-x64
             chmod +x dist/blendcraft-freebsd-x64
 
       - name: Upload artifact
@@ -160,10 +194,10 @@ jobs:
           if-no-files-found: error
 
   # ---------------------------------------------------------------------------
-  # WebAssembly (wgpu WebGPU / WebGL via browser)
+  # WebAssembly: checks that the portable crates compile for the browser.
   # ---------------------------------------------------------------------------
   wasm:
-    name: WebAssembly
+    name: WebAssembly check
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -174,35 +208,29 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
 
-      - name: Install wasm-pack / trunk tooling
-        run: |
-          cargo install wasm-bindgen-cli --version 0.2.99 || cargo install wasm-bindgen-cli
-          # trunk is optional; we use cargo + wasm-bindgen for a minimal build check
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: wasm
 
-      - name: Check WASM compiles (library / app surface)
+      - name: Check core + io for wasm32
         run: |
-          rustup target add wasm32-unknown-unknown
-          # Desktop-only crates (rfd file dialogs, etc.) may fail on pure bin —
-          # compile the render + core graph which is the portable core.
           cargo check -p forge-core --target wasm32-unknown-unknown
           cargo check -p forge-io --target wasm32-unknown-unknown
-          # forge-app may need wasm-specific entry (winit web); check and report
-          cargo check -p forge-app --target wasm32-unknown-unknown || {
-            echo "::warning::forge-app is not fully WASM-ready yet (winit/rfd desktop APIs)."
-            echo "Core + IO crates compile for wasm32-unknown-unknown."
-          }
 
-      - name: Package WASM stub note
+      - name: Check the app crate (informational)
+        run: |
+          cargo check -p ${{ env.PKG }} --target wasm32-unknown-unknown || \
+            echo "::warning::The GUI app is not WASM-ready yet (desktop-only APIs such as rfd file dialogs). core and io are."
+
+      - name: Write note
         run: |
           mkdir -p dist
-          cat > dist/README-wasm.txt << 'EOF'
-          BlendCraft WebAssembly
-          ----------------------
-          forge-core and forge-io target wasm32-unknown-unknown.
-          The full GUI app (forge-app) still depends on desktop APIs (rfd, etc.).
-          Next step for a browser build: wasm-specific main + winit web features
-          and egui web integration (see README section "WebAssembly").
-          EOF
+          printf '%s\n' \
+            "BlendCraft WebAssembly" \
+            "forge-core and forge-io compile for wasm32-unknown-unknown." \
+            "The GUI app still needs a web entry point (winit web + egui web, no rfd)." \
+            > dist/README-wasm.txt
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -211,12 +239,13 @@ jobs:
           path: dist/*
 
   # ---------------------------------------------------------------------------
-  # Optional: attach all artifacts on a published GitHub Release
+  # Attach binaries to a GitHub Release when you push a tag like v0.1.0
   # ---------------------------------------------------------------------------
   release:
     name: Attach to release
     needs: [desktop, freebsd, wasm]
-    if: startsWith(github.ref, 'refs/tags/v')
+    # Run even if an experimental target failed; attach whatever was built.
+    if: ${{ !cancelled() && startsWith(github.ref, 'refs/tags/v') }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -224,17 +253,13 @@ jobs:
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
-          path: artifacts
+          path: dist
+          merge-multiple: true
 
-      - name: Flatten into dist/
-        run: |
-          mkdir -p dist
-          find artifacts -type f -exec cp {} dist/ \;
-          ls -la dist/
+      - name: List files
+        run: ls -la dist/
 
       - name: Upload to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           files: dist/*
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
