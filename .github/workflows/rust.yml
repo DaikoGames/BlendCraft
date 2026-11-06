@@ -1,13 +1,18 @@
-# BlendCraft - multi-platform builds
-# Runs on push / PR to main (or master), on manual run, and attaches binaries to tagged releases (v*).
+
+# BlendCraft — multi-platform builds
+# Builds on push / PR to main or master, manual runs,
+# and attaches binaries to tagged releases (v*).
+
 name: Build
 
 on:
   push:
     branches: [main, master]
     tags: ["v*"]
+
   pull_request:
     branches: [main, master]
+
   workflow_dispatch:
 
 permissions:
@@ -20,42 +25,53 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
-  # Change these two lines if you rename the crate / binary in Cargo.toml.
+
+  # Change these if the package or executable is renamed.
   PKG: forge-app
   BIN: forge3d
-  # NOTE: do NOT set RUSTFLAGS=-Dwarnings here. It turns every compiler warning into an error
-  # (also in `cargo install` of build tools) and breaks the build.
+
+  # Do not set RUSTFLAGS=-Dwarnings.
+  # Warnings should not break builds.
 
 jobs:
-  # ---------------------------------------------------------------------------
-  # Native desktop builds
-  # ---------------------------------------------------------------------------
+
+  # ============================================================
+  # DESKTOP BUILDS
+  # ============================================================
+
   desktop:
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
-    # Targets marked experimental may fail without turning the whole workflow red.
+
     continue-on-error: ${{ matrix.experimental == true }}
+
     strategy:
       fail-fast: false
+
       matrix:
         include:
-          # ---- Linux
+
+          # ---------------- LINUX ----------------
+
           - name: Linux x64
             os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             artifact: blendcraft-linux-x64
+
           - name: Linux ARM64
             os: ubuntu-latest
             target: aarch64-unknown-linux-gnu
             artifact: blendcraft-linux-arm64
             cross: true
             experimental: true
+
           - name: Linux x86
             os: ubuntu-latest
             target: i686-unknown-linux-gnu
             artifact: blendcraft-linux-x86
             cross: true
             experimental: true
+
           - name: Linux ARMv7
             os: ubuntu-latest
             target: armv7-unknown-linux-gnueabihf
@@ -63,34 +79,41 @@ jobs:
             cross: true
             experimental: true
 
-          # ---- Windows
+          # ---------------- WINDOWS ----------------
+
           - name: Windows x64
             os: windows-latest
             target: x86_64-pc-windows-msvc
             artifact: blendcraft-windows-x64
+
           - name: Windows ARM64
             os: windows-latest
             target: aarch64-pc-windows-msvc
             artifact: blendcraft-windows-arm64
             experimental: true
+
           - name: Windows x86
             os: windows-latest
             target: i686-pc-windows-msvc
             artifact: blendcraft-windows-x86
             experimental: true
 
-          # ---- macOS (both built on Apple Silicon runners; the Intel build is cross-compiled,
-          #      because the old macos-13 Intel runner image has been retired)
+          # ---------------- macOS ----------------
+
+          # Intel Mac
           - name: macOS x64 (Intel)
-            os: macos-14
+            os: macos-15-intel
             target: x86_64-apple-darwin
             artifact: blendcraft-macos-x64
+
+          # Apple Silicon Mac
           - name: macOS ARM64 (Apple Silicon)
-            os: macos-14
+            os: macos-15
             target: aarch64-apple-darwin
             artifact: blendcraft-macos-arm64
 
     steps:
+
       - name: Checkout
         uses: actions/checkout@v4
 
@@ -99,76 +122,119 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - name: Cache cargo
+      - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
 
-      - name: Linux dependencies (native)
+      # Linux native dependencies
+      - name: Install Linux dependencies
         if: runner.os == 'Linux' && matrix.cross != true
         run: |
           sudo apt-get update
-          sudo apt-get install -y pkg-config \
-            libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev \
-            libxrandr-dev libxi-dev libgl1-mesa-dev
 
-      - name: Install cross (prebuilt)
+          sudo apt-get install -y \
+            pkg-config \
+            libxkbcommon-dev \
+            libwayland-dev \
+            libx11-dev \
+            libxcursor-dev \
+            libxrandr-dev \
+            libxi-dev \
+            libgl1-mesa-dev
+
+      # Cross compilation
+      - name: Install cross
         if: matrix.cross == true
         uses: taiki-e/install-action@v2
         with:
           tool: cross
 
-      - name: Build (native)
+      # Native build
+      - name: Build native
         if: matrix.cross != true
-        run: cargo build --release -p ${{ env.PKG }} --target ${{ matrix.target }}
+        run: |
+          cargo build --release \
+            -p ${{ env.PKG }} \
+            --target ${{ matrix.target }}
 
-      - name: Build (cross)
+      # Cross build
+      - name: Build cross
         if: matrix.cross == true
-        run: cross build --release -p ${{ env.PKG }} --target ${{ matrix.target }}
+        run: |
+          cross build --release \
+            -p ${{ env.PKG }} \
+            --target ${{ matrix.target }}
 
+      # Stage Linux / macOS binaries
       - name: Stage artifact (Linux / macOS)
         if: runner.os != 'Windows'
         run: |
           mkdir -p dist
-          cp "target/${{ matrix.target }}/release/${{ env.BIN }}" "dist/${{ matrix.artifact }}"
+
+          cp \
+            "target/${{ matrix.target }}/release/${{ env.BIN }}" \
+            "dist/${{ matrix.artifact }}"
+
           chmod +x "dist/${{ matrix.artifact }}"
 
+      # Stage Windows binaries
       - name: Stage artifact (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path dist | Out-Null
-          Copy-Item "target/${{ matrix.target }}/release/${{ env.BIN }}.exe" "dist/${{ matrix.artifact }}.exe"
 
+          Copy-Item `
+            "target/${{ matrix.target }}/release/${{ env.BIN }}.exe" `
+            "dist/${{ matrix.artifact }}.exe"
+
+      # Upload binaries
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
           path: dist/*
           if-no-files-found: error
+          retention-days: 14
 
-  # ---------------------------------------------------------------------------
-  # Unit tests (informational: a failing test does not block the binaries)
-  # ---------------------------------------------------------------------------
+
+  # ============================================================
+  # UNIT TESTS
+  # ============================================================
+
   test:
     name: Tests
     runs-on: ubuntu-latest
     continue-on-error: true
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - name: Run tests (core, io)
-        run: cargo test -p forge-core -p forge-io
 
-  # ---------------------------------------------------------------------------
-  # FreeBSD (VM). Experimental: reported but never fails the workflow.
-  # ---------------------------------------------------------------------------
+    steps:
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run tests
+        run: |
+          cargo test -p forge-core -p forge-io
+
+
+  # ============================================================
+  # FREEBSD BUILD
+  # ============================================================
+
   freebsd:
     name: FreeBSD x64
     runs-on: ubuntu-latest
     continue-on-error: true
+
     steps:
+
       - name: Checkout
         uses: actions/checkout@v4
 
@@ -178,12 +244,28 @@ jobs:
           release: "14.3"
           usesh: true
           envs: "PKG BIN"
+
           prepare: |
-            pkg install -y rust pkgconf libxkbcommon wayland libX11 libXcursor libXrandr libXi mesa-libs
+            pkg install -y \
+              rust \
+              pkgconf \
+              libxkbcommon \
+              wayland \
+              libX11 \
+              libXcursor \
+              libXrandr \
+              libXi \
+              mesa-libs
+
           run: |
             cargo build --release -p "$PKG"
+
             mkdir -p dist
-            cp "target/release/$BIN" dist/blendcraft-freebsd-x64
+
+            cp \
+              "target/release/$BIN" \
+              dist/blendcraft-freebsd-x64
+
             chmod +x dist/blendcraft-freebsd-x64
 
       - name: Upload artifact
@@ -192,14 +274,19 @@ jobs:
           name: blendcraft-freebsd-x64
           path: dist/*
           if-no-files-found: error
+          retention-days: 14
 
-  # ---------------------------------------------------------------------------
-  # WebAssembly: checks that the portable crates compile for the browser.
-  # ---------------------------------------------------------------------------
+
+  # ============================================================
+  # WEBASSEMBLY
+  # ============================================================
+
   wasm:
     name: WebAssembly check
     runs-on: ubuntu-latest
+
     steps:
+
       - name: Checkout
         uses: actions/checkout@v4
 
@@ -208,28 +295,44 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
 
-      - name: Cache cargo
+      - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
         with:
           key: wasm
 
-      - name: Check core + io for wasm32
+      # Check core separately
+      - name: Check forge-core
         run: |
-          cargo check -p forge-core --target wasm32-unknown-unknown
-          cargo check -p forge-io --target wasm32-unknown-unknown
+          cargo check \
+            -p forge-core \
+            --target wasm32-unknown-unknown
 
-      - name: Check the app crate (informational)
+      # Check IO separately
+      - name: Check forge-io
         run: |
-          cargo check -p ${{ env.PKG }} --target wasm32-unknown-unknown || \
-            echo "::warning::The GUI app is not WASM-ready yet (desktop-only APIs such as rfd file dialogs). core and io are."
+          cargo check \
+            -p forge-io \
+            --target wasm32-unknown-unknown
 
-      - name: Write note
+      # GUI app is informational
+      - name: Check GUI application
+        continue-on-error: true
+        run: |
+          cargo check \
+            -p ${{ env.PKG }} \
+            --target wasm32-unknown-unknown
+
+      # Write WebAssembly information
+      - name: Write WebAssembly notes
         run: |
           mkdir -p dist
+
           printf '%s\n' \
             "BlendCraft WebAssembly" \
-            "forge-core and forge-io compile for wasm32-unknown-unknown." \
-            "The GUI app still needs a web entry point (winit web + egui web, no rfd)." \
+            "" \
+            "forge-core and forge-io are checked for wasm32-unknown-unknown." \
+            "The desktop GUI may require a dedicated web entry point." \
+            "Desktop-only APIs such as rfd may need platform-specific handling." \
             > dist/README-wasm.txt
 
       - name: Upload artifact
@@ -237,29 +340,48 @@ jobs:
         with:
           name: blendcraft-wasm-notes
           path: dist/*
+          if-no-files-found: error
+          retention-days: 14
 
-  # ---------------------------------------------------------------------------
-  # Attach binaries to a GitHub Release when you push a tag like v0.1.0
-  # ---------------------------------------------------------------------------
+
+  # ============================================================
+  # GITHUB RELEASE
+  # ============================================================
+
   release:
-    name: Attach to release
-    needs: [desktop, freebsd, wasm]
-    # Run even if an experimental target failed; attach whatever was built.
-    if: ${{ !cancelled() && startsWith(github.ref, 'refs/tags/v') }}
+    name: Attach binaries to GitHub Release
+
+    needs:
+      - desktop
+      - freebsd
+      - wasm
+
+    if: >-
+      ${{
+        !cancelled() &&
+        startsWith(github.ref, 'refs/tags/v')
+      }}
+
     runs-on: ubuntu-latest
+
     permissions:
       contents: write
+
     steps:
+
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
 
-      - name: List files
-        run: ls -la dist/
+      - name: List release files
+        run: |
+          echo "Available release files:"
+          ls -lah dist/
 
       - name: Upload to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           files: dist/*
+          fail_on_unmatched_files: false
