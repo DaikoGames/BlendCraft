@@ -1,11 +1,11 @@
 
-# BlendCraft — multi-platform builds
+# BlendCraft — Multi-platform builds and automatic GitHub Releases
+
 name: Build
 
 on:
   push:
     branches: [main, master]
-    tags: ["v*"]
   pull_request:
     branches: [main, master]
   workflow_dispatch:
@@ -25,9 +25,9 @@ env:
 
 jobs:
 
-  # ============================================================
+  # ==========================================
   # DESKTOP BUILDS
-  # ============================================================
+  # ==========================================
 
   desktop:
     name: ${{ matrix.name }}
@@ -38,8 +38,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-
-          # Linux
           - name: Linux x64
             os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
@@ -66,7 +64,6 @@ jobs:
             cross: true
             experimental: true
 
-          # Windows
           - name: Windows x64
             os: windows-latest
             target: x86_64-pc-windows-msvc
@@ -84,7 +81,6 @@ jobs:
             artifact: blendcraft-windows-x86
             experimental: true
 
-          # macOS
           - name: macOS Intel
             os: macos-15-intel
             target: x86_64-apple-darwin
@@ -96,7 +92,6 @@ jobs:
             artifact: blendcraft-macos-arm64
 
     steps:
-
       - name: Checkout
         uses: actions/checkout@v4
 
@@ -130,7 +125,6 @@ jobs:
         with:
           tool: cross
 
-      # Single-line commands work in PowerShell and Bash.
       - name: Build native
         if: matrix.cross != true
         run: cargo build --release -p ${{ env.PKG }} --target ${{ matrix.target }}
@@ -161,10 +155,9 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-
-  # ============================================================
-  # UNIT TESTS
-  # ============================================================
+  # ==========================================
+  # TESTS
+  # ==========================================
 
   test:
     name: Tests
@@ -173,18 +166,15 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
-
       - uses: dtolnay/rust-toolchain@stable
-
       - uses: Swatinem/rust-cache@v2
 
       - name: Run tests
         run: cargo test -p forge-core -p forge-io
 
-
-  # ============================================================
-  # FREEBSD
-  # ============================================================
+  # ==========================================
+  # FREEBSD BUILD
+  # ==========================================
 
   freebsd:
     name: FreeBSD x64
@@ -201,7 +191,6 @@ jobs:
           release: "14.3"
           usesh: true
           envs: "PKG BIN"
-
           prepare: |
             pkg install -y \
               rust \
@@ -213,7 +202,6 @@ jobs:
               libXrandr \
               libXi \
               mesa-libs
-
           run: |
             cargo build --release -p "$PKG"
             mkdir -p dist
@@ -228,10 +216,9 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-
-  # ============================================================
-  # WEBASSEMBLY
-  # ============================================================
+  # ==========================================
+  # WEBASSEMBLY CHECK
+  # ==========================================
 
   wasm:
     name: WebAssembly check
@@ -283,23 +270,27 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-
-  # ============================================================
-  # GITHUB RELEASE
-  # ============================================================
+  # ==========================================
+  # AUTOMATIC GITHUB RELEASE
+  # ==========================================
 
   release:
-    name: Attach binaries to GitHub Release
+    name: Automatically publish GitHub Release
 
     needs:
       - desktop
       - freebsd
       - wasm
 
+    # Only publish after a push to main/master.
+    # GitHub's default success() behaviour ensures
+    # required jobs must succeed.
+
     if: >-
       ${{
-        !cancelled() &&
-        startsWith(github.ref, 'refs/tags/v')
+        github.event_name == 'push' &&
+        (github.ref == 'refs/heads/main' ||
+         github.ref == 'refs/heads/master')
       }}
 
     runs-on: ubuntu-latest
@@ -308,7 +299,7 @@ jobs:
       contents: write
 
     steps:
-      - name: Download all artifacts
+      - name: Download all build artifacts
         uses: actions/download-artifact@v4
         with:
           path: dist
@@ -317,8 +308,12 @@ jobs:
       - name: List release files
         run: ls -lah dist/
 
-      - name: Upload to GitHub Release
+      - name: Create GitHub Release and upload binaries
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: v0.1.${{ github.run_number }}
+          name: BlendCraft v0.1.${{ github.run_number }}
+          target_commitish: ${{ github.sha }}
+          generate_release_notes: true
           files: dist/*
-          fail_on_unmatched_files: false
+          fail_on_unmatched_files: true
