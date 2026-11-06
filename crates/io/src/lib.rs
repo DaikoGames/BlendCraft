@@ -8,8 +8,10 @@ use std::sync::Arc;
 
 mod export;
 mod obj;
+mod fbx;
 pub use export::{export_glb, export_obj};
 pub use obj::load_obj;
+pub use fbx::{load_fbx, load_fbx_bytes, export_fbx};
 
 #[cfg(not(target_arch = "wasm32"))]
 pub fn load_gltf(path: &Path) -> Result<Scene> {

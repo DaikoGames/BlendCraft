@@ -5,6 +5,35 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::f32::consts::{PI, TAU};
 
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum TextFont {
+    #[default]
+    /// Thick geometric block letters
+    Block,
+    /// Condensed fixed-width style
+    Narrow,
+    /// Softer rounded block style (slightly thicker stems)
+    Rounded,
+}
+
+impl TextFont {
+    pub fn name(self) -> &'static str {
+        match self {
+            TextFont::Block => "Block",
+            TextFont::Narrow => "Narrow",
+            TextFont::Rounded => "Rounded",
+        }
+    }
+    pub fn all() -> [TextFont; 3] {
+        [TextFont::Block, TextFont::Narrow, TextFont::Rounded]
+    }
+}
+
+fn default_text_content() -> String { "Text".into() }
+fn default_true() -> bool { true }
+fn default_text_depth() -> f32 { 0.15 }
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Primitive {
     Plane { size: f32 },
@@ -33,8 +62,25 @@ pub enum Primitive {
     CurvePath { length: f32, segments: u32 },
     /// Soft-ball approximation (metaball look)
     Metaball { radius: f32, subdivisions: u32 },
-    /// Simple 3D text block
-    Text { size: f32 },
+    /// Editable text object (built-in fonts, optional 3D extrude)
+    Text {
+        /// Characters to display
+        #[serde(default = "default_text_content")]
+        content: String,
+        size: f32,
+        /// Built-in procedural fallback style (used when font_name is empty / missing)
+        #[serde(default)]
+        font: TextFont,
+        /// Name of a loaded TTF/OTF in the font registry. Empty = procedural fallback.
+        #[serde(default)]
+        font_name: String,
+        /// If true, extrude into 3D solid letters; if false, flat 2D planes
+        #[serde(default = "default_true")]
+        extrude: bool,
+        /// Extrusion depth (only used when extrude is true)
+        #[serde(default = "default_text_depth")]
+        depth: f32,
+    },
 }
 
 impl Primitive {
@@ -92,7 +138,7 @@ impl Primitive {
             Primitive::Prism { radius: 0.5, height: 1.0, segments: 6 },
             Primitive::Tube { radius: 0.5, height: 1.0, segments: 32 },
             Primitive::Metaball { radius: 0.5, subdivisions: 3 },
-            Primitive::Text { size: 0.5 },
+            Primitive::Text { content: "Text".into(), size: 0.5, font: TextFont::Block, font_name: String::new(), extrude: true, depth: 0.15 },
         ]
     }
 
@@ -127,7 +173,7 @@ impl Primitive {
             Primitive::CurveCircle { radius, segments } => curve_circle(radius, segments),
             Primitive::CurvePath { length, segments } => curve_path(length, segments),
             Primitive::Metaball { radius, subdivisions } => icosphere(radius, subdivisions),
-            Primitive::Text { size } => text_mesh(size),
+            Primitive::Text { ref content, size, font, ref font_name, extrude, depth } => text_mesh(content, size, font, font_name, extrude, depth),
         };
         m.name = self.name().into();
         fix_winding(&mut m);
@@ -185,24 +231,34 @@ pub fn plane(size: f32) -> MeshData {
 }
 
 pub fn cube(size: f32) -> MeshData {
+    // 8 shared corner vertices (not 24 split verts) so each edge is truly 2 points
     let h = size * 0.5;
-    let faces = [
-        (Vec3::X, Vec3::Y, Vec3::Z),
-        (Vec3::NEG_X, Vec3::Z, Vec3::Y),
-        (Vec3::Y, Vec3::Z, Vec3::X),
-        (Vec3::NEG_Y, Vec3::X, Vec3::Z),
-        (Vec3::Z, Vec3::X, Vec3::Y),
-        (Vec3::NEG_Z, Vec3::Y, Vec3::X),
+    let p = [
+        Vec3::new(-h, -h, -h), // 0
+        Vec3::new( h, -h, -h), // 1
+        Vec3::new( h,  h, -h), // 2
+        Vec3::new(-h,  h, -h), // 3
+        Vec3::new(-h, -h,  h), // 4
+        Vec3::new( h, -h,  h), // 5
+        Vec3::new( h,  h,  h), // 6
+        Vec3::new(-h,  h,  h), // 7
     ];
-    let corners = [(-1.0, -1.0, [0.0, 0.0]), (1.0, -1.0, [1.0, 0.0]), (1.0, 1.0, [1.0, 1.0]), (-1.0, 1.0, [0.0, 1.0])];
-    let mut m = MeshData { name: "Cube".into(), ..Default::default() };
-    for (n, t, b) in faces {
-        let base = m.vertices.len() as u32;
-        for (s, u, uv) in corners {
-            m.vertices.push(v(n * h + t * (h * s) + b * (h * u), n, uv));
-        }
-        m.indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
-    }
+    let n = Vec3::ZERO; // filled by compute_normals
+    let mut m = MeshData {
+        name: "Cube".into(),
+        vertices: p.iter().map(|q| v(*q, n, [0.0, 0.0])).collect(),
+        // 6 faces × 2 tris, CCW outward
+        indices: vec![
+            0, 2, 1, 0, 3, 2, // -Z
+            4, 5, 6, 4, 6, 7, // +Z
+            0, 1, 5, 0, 5, 4, // -Y
+            3, 7, 6, 3, 6, 2, // +Y
+            0, 4, 7, 0, 7, 3, // -X
+            1, 2, 6, 1, 6, 5, // +X
+        ],
+        ..Default::default()
+    };
+    m.compute_normals();
     m
 }
 
@@ -659,50 +715,368 @@ fn curve_path(length: f32, segments: u32) -> MeshData {
     m
 }
 
-fn text_mesh(size: f32) -> MeshData {
-    // Simple block letter "A" as a stand-in for Text objects
-    let s = size;
-    let t = size * 0.18; // thickness
-    let d = size * 0.2;  // depth
+fn text_mesh(content: &str, size: f32, font: TextFont, font_name: &str, extrude: bool, depth: f32) -> MeshData {
+    if !font_name.is_empty() {
+        if let Some(m) = crate::fonts::mesh_from_font(font_name, content, size, extrude, depth) {
+            return m;
+        }
+    }
+
+    let content = if content.is_empty() { " " } else { content };
+    let (stem, cell_w, gap) = match font {
+        TextFont::Block => (0.18, 0.72, 0.12),
+        TextFont::Narrow => (0.12, 0.55, 0.08),
+        TextFont::Rounded => (0.22, 0.78, 0.14),
+    };
+    let depth = if extrude { depth.max(0.01) } else { size * 0.02 };
     let mut vertices = Vec::new();
     let mut indices = Vec::new();
-    // Helper to add an axis-aligned box
-    let mut add_box = |min: Vec3, max: Vec3| {
-        let corners = [
-            Vec3::new(min.x, min.y, min.z),
-            Vec3::new(max.x, min.y, min.z),
-            Vec3::new(max.x, max.y, min.z),
-            Vec3::new(min.x, max.y, min.z),
-            Vec3::new(min.x, min.y, max.z),
-            Vec3::new(max.x, min.y, max.z),
-            Vec3::new(max.x, max.y, max.z),
-            Vec3::new(min.x, max.y, max.z),
-        ];
-        let faces = [
+
+    let mut cursor_x = 0.0f32;
+    let mut lines = 0u32;
+    let mut line_x = 0.0f32;
+    let line_height = size * 1.25;
+
+    for ch in content.chars() {
+        if ch == '\n' {
+            lines += 1;
+            line_x = 0.0;
+            continue;
+        }
+        let rects = glyph_rects(ch, stem);
+        let ox = line_x * size;
+        let oy = -(lines as f32) * line_height;
+        for (x0, y0, x1, y1) in rects {
+            let min = Vec3::new(ox + x0 * size, oy + y0 * size, -depth * 0.5);
+            let max = Vec3::new(ox + x1 * size, oy + y1 * size, depth * 0.5);
+            add_box(&mut vertices, &mut indices, min, max, extrude);
+        }
+        line_x += cell_w + gap;
+        cursor_x = cursor_x.max(line_x);
+    }
+
+    // Center on X around origin, baseline near y=0
+    if !vertices.is_empty() {
+        let total_w = cursor_x * size;
+        let shift_x = -total_w * 0.5;
+        for v in &mut vertices {
+            v.position[0] += shift_x;
+        }
+    }
+
+    MeshData {
+        name: "Text".into(),
+        vertices,
+        indices,
+        ..Default::default()
+    }
+}
+
+fn add_box(vertices: &mut Vec<Vertex>, indices: &mut Vec<u32>, min: Vec3, max: Vec3, solid: bool) {
+    let corners = [
+        Vec3::new(min.x, min.y, min.z),
+        Vec3::new(max.x, min.y, min.z),
+        Vec3::new(max.x, max.y, min.z),
+        Vec3::new(min.x, max.y, min.z),
+        Vec3::new(min.x, min.y, max.z),
+        Vec3::new(max.x, min.y, max.z),
+        Vec3::new(max.x, max.y, max.z),
+        Vec3::new(min.x, max.y, max.z),
+    ];
+    // Always emit front face; when solid (3D), emit full box
+    let faces: &[( [usize; 4], Vec3 )] = if solid {
+        &[
             ([0, 1, 2, 3], Vec3::NEG_Z),
             ([4, 7, 6, 5], Vec3::Z),
             ([0, 4, 5, 1], Vec3::NEG_Y),
             ([2, 6, 7, 3], Vec3::Y),
             ([0, 3, 7, 4], Vec3::NEG_X),
             ([1, 5, 6, 2], Vec3::X),
-        ];
-        for (idx, n) in faces {
-            let i0 = vertices.len() as u32;
-            for &k in &idx {
-                vertices.push(v(corners[k], n, [0.0, 0.0]));
-            }
-            indices.extend_from_slice(&[i0, i0 + 1, i0 + 2, i0, i0 + 2, i0 + 3]);
+        ]
+    } else {
+        // Flat text: front face only (slightly in front)
+        &[
+            ([4, 7, 6, 5], Vec3::Z),
+        ]
+    };
+    for (idx, n) in faces {
+        let i0 = vertices.len() as u32;
+        for &k in idx {
+            vertices.push(v(corners[k], *n, [0.0, 0.0]));
+        }
+        indices.extend_from_slice(&[i0, i0 + 1, i0 + 2, i0, i0 + 2, i0 + 3]);
+    }
+}
+
+/// Unit-space rectangles (x0,y0,x1,y1) for a character. Origin bottom-left, height ~1.
+fn glyph_rects(ch: char, stem: f32) -> Vec<(f32, f32, f32, f32)> {
+    let s = stem;
+    let mut r = Vec::new();
+    let boxr = |r: &mut Vec<(f32, f32, f32, f32)>, x0: f32, y0: f32, x1: f32, y1: f32| {
+        if x1 > x0 && y1 > y0 {
+            r.push((x0, y0, x1, y1));
         }
     };
-    // Left leg
-    add_box(Vec3::new(-s * 0.45, 0.0, -d * 0.5), Vec3::new(-s * 0.45 + t, s, d * 0.5));
-    // Right leg
-    add_box(Vec3::new(s * 0.45 - t, 0.0, -d * 0.5), Vec3::new(s * 0.45, s, d * 0.5));
-    // Crossbar
-    add_box(Vec3::new(-s * 0.35, s * 0.4, -d * 0.5), Vec3::new(s * 0.35, s * 0.4 + t, d * 0.5));
-    // Top bar
-    add_box(Vec3::new(-s * 0.45, s - t, -d * 0.5), Vec3::new(s * 0.45, s, d * 0.5));
-    MeshData { name: "Text".into(), vertices, indices, ..Default::default() }
+    let c = ch;
+    match c {
+        ' ' => {}
+        'A' | 'a' => {
+            boxr(&mut r, 0.05, 0.0, 0.05 + s, 1.0);
+            boxr(&mut r, 0.95 - s, 0.0, 0.95, 1.0);
+            boxr(&mut r, 0.05, 1.0 - s, 0.95, 1.0);
+            boxr(&mut r, 0.15, 0.45, 0.85, 0.45 + s);
+        }
+        'B' | 'b' => {
+            boxr(&mut r, 0.05, 0.0, 0.05 + s, 1.0);
+            boxr(&mut r, 0.05, 1.0 - s, 0.75, 1.0);
+            boxr(&mut r, 0.05, 0.5 - s * 0.5, 0.7, 0.5 + s * 0.5);
+            boxr(&mut r, 0.05, 0.0, 0.75, s);
+            boxr(&mut r, 0.75 - s, 0.5, 0.75, 1.0);
+            boxr(&mut r, 0.75 - s, 0.0, 0.75, 0.5);
+        }
+        'C' | 'c' => {
+            boxr(&mut r, 0.05, 0.0, 0.05 + s, 1.0);
+            boxr(&mut r, 0.05, 1.0 - s, 0.9, 1.0);
+            boxr(&mut r, 0.05, 0.0, 0.9, s);
+        }
+        'D' | 'd' => {
+            boxr(&mut r, 0.05, 0.0, 0.05 + s, 1.0);
+            boxr(&mut r, 0.05, 1.0 - s, 0.7, 1.0);
+            boxr(&mut r, 0.05, 0.0, 0.7, s);
+            boxr(&mut r, 0.7 - s * 0.3, 0.15, 0.9, 0.85);
+        }
+        'E' | 'e' => {
+            boxr(&mut r, 0.05, 0.0, 0.05 + s, 1.0);
+            boxr(&mut r, 0.05, 1.0 - s, 0.9, 1.0);
+            boxr(&mut r, 0.05, 0.5 - s * 0.5, 0.75, 0.5 + s * 0.5);
+            boxr(&mut r, 0.05, 0.0, 0.9, s);
+        }
+        'F' | 'f' => {
+            boxr(&mut r, 0.05, 0.0, 0.05 + s, 1.0);
+            boxr(&mut r, 0.05, 1.0 - s, 0.9, 1.0);
+            boxr(&mut r, 0.05, 0.5 - s * 0.5, 0.75, 0.5 + s * 0.5);
+        }
+        'G' | 'g' => {
+            boxr(&mut r, 0.05, 0.0, 0.05 + s, 1.0);
+            boxr(&mut r, 0.05, 1.0 - s, 0.9, 1.0);
+            boxr(&mut r, 0.05, 0.0, 0.9, s);
+            boxr(&mut r, 0.9 - s, 0.0, 0.9, 0.5);
+            boxr(&mut r, 0.55, 0.45, 0.9, 0.45 + s);
+        }
+        'H' | 'h' => {
+            boxr(&mut r, 0.05, 0.0, 0.05 + s, 1.0);
+            boxr(&mut r, 0.95 - s, 0.0, 0.95, 1.0);
+            boxr(&mut r, 0.05, 0.5 - s * 0.5, 0.95, 0.5 + s * 0.5);
+        }
+        'I' | 'i' => {
+            boxr(&mut r, 0.5 - s * 0.5, 0.0, 0.5 + s * 0.5, 1.0);
+            boxr(&mut r, 0.2, 1.0 - s, 0.8, 1.0);
+            boxr(&mut r, 0.2, 0.0, 0.8, s);
+        }
+        'J' | 'j' => {
+            boxr(&mut r, 0.7 - s, 0.2, 0.7, 1.0);
+            boxr(&mut r, 0.15, 0.0, 0.7, s);
+            boxr(&mut r, 0.15, 0.0, 0.15 + s, 0.35);
+        }
+        'K' | 'k' => {
+            boxr(&mut r, 0.05, 0.0, 0.05 + s, 1.0);
+            boxr(&mut r, 0.05, 0.45, 0.45, 0.45 + s);
+            boxr(&mut r, 0.4, 0.5, 0.55, 1.0);
+            boxr(&mut r, 0.4, 0.0, 0.55, 0.5);
+            boxr(&mut r, 0.55, 0.75, 0.95, 1.0);
+            boxr(&mut r, 0.55, 0.0, 0.95, 0.25);
+        }
+        'L' | 'l' => {
+            boxr(&mut r, 0.05, 0.0, 0.05 + s, 1.0);
+            boxr(&mut r, 0.05, 0.0, 0.9, s);
+        }
+        'M' | 'm' => {
+            boxr(&mut r, 0.05, 0.0, 0.05 + s, 1.0);
+            boxr(&mut r, 0.95 - s, 0.0, 0.95, 1.0);
+            boxr(&mut r, 0.35, 0.4, 0.35 + s, 1.0);
+            boxr(&mut r, 0.65 - s, 0.4, 0.65, 1.0);
+            boxr(&mut r, 0.05, 1.0 - s, 0.95, 1.0);
+        }
+        'N' | 'n' => {
+            boxr(&mut r, 0.05, 0.0, 0.05 + s, 1.0);
+            boxr(&mut r, 0.95 - s, 0.0, 0.95, 1.0);
+            boxr(&mut r, 0.2, 0.5, 0.8, 1.0);
+        }
+        'O' | 'o' => {
+            boxr(&mut r, 0.05, 0.0, 0.05 + s, 1.0);
+            boxr(&mut r, 0.95 - s, 0.0, 0.95, 1.0);
+            boxr(&mut r, 0.05, 1.0 - s, 0.95, 1.0);
+            boxr(&mut r, 0.05, 0.0, 0.95, s);
+        }
+        'P' | 'p' => {
+            boxr(&mut r, 0.05, 0.0, 0.05 + s, 1.0);
+            boxr(&mut r, 0.05, 1.0 - s, 0.85, 1.0);
+            boxr(&mut r, 0.05, 0.5, 0.85, 0.5 + s);
+            boxr(&mut r, 0.85 - s, 0.5, 0.85, 1.0);
+        }
+        'Q' | 'q' => {
+            boxr(&mut r, 0.05, 0.15, 0.05 + s, 1.0);
+            boxr(&mut r, 0.95 - s, 0.15, 0.95, 1.0);
+            boxr(&mut r, 0.05, 1.0 - s, 0.95, 1.0);
+            boxr(&mut r, 0.05, 0.15, 0.95, 0.15 + s);
+            boxr(&mut r, 0.55, 0.0, 0.95, 0.25);
+        }
+        'R' | 'r' => {
+            boxr(&mut r, 0.05, 0.0, 0.05 + s, 1.0);
+            boxr(&mut r, 0.05, 1.0 - s, 0.85, 1.0);
+            boxr(&mut r, 0.05, 0.5, 0.85, 0.5 + s);
+            boxr(&mut r, 0.85 - s, 0.5, 0.85, 1.0);
+            boxr(&mut r, 0.45, 0.0, 0.85, 0.5);
+        }
+        'S' | 's' => {
+            boxr(&mut r, 0.05, 1.0 - s, 0.95, 1.0);
+            boxr(&mut r, 0.05, 0.5 - s * 0.5, 0.95, 0.5 + s * 0.5);
+            boxr(&mut r, 0.05, 0.0, 0.95, s);
+            boxr(&mut r, 0.05, 0.5, 0.05 + s, 1.0);
+            boxr(&mut r, 0.95 - s, 0.0, 0.95, 0.5);
+        }
+        'T' | 't' => {
+            boxr(&mut r, 0.05, 1.0 - s, 0.95, 1.0);
+            boxr(&mut r, 0.5 - s * 0.5, 0.0, 0.5 + s * 0.5, 1.0);
+        }
+        'U' | 'u' => {
+            boxr(&mut r, 0.05, 0.0, 0.05 + s, 1.0);
+            boxr(&mut r, 0.95 - s, 0.0, 0.95, 1.0);
+            boxr(&mut r, 0.05, 0.0, 0.95, s);
+        }
+        'V' | 'v' => {
+            boxr(&mut r, 0.05, 0.35, 0.05 + s, 1.0);
+            boxr(&mut r, 0.95 - s, 0.35, 0.95, 1.0);
+            boxr(&mut r, 0.25, 0.0, 0.75, 0.4);
+        }
+        'W' | 'w' => {
+            boxr(&mut r, 0.0, 0.0, s, 1.0);
+            boxr(&mut r, 1.0 - s, 0.0, 1.0, 1.0);
+            boxr(&mut r, 0.35, 0.0, 0.35 + s, 0.7);
+            boxr(&mut r, 0.65 - s, 0.0, 0.65, 0.7);
+            boxr(&mut r, 0.0, 0.0, 1.0, s);
+        }
+        'X' | 'x' => {
+            boxr(&mut r, 0.05, 0.7, 0.35, 1.0);
+            boxr(&mut r, 0.65, 0.7, 0.95, 1.0);
+            boxr(&mut r, 0.05, 0.0, 0.35, 0.3);
+            boxr(&mut r, 0.65, 0.0, 0.95, 0.3);
+            boxr(&mut r, 0.3, 0.3, 0.7, 0.7);
+        }
+        'Y' | 'y' => {
+            boxr(&mut r, 0.05, 0.55, 0.05 + s, 1.0);
+            boxr(&mut r, 0.95 - s, 0.55, 0.95, 1.0);
+            boxr(&mut r, 0.5 - s * 0.5, 0.0, 0.5 + s * 0.5, 0.6);
+            boxr(&mut r, 0.2, 0.5, 0.8, 0.5 + s);
+        }
+        'Z' | 'z' => {
+            boxr(&mut r, 0.05, 1.0 - s, 0.95, 1.0);
+            boxr(&mut r, 0.05, 0.0, 0.95, s);
+            boxr(&mut r, 0.15, 0.35, 0.85, 0.65);
+        }
+        '0' => {
+            boxr(&mut r, 0.05, 0.0, 0.05 + s, 1.0);
+            boxr(&mut r, 0.95 - s, 0.0, 0.95, 1.0);
+            boxr(&mut r, 0.05, 1.0 - s, 0.95, 1.0);
+            boxr(&mut r, 0.05, 0.0, 0.95, s);
+        }
+        '1' => {
+            boxr(&mut r, 0.5 - s * 0.5, 0.0, 0.5 + s * 0.5, 1.0);
+            boxr(&mut r, 0.25, 0.0, 0.75, s);
+            boxr(&mut r, 0.25, 0.75, 0.5, 1.0);
+        }
+        '2' => {
+            boxr(&mut r, 0.05, 1.0 - s, 0.95, 1.0);
+            boxr(&mut r, 0.95 - s, 0.5, 0.95, 1.0);
+            boxr(&mut r, 0.05, 0.5 - s * 0.5, 0.95, 0.5 + s * 0.5);
+            boxr(&mut r, 0.05, 0.0, 0.05 + s, 0.5);
+            boxr(&mut r, 0.05, 0.0, 0.95, s);
+        }
+        '3' => {
+            boxr(&mut r, 0.05, 1.0 - s, 0.95, 1.0);
+            boxr(&mut r, 0.05, 0.5 - s * 0.5, 0.95, 0.5 + s * 0.5);
+            boxr(&mut r, 0.05, 0.0, 0.95, s);
+            boxr(&mut r, 0.95 - s, 0.0, 0.95, 1.0);
+        }
+        '4' => {
+            boxr(&mut r, 0.05, 0.4, 0.05 + s, 1.0);
+            boxr(&mut r, 0.05, 0.4, 0.95, 0.4 + s);
+            boxr(&mut r, 0.7 - s, 0.0, 0.7, 1.0);
+        }
+        '5' => {
+            boxr(&mut r, 0.05, 1.0 - s, 0.95, 1.0);
+            boxr(&mut r, 0.05, 0.5, 0.05 + s, 1.0);
+            boxr(&mut r, 0.05, 0.5 - s * 0.5, 0.95, 0.5 + s * 0.5);
+            boxr(&mut r, 0.95 - s, 0.0, 0.95, 0.5);
+            boxr(&mut r, 0.05, 0.0, 0.95, s);
+        }
+        '6' => {
+            boxr(&mut r, 0.05, 0.0, 0.05 + s, 1.0);
+            boxr(&mut r, 0.05, 1.0 - s, 0.95, 1.0);
+            boxr(&mut r, 0.05, 0.5 - s * 0.5, 0.95, 0.5 + s * 0.5);
+            boxr(&mut r, 0.05, 0.0, 0.95, s);
+            boxr(&mut r, 0.95 - s, 0.0, 0.95, 0.5);
+        }
+        '7' => {
+            boxr(&mut r, 0.05, 1.0 - s, 0.95, 1.0);
+            boxr(&mut r, 0.7 - s, 0.0, 0.7, 1.0);
+        }
+        '8' => {
+            boxr(&mut r, 0.05, 0.0, 0.05 + s, 1.0);
+            boxr(&mut r, 0.95 - s, 0.0, 0.95, 1.0);
+            boxr(&mut r, 0.05, 1.0 - s, 0.95, 1.0);
+            boxr(&mut r, 0.05, 0.5 - s * 0.5, 0.95, 0.5 + s * 0.5);
+            boxr(&mut r, 0.05, 0.0, 0.95, s);
+        }
+        '9' => {
+            boxr(&mut r, 0.05, 0.5, 0.05 + s, 1.0);
+            boxr(&mut r, 0.95 - s, 0.0, 0.95, 1.0);
+            boxr(&mut r, 0.05, 1.0 - s, 0.95, 1.0);
+            boxr(&mut r, 0.05, 0.5 - s * 0.5, 0.95, 0.5 + s * 0.5);
+            boxr(&mut r, 0.05, 0.0, 0.95, s);
+        }
+        '-' => boxr(&mut r, 0.15, 0.45, 0.85, 0.45 + s),
+        '_' => boxr(&mut r, 0.05, 0.0, 0.95, s * 0.7),
+        '=' => {
+            boxr(&mut r, 0.1, 0.35, 0.9, 0.35 + s * 0.7);
+            boxr(&mut r, 0.1, 0.65, 0.9, 0.65 + s * 0.7);
+        }
+        '+' => {
+            boxr(&mut r, 0.15, 0.45, 0.85, 0.45 + s);
+            boxr(&mut r, 0.5 - s * 0.5, 0.15, 0.5 + s * 0.5, 0.85);
+        }
+        '.' => boxr(&mut r, 0.4, 0.0, 0.6, s),
+        ',' => boxr(&mut r, 0.4, -0.15, 0.55, s),
+        '!' => {
+            boxr(&mut r, 0.5 - s * 0.5, 0.25, 0.5 + s * 0.5, 1.0);
+            boxr(&mut r, 0.5 - s * 0.5, 0.0, 0.5 + s * 0.5, s);
+        }
+        '?' => {
+            boxr(&mut r, 0.15, 1.0 - s, 0.85, 1.0);
+            boxr(&mut r, 0.85 - s, 0.55, 0.85, 1.0);
+            boxr(&mut r, 0.4, 0.35, 0.85, 0.35 + s);
+            boxr(&mut r, 0.5 - s * 0.5, 0.0, 0.5 + s * 0.5, s);
+        }
+        ':' => {
+            boxr(&mut r, 0.4, 0.7, 0.6, 0.7 + s);
+            boxr(&mut r, 0.4, 0.15, 0.6, 0.15 + s);
+        }
+        '/' => boxr(&mut r, 0.65, 0.0, 0.85, 1.0),
+        '\\' => boxr(&mut r, 0.15, 0.0, 0.35, 1.0),
+        '(' => {
+            boxr(&mut r, 0.35, 0.15, 0.35 + s, 0.85);
+            boxr(&mut r, 0.35, 0.85, 0.7, 1.0);
+            boxr(&mut r, 0.35, 0.0, 0.7, 0.15);
+        }
+        ')' => {
+            boxr(&mut r, 0.55 - s, 0.15, 0.55, 0.85);
+            boxr(&mut r, 0.2, 0.85, 0.55, 1.0);
+            boxr(&mut r, 0.2, 0.0, 0.55, 0.15);
+        }
+        // fallback: small block
+        _ => boxr(&mut r, 0.2, 0.2, 0.8, 0.8),
+    }
+    r
 }
 
 fn monkey(size: f32) -> MeshData {

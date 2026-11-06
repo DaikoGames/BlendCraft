@@ -2,12 +2,13 @@ mod gizmo;
 mod keymap;
 mod overlay;
 mod recent;
+mod fonts_io;
 mod tools;
 mod transform;
 mod ui;
 
 use egui_wgpu::wgpu;
-use forge_core::{project, Constraint, Document, EnvironmentMap, FixedView, ObjectKind, OrbitCamera, SameKind};
+use forge_core::{project, Constraint, Document, EditDomain, EnvironmentMap, FixedView, ObjectKind, OrbitCamera, SameKind};
 use forge_render::{Highlight, Renderer, ViewSettings};
 use glam::{Mat4, Vec2};
 use keymap::{Action, Binding};
@@ -17,6 +18,36 @@ use std::{
 };
 use tools::{anchors, apply_selection, point_in_polygon, SelShape, SelectOp, Tool, ToolState};
 use transform::{Modal, ModalKind};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EditXformKind {
+    Move,
+    Rotate,
+    Scale,
+}
+
+/// Modal transform for selected mesh components in Edit Mode (G / R / S).
+struct EditGizmoDrag {
+    axis: usize,
+    /// World-space axis direction
+    axis_dir: glam::Vec3,
+    origin: glam::Vec3,
+    start_param: f32,
+    verts: Vec<(u32, glam::Vec3)>,
+    inv_world: glam::Mat4,
+}
+
+struct EditXform {
+    kind: EditXformKind,
+    start_cursor: (f64, f64),
+    verts: Vec<(u32, glam::Vec3)>,
+    center: glam::Vec3,
+    inv_world: glam::Mat4,
+    /// true = drag while holding LMB (click-drag verts); false = modal G/R/S
+    confirm_on_release: bool,
+}
+
+
 use ui::{Rename, UiState};
 use winit::{
     application::ApplicationHandler,
@@ -51,6 +82,10 @@ struct App {
     ts: ToolState,
     gizmo: gizmo::Gizmo,
     modal: Option<Modal>,
+    edit_xform: Option<EditXform>,
+    /// Hovered axis of the Edit Mode move gizmo (0=X,1=Y,2=Z)
+    edit_gizmo_hover: Option<usize>,
+    edit_gizmo_drag: Option<EditGizmoDrag>,
     sel_drag: Option<SelDrag>,
     ui: UiState,
     bindings: Vec<Binding>,
@@ -95,6 +130,79 @@ fn err_string<E: std::fmt::Display>(e: E) -> String {
     e.to_string()
 }
 
+
+fn edit_sel_world_center(doc: &Document) -> Option<(glam::Vec3, glam::Mat4)> {
+    let session = doc.edit.as_ref()?;
+    if session.selected_vert_indices().is_empty() {
+        return None;
+    }
+    let id = session.object_id;
+    let idx = doc.scene.objects.iter().position(|o| o.id == id)?;
+    let world = doc.scene.world_matrices()[idx];
+    let local = session.selection_center();
+    Some((world.transform_point3(local), world))
+}
+
+fn draw_edit_gizmo_ui(
+    ctx: &egui::Context,
+    rect: egui::Rect,
+    camera: &OrbitCamera,
+    viewport: [f32; 4],
+    doc: &Document,
+    hover: Option<usize>,
+    drag_axis: Option<usize>,
+) {
+    let Some((origin, _)) = edit_sel_world_center(doc) else { return };
+    let dist = (origin - camera.target).length().max(0.5);
+    let len = (dist * 0.15).clamp(0.3, 8.0);
+    let ppp = ctx.pixels_per_point();
+    let vp = [rect.min.x * ppp, rect.min.y * ppp, rect.width() * ppp, rect.height() * ppp];
+    let painter = ctx
+        .layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("edit_gizmo")))
+        .with_clip_rect(rect);
+    let pt = |p: glam::Vec2| egui::pos2(p.x / ppp, p.y / ppp);
+    use crate::tools::project_px;
+    let colors = [
+        egui::Color32::from_rgb(230, 60, 60),
+        egui::Color32::from_rgb(80, 200, 80),
+        egui::Color32::from_rgb(70, 120, 240),
+    ];
+    let active = drag_axis.or(hover);
+    let axes = [glam::Vec3::X, glam::Vec3::Y, glam::Vec3::Z];
+    for (i, dir) in axes.iter().enumerate() {
+        let on = active == Some(i);
+        let col = if on {
+            egui::Color32::from_rgb(255, 220, 60)
+        } else {
+            colors[i]
+        };
+        let (Some(p0), Some(p1)) = (
+            project_px(camera, vp, origin),
+            project_px(camera, vp, origin + *dir * len),
+        ) else {
+            continue;
+        };
+        let stroke = egui::Stroke::new(if on { 3.5 } else { 2.5 }, col);
+        painter.line_segment([pt(p0), pt(p1)], stroke);
+        let d2 = (p1 - p0).normalize_or_zero();
+        let n = glam::Vec2::new(-d2.y, d2.x);
+        let base = p1 - d2 * 14.0 * ppp;
+        painter.add(egui::Shape::convex_polygon(
+            vec![
+                pt(p1 + d2 * 6.0 * ppp),
+                pt(base + n * 6.0 * ppp),
+                pt(base - n * 6.0 * ppp),
+            ],
+            col,
+            egui::Stroke::NONE,
+        ));
+    }
+    if let Some(pc) = project_px(camera, vp, origin) {
+        painter.circle_filled(pt(pc), 5.0, egui::Color32::WHITE);
+    }
+    let _ = viewport;
+}
+
 impl App {
     fn new(initial: Option<PathBuf>) -> Self {
         Self {
@@ -106,6 +214,9 @@ impl App {
             ts: ToolState::new(),
             gizmo: gizmo::Gizmo::new(),
             modal: None,
+            edit_xform: None,
+            edit_gizmo_hover: None,
+            edit_gizmo_drag: None,
             sel_drag: None,
             ui: UiState::default(),
             bindings: keymap::bindings(),
@@ -230,6 +341,10 @@ impl App {
 
     // ------------------------------------------------------------------ picking / cursor
     fn pick(&mut self, extend: bool) {
+        if self.doc.in_edit_mode() {
+            self.pick_edit(extend);
+            return;
+        }
         let [vx, vy, vw, vh] = self.viewport;
         let nx = (self.cursor.0 as f32 - vx) / vw * 2.0 - 1.0;
         let ny = 1.0 - (self.cursor.1 as f32 - vy) / vh * 2.0;
@@ -239,6 +354,329 @@ impl App {
             (Some(i), false) => self.doc.select_only(i),
             (None, false) => self.doc.select_none(),
             (None, true) => {}
+        }
+    }
+
+
+    /// If verts are selected, start a free Move grab (same as G). Returns true if started.
+    /// Select component under cursor and start a hold-to-drag move.
+
+    fn edit_selection_world_center(&self) -> Option<(glam::Vec3, glam::Mat4, usize)> {
+        let session = self.doc.edit.as_ref()?;
+        if session.selected_vert_indices().is_empty() {
+            return None;
+        }
+        let id = session.object_id;
+        let idx = self.doc.scene.objects.iter().position(|o| o.id == id)?;
+        let world = self.doc.scene.world_matrices()[idx];
+        let local = session.selection_center();
+        let origin = world.transform_point3(local);
+        Some((origin, world, idx))
+    }
+
+    fn edit_gizmo_len(&self, origin: glam::Vec3) -> f32 {
+        let dist = (origin - self.camera.target).length().max(0.5);
+        (dist * 0.15).clamp(0.3, 8.0)
+    }
+
+    fn edit_gizmo_hover_test(&mut self) {
+        self.edit_gizmo_hover = None;
+        let Some((origin, _, _)) = self.edit_selection_world_center() else { return };
+        let len = self.edit_gizmo_len(origin);
+        let [vx, vy, vw, vh] = self.viewport;
+        let cam = &self.camera;
+        let vp = self.viewport;
+        use crate::tools::project_px;
+        let cursor = glam::Vec2::new(self.cursor.0 as f32, self.cursor.1 as f32);
+        let axes = [glam::Vec3::X, glam::Vec3::Y, glam::Vec3::Z];
+        let mut best: Option<(usize, f32)> = None;
+        for (i, dir) in axes.iter().enumerate() {
+            let (Some(p0), Some(p1)) = (
+                project_px(cam, vp, origin),
+                project_px(cam, vp, origin + *dir * len),
+            ) else { continue };
+            // distance from cursor to segment
+            let ab = p1 - p0;
+            let t = ((cursor - p0).dot(ab) / ab.length_squared().max(1e-6)).clamp(0.0, 1.0);
+            let closest = p0 + ab * t;
+            let d = (cursor - closest).length();
+            if d < 12.0 && best.map_or(true, |(_, bd)| d < bd) {
+                best = Some((i, d));
+            }
+        }
+        self.edit_gizmo_hover = best.map(|(i, _)| i);
+    }
+
+    fn begin_edit_gizmo_drag(&mut self) -> bool {
+        let Some(axis) = self.edit_gizmo_hover else { return false };
+        let Some(session) = self.doc.edit.as_ref() else { return false };
+        let verts = session.snapshot_positions();
+        if verts.is_empty() {
+            return false;
+        }
+        let Some((origin, world, _)) = self.edit_selection_world_center() else { return false };
+        let axis_dir = [glam::Vec3::X, glam::Vec3::Y, glam::Vec3::Z][axis];
+        let (ro, rd) = {
+            let [vx, vy, vw, vh] = self.viewport;
+            let nx = (self.cursor.0 as f32 - vx) / vw * 2.0 - 1.0;
+            let ny = 1.0 - (self.cursor.1 as f32 - vy) / vh * 2.0;
+            self.camera.ray((nx, ny), vw / vh)
+        };
+        // param along axis from ray
+        let start = {
+            let w = rd.cross(axis_dir);
+            let den = w.length_squared();
+            if den < 1e-10 {
+                0.0
+            } else {
+                (origin - ro).cross(rd).dot(w) / den // rough
+            }
+        };
+        // better: closest points between ray and axis line
+        let start = {
+            let u = axis_dir;
+            let v = rd;
+            let w0 = origin - ro;
+            let a = u.dot(u);
+            let b = u.dot(v);
+            let c = v.dot(v);
+            let d = u.dot(w0);
+            let e = v.dot(w0);
+            let den = a * c - b * b;
+            if den.abs() < 1e-10 {
+                0.0
+            } else {
+                (b * e - c * d) / den
+            }
+        };
+        self.doc.checkpoint();
+        self.edit_gizmo_drag = Some(EditGizmoDrag {
+            axis,
+            axis_dir,
+            origin,
+            start_param: start,
+            verts,
+            inv_world: world.inverse(),
+        });
+        true
+    }
+
+    fn update_edit_gizmo_drag(&mut self) {
+        let Some(d) = self.edit_gizmo_drag.as_ref() else { return };
+        let (ro, rd) = {
+            let [vx, vy, vw, vh] = self.viewport;
+            let nx = (self.cursor.0 as f32 - vx) / vw * 2.0 - 1.0;
+            let ny = 1.0 - (self.cursor.1 as f32 - vy) / vh * 2.0;
+            self.camera.ray((nx, ny), vw / vh)
+        };
+        let u = d.axis_dir;
+        let v = rd;
+        let w0 = d.origin - ro;
+        let a = u.dot(u);
+        let b = u.dot(v);
+        let c = v.dot(v);
+        let d_ = u.dot(w0);
+        let e = v.dot(w0);
+        let den = a * c - b * b;
+        let t = if den.abs() < 1e-10 {
+            0.0
+        } else {
+            (b * e - c * d_) / den
+        };
+        let delta_world = d.axis_dir * (t - d.start_param);
+        let delta_local = d.inv_world.transform_vector3(delta_world);
+        let positions: Vec<(u32, glam::Vec3)> = d
+            .verts
+            .iter()
+            .map(|(vi, p)| (*vi, *p + delta_local))
+            .collect();
+        if let Some(session) = self.doc.edit.as_mut() {
+            session.set_vert_positions(&positions);
+        }
+        self.doc.sync_edit_mesh();
+    }
+
+    fn end_edit_gizmo_drag(&mut self) {
+        self.edit_gizmo_drag = None;
+    }
+
+
+    fn try_edit_click_drag(&mut self, extend: bool) -> bool {
+        let Some(session) = self.doc.edit.as_ref() else { return false };
+        let id = session.object_id;
+        let Some(idx) = self.doc.scene.objects.iter().position(|o| o.id == id) else { return false };
+        let [vx, vy, vw, vh] = self.viewport;
+        if vw < 1.0 || vh < 1.0 {
+            return false;
+        }
+        let nx = (self.cursor.0 as f32 - vx) / vw * 2.0 - 1.0;
+        let ny = 1.0 - (self.cursor.1 as f32 - vy) / vh * 2.0;
+        let (ro, rd) = self.camera.ray((nx, ny), vw / vh);
+        let world = self.doc.scene.world_matrices()[idx];
+        let inv = world.inverse();
+        let local_o = inv.transform_point3(ro);
+        let local_d = inv.transform_vector3(rd);
+        let dist = (world.w_axis.truncate() - self.camera.target).length().max(0.5);
+        // Prefer grabbing vertices regardless of current domain
+        let thresh = dist * 0.06;
+        let mut tmp = session.clone();
+        tmp.selection.domain = forge_core::EditDomain::Vertex;
+        let pick_vert = tmp.pick_component(local_o, local_d, thresh);
+        let pick_other = session.pick_component(local_o, local_d, thresh);
+        let pick = pick_vert.or(pick_other);
+        let Some(pick) = pick else {
+            if !extend {
+                self.doc.edit_select_none();
+            }
+            return false;
+        };
+        if matches!(pick, forge_core::EditPick::Vertex(_)) {
+            if let Some(e) = self.doc.edit.as_mut() {
+                e.selection.domain = forge_core::EditDomain::Vertex;
+            }
+        }
+        self.doc.edit_apply_pick(pick, extend);
+        // If we now have verts to move, start drag immediately
+        let has = self
+            .doc
+            .edit
+            .as_ref()
+            .map(|e| !e.selected_vert_indices().is_empty())
+            .unwrap_or(false);
+        if has {
+            self.start_edit_xform_ex(EditXformKind::Move, true);
+            return true;
+        }
+        true // selected but nothing to move (shouldn't happen)
+    }
+
+    fn begin_edit_axis_grab(&mut self) -> bool {
+        let Some(session) = self.doc.edit.as_ref() else { return false };
+        if session.selected_vert_indices().is_empty() {
+            return false;
+        }
+        self.start_edit_xform(EditXformKind::Move);
+        true
+    }
+
+    fn start_edit_xform(&mut self, kind: EditXformKind) {
+        self.start_edit_xform_ex(kind, false);
+    }
+
+    fn start_edit_xform_ex(&mut self, kind: EditXformKind, confirm_on_release: bool) {
+        let Some(session) = self.doc.edit.as_ref() else { return };
+        let verts = session.snapshot_positions();
+        if verts.is_empty() {
+            self.status("Nothing selected");
+            return;
+        }
+        let center = session.selection_center();
+        let id = session.object_id;
+        let Some(idx) = self.doc.scene.objects.iter().position(|o| o.id == id) else { return };
+        let world = self.doc.scene.world_matrices()[idx];
+        let inv_world = world.inverse();
+        self.doc.checkpoint();
+        self.edit_xform = Some(EditXform {
+            kind,
+            start_cursor: self.cursor,
+            verts,
+            center,
+            inv_world,
+            confirm_on_release,
+        });
+        if confirm_on_release {
+            self.status("Dragging selection…");
+        } else {
+            let name = match kind {
+                EditXformKind::Move => "Move",
+                EditXformKind::Rotate => "Rotate",
+                EditXformKind::Scale => "Scale",
+            };
+            self.status(format!("{name} — LMB confirm, RMB/Esc cancel"));
+        }
+    }
+
+    fn update_edit_xform(&mut self) {
+        let Some(xf) = self.edit_xform.as_ref() else { return };
+        let dx = (self.cursor.0 - xf.start_cursor.0) as f32;
+        let dy = (self.cursor.1 - xf.start_cursor.1) as f32;
+        let inv_view = self.camera.view().inverse();
+        let right = inv_view.x_axis.truncate().normalize_or_zero();
+        let up = inv_view.y_axis.truncate().normalize_or_zero();
+        let dist = (self.camera.target - inv_view.w_axis.truncate()).length().max(0.1);
+
+        let positions: Vec<(u32, glam::Vec3)> = match xf.kind {
+            EditXformKind::Move => {
+                let scale = dist * 0.0025;
+                let world_delta = right * (dx * scale) + up * (-dy * scale);
+                let local_delta = xf.inv_world.transform_vector3(world_delta);
+                xf.verts.iter().map(|(vi, p)| (*vi, *p + local_delta)).collect()
+            }
+            EditXformKind::Rotate => {
+                let angle = dx * 0.01;
+                let axis = xf.inv_world.transform_vector3(
+                    inv_view.z_axis.truncate().normalize_or_zero()
+                ).normalize_or_zero();
+                let q = glam::Quat::from_axis_angle(axis, angle);
+                xf.verts
+                    .iter()
+                    .map(|(vi, p)| (*vi, xf.center + q * (*p - xf.center)))
+                    .collect()
+            }
+            EditXformKind::Scale => {
+                let factor = (1.0 + dx * 0.005).max(0.01);
+                let f = glam::Vec3::splat(factor);
+                xf.verts
+                    .iter()
+                    .map(|(vi, p)| (*vi, xf.center + (*p - xf.center) * f))
+                    .collect()
+            }
+        };
+        if let Some(session) = self.doc.edit.as_mut() {
+            session.set_vert_positions(&positions);
+        }
+        self.doc.sync_edit_mesh();
+    }
+
+    fn confirm_edit_xform(&mut self) {
+        if self.edit_xform.take().is_some() {
+            // checkpoint was taken at start; current state is the result
+            self.status("Edit Mode");
+        }
+    }
+
+    fn cancel_edit_xform(&mut self) {
+        if let Some(xf) = self.edit_xform.take() {
+            if let Some(session) = self.doc.edit.as_mut() {
+                session.set_vert_positions(&xf.verts);
+            }
+            self.doc.sync_edit_mesh();
+            // discard the checkpoint taken at start of the grab
+            self.doc.drop_last_checkpoint();
+            self.status("Transform cancelled");
+        }
+    }
+
+    fn pick_edit(&mut self, extend: bool) {
+        let Some(session) = self.doc.edit.as_ref() else { return };
+        let id = session.object_id;
+        let Some(idx) = self.doc.scene.objects.iter().position(|o| o.id == id) else { return };
+        let [vx, vy, vw, vh] = self.viewport;
+        let nx = (self.cursor.0 as f32 - vx) / vw * 2.0 - 1.0;
+        let ny = 1.0 - (self.cursor.1 as f32 - vy) / vh * 2.0;
+        let (ro, rd) = self.camera.ray((nx, ny), vw / vh);
+        let world = self.doc.scene.world_matrices()[idx];
+        let inv = world.inverse();
+        let local_o = inv.transform_point3(ro);
+        let local_d = inv.transform_vector3(rd);
+        // threshold ~ 12px in world units near the object
+        let dist = (world.w_axis.truncate() - self.camera.target).length().max(0.5);
+        let thresh = dist * 0.03;
+        let pick = session.pick_component(local_o, local_d, thresh);
+        match pick {
+            Some(p) => self.doc.edit_apply_pick(p, extend),
+            None if !extend => self.doc.edit_select_none(),
+            None => {}
         }
     }
 
@@ -314,6 +752,11 @@ impl App {
             return;
         }
         let (lo, hi) = (start.min(cur), start.max(cur));
+        if self.doc.in_edit_mode() {
+            let extend = d.op != SelectOp::Replace;
+            self.finish_edit_sel_rect(lo, hi, extend);
+            return;
+        }
         let hits: Vec<usize> = anchors(&self.doc, &self.camera, self.viewport)
             .into_iter()
             .filter(|(_, p)| match d.tool {
@@ -323,6 +766,22 @@ impl App {
             .map(|(i, _)| i)
             .collect();
         apply_selection(&mut self.doc, &hits, d.op);
+    }
+
+    fn finish_edit_sel_rect(&mut self, lo: Vec2, hi: Vec2, extend: bool) {
+        let Some(session) = self.doc.edit.as_mut() else { return };
+        let id = session.object_id;
+        let Some(idx) = self.doc.scene.objects.iter().position(|o| o.id == id) else { return };
+        let world = self.doc.scene.world_matrices()[idx];
+        let cam = self.camera.clone();
+        let vp = self.viewport;
+        session.select_in_rect(
+            world,
+            &move |w| crate::tools::project_px(&cam, vp, w).map(|p| (p.x, p.y)),
+            (lo.x, lo.y),
+            (hi.x, hi.y),
+            extend,
+        );
     }
 
     fn sel_shape(&self) -> Option<SelShape> {
@@ -409,6 +868,7 @@ impl App {
         let res = match ext.as_str() {
             "glb" | "gltf" => forge_io::load_gltf(path),
             "obj" => forge_io::load_obj(path),
+            "fbx" => forge_io::load_fbx(path),
             _ => {
                 self.status(format!("Unsupported file type: .{ext}"));
                 return;
@@ -483,16 +943,20 @@ impl App {
         }
     }
 
-    fn export(&mut self, glb: bool, selected_only: bool) {
+    fn export(&mut self, format: &str, selected_only: bool) {
         #[cfg(target_arch = "wasm32")]
         {
-            let _ = (glb, selected_only);
+            let _ = (format, selected_only);
             self.status("Export is not available on WebAssembly yet".to_string());
             return;
         }
         #[cfg(not(target_arch = "wasm32"))]
         {
-            let (filter, ext, default) = if glb { ("glTF Binary", "glb", "model.glb") } else { ("Wavefront OBJ", "obj", "model.obj") };
+            let (filter, ext, default) = match format {
+                "glb" => ("glTF Binary", "glb", "model.glb"),
+                "fbx" => ("Autodesk FBX", "fbx", "model.fbx"),
+                _ => ("Wavefront OBJ", "obj", "model.obj"),
+            };
             let Some(mut p) = rfd::FileDialog::new().add_filter(filter, &[ext]).set_file_name(default).save_file() else {
                 return;
             };
@@ -500,7 +964,11 @@ impl App {
                 p.set_extension(ext);
             }
             let only = selected_only.then_some(&self.doc.selection);
-            let res = if glb { forge_io::export_glb(&self.doc.scene, &p, only) } else { forge_io::export_obj(&self.doc.scene, &p, only) };
+            let res = match format {
+                "glb" => forge_io::export_glb(&self.doc.scene, &p, only),
+                "fbx" => forge_io::export_fbx(&self.doc.scene, &p, only),
+                _ => forge_io::export_obj(&self.doc.scene, &p, only),
+            };
             match res {
                 Ok(()) => self.status(format!("Exported {}", p.display())),
                 Err(e) => self.status(format!("Export failed: {e:#}")),
@@ -559,15 +1027,17 @@ impl App {
                 }
                 #[cfg(not(target_arch = "wasm32"))]
                 {
-                    if let Some(p) = rfd::FileDialog::new().add_filter("3D models", &["glb", "gltf", "obj"]).pick_file() {
+                    if let Some(p) = rfd::FileDialog::new().add_filter("3D models", &["glb", "gltf", "obj", "fbx"]).pick_file() {
                         self.import_path(&p);
                     }
                 }
             }
-            A::ExportGlb => self.export(true, false),
-            A::ExportObj => self.export(false, false),
-            A::ExportGlbSelected => self.export(true, true),
-            A::ExportObjSelected => self.export(false, true),
+            A::ExportGlb => self.export("glb", false),
+            A::ExportObj => self.export("obj", false),
+            A::ExportGlbSelected => self.export("glb", true),
+            A::ExportObjSelected => self.export("obj", true),
+            A::ExportFbx => self.export("fbx", false),
+            A::ExportFbxSelected => self.export("fbx", true),
             A::Quit => {
                 if self.confirm_discard() {
                     el.exit();
@@ -575,13 +1045,26 @@ impl App {
             }
 
             A::Undo => {
-                self.doc.undo();
+                if self.edit_xform.is_some() {
+                    self.cancel_edit_xform();
+                } else if self.doc.undo() {
+                    self.status("Undo");
+                } else {
+                    self.status("Nothing to undo");
+                }
             }
             A::Redo => {
-                self.doc.redo();
+                if self.doc.redo() {
+                    self.status("Redo");
+                } else {
+                    self.status("Nothing to redo");
+                }
             }
             A::Duplicate => {
-                if self.doc.duplicate(false) {
+                if self.doc.in_edit_mode() {
+                    self.doc.edit_duplicate();
+                    self.status("Duplicated faces");
+                } else if self.doc.duplicate(false) {
                     self.start_modal(ModalKind::Move, false);
                 }
             }
@@ -590,7 +1073,28 @@ impl App {
                     self.start_modal(ModalKind::Move, false);
                 }
             }
-            A::Delete => self.doc.delete_selected(),
+            A::Delete => {
+                if self.doc.in_edit_mode() {
+                    self.doc.edit_delete();
+                    self.status("Deleted selection");
+                } else {
+                    self.doc.delete_selected();
+                }
+            },
+            A::Extrude => {
+                if self.doc.in_edit_mode() {
+                    self.doc.edit_extrude(0.25);
+                    self.status("Extruded");
+                } else {
+                    self.status("Extrude only works in Edit Mode");
+                }
+            },
+            A::MergeVerts => {
+                if self.doc.in_edit_mode() {
+                    self.doc.edit_merge_verts();
+                    self.status("Merged vertices");
+                }
+            },
             A::Rename => {
                 if let Some(i) = self.doc.active_index() {
                     self.ui.renaming = Some(Rename::Object(self.doc.scene.objects[i].id));
@@ -600,9 +1104,27 @@ impl App {
             }
             A::MakeSingleUser => self.doc.make_single_user(),
 
-            A::SelectAll => self.doc.select_all(),
-            A::SelectNone => self.doc.select_none(),
-            A::SelectInvert => self.doc.select_invert(),
+            A::SelectAll => {
+                if self.doc.in_edit_mode() {
+                    self.doc.edit_select_all();
+                } else {
+                    self.doc.select_all();
+                }
+            },
+            A::SelectNone => {
+                if self.doc.in_edit_mode() {
+                    self.doc.edit_select_none();
+                } else {
+                    self.doc.select_none();
+                }
+            },
+            A::SelectInvert => {
+                if self.doc.in_edit_mode() {
+                    self.doc.edit_invert_selection();
+                } else {
+                    self.doc.select_invert();
+                }
+            },
             A::SelectRandom => self.doc.select_random(0.5),
             A::SelectChildren => self.doc.select_children(),
             A::SelectParent => self.doc.select_parent(),
@@ -624,9 +1146,27 @@ impl App {
                 };
             }
             A::ToggleSnap => self.ts.snap.enabled = !self.ts.snap.enabled,
-            A::ModalMove => self.start_modal(ModalKind::Move, true),
-            A::ModalRotate => self.start_modal(ModalKind::Rotate, true),
-            A::ModalScale => self.start_modal(ModalKind::Scale, true),
+            A::ModalMove => {
+                if self.doc.in_edit_mode() {
+                    self.start_edit_xform(EditXformKind::Move);
+                } else {
+                    self.start_modal(ModalKind::Move, true);
+                }
+            },
+            A::ModalRotate => {
+                if self.doc.in_edit_mode() {
+                    self.start_edit_xform(EditXformKind::Rotate);
+                } else {
+                    self.start_modal(ModalKind::Rotate, true);
+                }
+            },
+            A::ModalScale => {
+                if self.doc.in_edit_mode() {
+                    self.start_edit_xform(EditXformKind::Scale);
+                } else {
+                    self.start_modal(ModalKind::Scale, true);
+                }
+            },
 
             A::Hide => self.doc.hide_selected(),
             A::HideUnselected => self.doc.hide_unselected(),
@@ -667,7 +1207,15 @@ impl App {
             }
             A::SetOrigin(m) => self.doc.set_origin(m),
             A::GeometryToOrigin => self.doc.geometry_to_origin(),
-            A::Apply { loc, rot, scale } => self.doc.apply_transform(loc, rot, scale),
+            A::Apply { loc, rot, scale } => {
+                if self.doc.in_edit_mode() {
+                    // Ctrl+A is "Apply transforms" in Object Mode; in Edit Mode treat as Select All
+                    self.doc.edit_select_all();
+                    self.status("Select all (Edit Mode)");
+                } else {
+                    self.doc.apply_transform(loc, rot, scale);
+                }
+            },
             A::ClearLocation => self.doc.clear_transform(true, false, false),
             A::ClearRotation => self.doc.clear_transform(false, true, false),
             A::ClearScale => self.doc.clear_transform(false, false, true),
@@ -742,6 +1290,39 @@ impl App {
 
             A::ToggleShortcuts => self.ui.show_shortcuts = !self.ui.show_shortcuts,
             A::ShowAbout => self.ui.show_about = true,
+            A::ToggleEditMode => {
+                // Drop any object-gizmo drag so it cannot move the whole object
+                if self.gizmo.dragging() {
+                    self.gizmo.end();
+                }
+                self.edit_xform = None;
+                match self.doc.toggle_edit_mode() {
+                    Ok(()) => {
+                        if self.doc.in_edit_mode() {
+                            // Stay off the object Move/Rotate/Scale tools while editing verts
+                            self.ts.tool = Tool::Select;
+                            self.status("Edit Mode — select points, then G to move".to_string());
+                        } else {
+                            self.status("Object Mode".to_string());
+                        }
+                        self.frame(false);
+                    }
+                    Err(e) => self.status(e),
+                }
+            }
+            A::EditDomainVertex => {
+                self.doc.set_edit_domain(EditDomain::Vertex);
+                self.status("Vertex select".to_string());
+            }
+            A::EditDomainEdge => {
+                self.doc.set_edit_domain(EditDomain::Edge);
+                self.status("Edge select".to_string());
+            }
+            A::EditDomainFace => {
+                self.doc.set_edit_domain(EditDomain::Face);
+                self.status("Face select".to_string());
+            }
+
         }
     }
 
@@ -787,7 +1368,15 @@ impl App {
 
     fn shortcut(&mut self, code: KeyCode, el: &ActiveEventLoop) {
         if code == KeyCode::Escape {
+            if self.edit_xform.is_some() {
+                self.cancel_edit_xform();
+                return;
+            }
             self.sel_drag = None;
+            if self.doc.in_edit_mode() {
+                self.doc.exit_edit_mode(true);
+                self.status("Object Mode");
+            }
             return;
         }
         let (ctrl, shift, alt) = (self.ctrl(), self.mods.shift_key(), self.mods.alt_key());
@@ -799,6 +1388,24 @@ impl App {
     // ------------------------------------------------------------------ input
     fn mouse_button(&mut self, state: ElementState, button: MouseButton, consumed: bool) {
         let down = state == ElementState::Pressed;
+        if let Some(xf) = self.edit_xform.as_ref() {
+            let on_release = xf.confirm_on_release;
+            if on_release {
+                // Click-drag: release LMB confirms, RMB cancels
+                if button == MouseButton::Left && !down {
+                    self.confirm_edit_xform();
+                } else if button == MouseButton::Right && down {
+                    self.cancel_edit_xform();
+                }
+            } else if down {
+                match button {
+                    MouseButton::Left => self.confirm_edit_xform(),
+                    MouseButton::Right => self.cancel_edit_xform(),
+                    _ => {}
+                }
+            }
+            return;
+        }
         if self.modal.is_some() {
             if down {
                 match button {
@@ -817,7 +1424,24 @@ impl App {
                     if !start {
                         return;
                     }
-                    if self.ts.tool.is_gizmo() && self.gizmo.begin(self.cursor, &self.camera, self.viewport, &mut self.doc, &self.ts) {
+                    if self.doc.in_edit_mode() {
+                        // Axis arrows first (like Object Mode gizmo)
+                        if self.begin_edit_gizmo_drag() {
+                            return;
+                        }
+                        // Click a vertex: select + free drag
+                        if self.try_edit_click_drag(shift) {
+                            return;
+                        }
+                        // Missed: orbit camera
+                        self.left = true;
+                        self.press = self.cursor;
+                        self.dragged = false;
+                        return;
+                    }
+                    if self.ts.tool.is_gizmo()
+                        && self.gizmo.begin(self.cursor, &self.camera, self.viewport, &mut self.doc, &self.ts)
+                    {
                         return;
                     }
                     match self.ts.tool {
@@ -828,6 +1452,8 @@ impl App {
                             self.dragged = false;
                         }
                     }
+                } else if self.edit_gizmo_drag.is_some() {
+                    self.end_edit_gizmo_drag();
                 } else if self.gizmo.dragging() {
                     self.gizmo.end();
                 } else if self.sel_drag.is_some() {
@@ -860,11 +1486,19 @@ impl App {
         let (dx, dy) = ((x - self.cursor.0) as f32, (y - self.cursor.1) as f32);
         self.cursor = (x, y);
         let (shift, ctrl) = (self.mods.shift_key(), self.ctrl());
+        if self.edit_gizmo_drag.is_some() {
+            self.update_edit_gizmo_drag();
+            return;
+        }
+        if self.edit_xform.is_some() {
+            self.update_edit_xform();
+            return;
+        }
         if self.modal.is_some() {
             self.update_modal();
             return;
         }
-        if self.gizmo.dragging() {
+        if self.gizmo.dragging() && !self.doc.in_edit_mode() {
             self.gizmo.update(self.cursor, &self.camera, self.viewport, &mut self.doc, &self.ts, ctrl);
             return;
         }
@@ -873,7 +1507,11 @@ impl App {
             return;
         }
         if !self.left && !self.middle && !self.right {
-            self.gizmo.hover_test(self.cursor, &self.camera, self.viewport, &self.doc, &self.ts);
+            if self.doc.in_edit_mode() {
+                self.edit_gizmo_hover_test();
+            } else {
+                self.gizmo.hover_test(self.cursor, &self.camera, self.viewport, &self.doc, &self.ts);
+            }
         }
         if self.left {
             let d = ((x - self.press.0).powi(2) + (y - self.press.1).powi(2)).sqrt();
@@ -918,7 +1556,19 @@ impl App {
             tools::draw_toolbar(ctx, r, &mut self.ts);
             let extra = overlay::Extra { shape: shape.as_ref(), modal: modal_text.as_deref(), circle };
             overlay::draw(ctx, &self.camera, r, &self.doc, &extra);
-            self.gizmo.draw(ctx, &self.camera, r, &self.doc, &self.ts);
+            if self.doc.in_edit_mode() {
+                draw_edit_gizmo_ui(
+                    ctx,
+                    r,
+                    &self.camera,
+                    self.viewport,
+                    &self.doc,
+                    self.edit_gizmo_hover,
+                    self.edit_gizmo_drag.as_ref().map(|d| d.axis),
+                );
+            } else {
+                self.gizmo.draw(ctx, &self.camera, r, &self.doc, &self.ts);
+            }
             actions = a;
             rect = r;
         });
@@ -1072,8 +1722,28 @@ impl ApplicationHandler for App {
                 if let PhysicalKey::Code(code) = event.physical_key {
                     if self.modal.is_some() {
                         self.modal_key(code);
-                    } else if !consumed && !self.egui_ctx.wants_keyboard_input() {
-                        self.shortcut(code, el);
+                    } else if !self.egui_ctx.wants_keyboard_input() {
+                        // egui marks Tab as "consumed" for focus cycling — still allow our mode shortcuts
+                        let viewport_key = matches!(
+                            code,
+                            KeyCode::Tab
+                                | KeyCode::Digit1
+                                | KeyCode::Digit2
+                                | KeyCode::Digit3
+                                | KeyCode::KeyG
+                                | KeyCode::KeyR
+                                | KeyCode::KeyS
+                                | KeyCode::KeyE
+                                | KeyCode::KeyX
+                                | KeyCode::KeyA
+                                | KeyCode::KeyZ
+                                | KeyCode::KeyY
+                                | KeyCode::Delete
+                                | KeyCode::Escape
+                        );
+                        if !consumed || viewport_key {
+                            self.shortcut(code, el);
+                        }
                     }
                 }
             }
@@ -1085,6 +1755,7 @@ impl ApplicationHandler for App {
 
 #[cfg(not(target_arch = "wasm32"))]
 fn main() {
+    fonts_io::load_cached_fonts();
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     let initial = std::env::args().nth(1).map(PathBuf::from);
     let event_loop = EventLoop::new().expect("event loop");
@@ -1094,6 +1765,7 @@ fn main() {
 
 #[cfg(target_arch = "wasm32")]
 fn main() {
+    fonts_io::load_cached_fonts();
     console_error_panic_hook::set_once();
     console_log::init_with_level(log::Level::Info).expect("console_log");
     let event_loop = EventLoop::new().expect("event loop");

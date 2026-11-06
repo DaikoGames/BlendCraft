@@ -2,7 +2,7 @@
 use crate::keymap::{self, Action, Binding};
 use crate::tools::{Tool, ToolState};
 use egui::RichText;
-use forge_core::{
+use forge_core::{font_registry, free_font_catalog, TextFont, 
     AlignMode, AlignTo, AlphaMode, CameraData, Constraint, ConstraintKind, Document, EmptyShape, LightData, LightType, Material, ObjectKind,
     OriginMode, Primitive,
 };
@@ -20,6 +20,9 @@ pub enum Rename {
 pub struct UiState {
     pub show_shortcuts: bool,
     pub show_about: bool,
+    pub show_font_library: bool,
+    pub font_filter: String,
+    pub font_status: String,
     pub show_move_popup: bool,
     pub status: String,
     pub shortcut_filter: String,
@@ -97,6 +100,41 @@ pub fn draw(
 
     egui::TopBottomPanel::top("menu").show(ctx, |ui| menu_bar(ui, doc, settings, ts, st, bindings, recent, &mut actions));
 
+    egui::TopBottomPanel::top("mode_bar").show(ctx, |ui| {
+        ui.horizontal(|ui| {
+            let in_edit = doc.in_edit_mode();
+            let mesh_ok = doc.active_index().map(|i| doc.scene.objects[i].kind.is_mesh()).unwrap_or(false)
+                || doc.selection.iter().any(|id| {
+                    doc.scene.objects.iter().any(|o| o.id == *id && o.kind.is_mesh())
+                });
+            if ui.add_enabled(mesh_ok || in_edit, egui::SelectableLabel::new(!in_edit, "Object Mode")).clicked() {
+                if in_edit {
+                    actions.push(Action::ToggleEditMode);
+                }
+            }
+            if ui.add_enabled(mesh_ok || in_edit, egui::SelectableLabel::new(in_edit, "Edit Mode")).clicked() {
+                if !in_edit {
+                    actions.push(Action::ToggleEditMode);
+                }
+            }
+            ui.separator();
+            ui.add_enabled_ui(in_edit, |ui| {
+                let domain = doc.edit.as_ref().map(|e| e.selection.domain);
+                if ui.selectable_label(domain == Some(forge_core::EditDomain::Vertex), "Vertex").clicked() {
+                    actions.push(Action::EditDomainVertex);
+                }
+                if ui.selectable_label(domain == Some(forge_core::EditDomain::Edge), "Edge").clicked() {
+                    actions.push(Action::EditDomainEdge);
+                }
+                if ui.selectable_label(domain == Some(forge_core::EditDomain::Face), "Face").clicked() {
+                    actions.push(Action::EditDomainFace);
+                }
+            });
+            if !mesh_ok && !in_edit {
+                ui.weak("Select a mesh to edit");
+            }
+        });
+    });
     egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
         ui.horizontal(|ui| {
             let tris: usize = (0..doc.scene.objects.len()).filter(|&i| doc.scene.is_visible(i)).map(|i| doc.scene.objects[i].mesh.indices.len() / 3).sum();
@@ -124,6 +162,7 @@ pub fn draw(
 
     shortcuts_window(ctx, st, bindings);
     move_popup(ctx, doc, st, &mut actions);
+    font_library_window(ctx, st);
     let mut about = st.show_about;
     egui::Window::new("About").open(&mut about).show(ctx, |ui| {
         ui.heading("BlendCraft");
@@ -162,13 +201,19 @@ fn menu_bar(ui: &mut egui::Ui, doc: &mut Document, settings: &mut ViewSettings, 
             mi(ui, actions, b, "Save", Action::Save, true);
             mi(ui, actions, b, "Save As…", Action::SaveAs, true);
             ui.separator();
-            mi(ui, actions, b, "Import… (glTF, GLB, OBJ)", Action::Import, true);
+            mi(ui, actions, b, "Import… (glTF, GLB, OBJ, FBX)", Action::Import, true);
+            if ui.button("Font Library…").clicked() {
+                st.show_font_library = true;
+                ui.close_menu();
+            }
             ui.menu_button("Export", |ui| {
                 mi(ui, actions, b, "glTF Binary (.glb)", Action::ExportGlb, true);
                 mi(ui, actions, b, "Wavefront (.obj)", Action::ExportObj, true);
+                mi(ui, actions, b, "Autodesk FBX (.fbx)", Action::ExportFbx, true);
                 ui.separator();
                 mi(ui, actions, b, "glTF Binary, selected only", Action::ExportGlbSelected, has_sel);
                 mi(ui, actions, b, "Wavefront, selected only", Action::ExportObjSelected, has_sel);
+                mi(ui, actions, b, "Autodesk FBX, selected only", Action::ExportFbxSelected, has_sel);
             });
             ui.separator();
             mi(ui, actions, b, "Quit", Action::Quit, true);
@@ -195,7 +240,20 @@ fn menu_bar(ui: &mut egui::Ui, doc: &mut Document, settings: &mut ViewSettings, 
             ui.separator();
             mi(ui, actions, b, "Children", Action::SelectChildren, has_sel);
             mi(ui, actions, b, "Parent", Action::SelectParent, has_sel);
-            ui.menu_button("Select Similar", |ui| {
+            ui.menu_button("Mode", |ui| {
+            let in_edit = doc.in_edit_mode();
+            mi(ui, actions, b, if in_edit { "Object Mode" } else { "Edit Mode" }, Action::ToggleEditMode, true);
+            ui.separator();
+            ui.add_enabled_ui(in_edit, |ui| {
+                mi(ui, actions, b, "Vertex", Action::EditDomainVertex, true);
+                mi(ui, actions, b, "Edge", Action::EditDomainEdge, true);
+                mi(ui, actions, b, "Face", Action::EditDomainFace, true);
+            });
+            if !in_edit {
+                ui.weak("Select a mesh object, then Edit Mode.");
+            }
+        });
+        ui.menu_button("Select Similar", |ui| {
                 mi(ui, actions, b, "Same Type", Action::SelectSameType, has_active);
                 mi(ui, actions, b, "Same Collection", Action::SelectSameCollection, has_active);
                 mi(ui, actions, b, "Same Material", Action::SelectSameMaterial, has_active);
@@ -389,6 +447,10 @@ fn menu_bar(ui: &mut egui::Ui, doc: &mut Document, settings: &mut ViewSettings, 
         });
         ui.menu_button("Help", |ui| {
             mi(ui, actions, b, "Keyboard Shortcuts", Action::ToggleShortcuts, true);
+            if ui.button("Font Library…").clicked() {
+                st.show_font_library = true;
+                ui.close_menu();
+            }
             if ui.button("About").clicked() {
                 st.show_about = true;
                 ui.close_menu();
@@ -617,6 +679,101 @@ fn move_popup(ctx: &egui::Context, doc: &Document, st: &mut UiState, actions: &m
 }
 
 // ------------------------------------------------------------------ shortcuts window
+
+fn font_library_window(ctx: &egui::Context, st: &mut UiState) {
+    if !st.show_font_library {
+        return;
+    }
+    let mut open = st.show_font_library;
+    egui::Window::new("Font Library")
+        .open(&mut open)
+        .default_width(520.0)
+        .default_height(480.0)
+        .show(ctx, |ui| {
+            ui.label("Browse free fonts (download once, then offline) and fonts already on this computer.");
+            ui.add(
+                egui::TextEdit::singleline(&mut st.font_filter)
+                    .hint_text("Filter fonts…")
+                    .desired_width(f32::INFINITY),
+            );
+            ui.horizontal(|ui| {
+                #[cfg(not(target_arch = "wasm32"))]
+                if ui.button("Import .ttf / .otf…").clicked() {
+                    if let Some(path) = rfd::FileDialog::new()
+                        .add_filter("Fonts", &["ttf", "otf"])
+                        .pick_file()
+                    {
+                        match crate::fonts_io::import_font_file(&path) {
+                            Ok(name) => st.font_status = format!("Imported {name}"),
+                            Err(e) => st.font_status = format!("Import failed: {e}"),
+                        }
+                    }
+                }
+                #[cfg(not(target_arch = "wasm32"))]
+                if ui.button("Rescan system fonts").clicked() {
+                    crate::fonts_io::load_cached_fonts();
+                    st.font_status = "System fonts rescanned".into();
+                }
+            });
+            if !st.font_status.is_empty() {
+                ui.weak(&st.font_status);
+            }
+            ui.separator();
+            ui.heading("Downloadable (free licenses)");
+            let filter = st.font_filter.to_ascii_lowercase();
+            egui::ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
+                egui::Grid::new("catalog_fonts").num_columns(4).striped(true).show(ui, |ui| {
+                    ui.strong("Name");
+                    ui.strong("Family");
+                    ui.strong("License");
+                    ui.strong("");
+                    ui.end_row();
+                    for f in free_font_catalog() {
+                        if !filter.is_empty()
+                            && !f.name.to_ascii_lowercase().contains(&filter)
+                            && !f.family.to_ascii_lowercase().contains(&filter)
+                        {
+                            continue;
+                        }
+                        let installed = crate::fonts_io::is_catalog_installed(f.name);
+                        ui.label(f.name);
+                        ui.label(f.family);
+                        ui.label(f.license);
+                        if installed {
+                            ui.label("✓ Installed");
+                        } else {
+                            #[cfg(not(target_arch = "wasm32"))]
+                            if ui.button("Download").clicked() {
+                                match crate::fonts_io::download_catalog_font(f.name) {
+                                    Ok(n) => st.font_status = format!("Downloaded {n}"),
+                                    Err(e) => st.font_status = format!("Failed: {e}"),
+                                }
+                            }
+                            #[cfg(target_arch = "wasm32")]
+                            ui.label("—");
+                        }
+                        ui.end_row();
+                    }
+                });
+            });
+            ui.separator();
+            ui.heading("Installed (ready to use on Text objects)");
+            let names = font_registry()
+                .lock()
+                .map(|r| r.names())
+                .unwrap_or_default();
+            egui::ScrollArea::vertical().max_height(180.0).show(ui, |ui| {
+                for n in names {
+                    if !filter.is_empty() && !n.to_ascii_lowercase().contains(&filter) {
+                        continue;
+                    }
+                    ui.label(n);
+                }
+            });
+        });
+    st.show_font_library = open;
+}
+
 fn shortcuts_window(ctx: &egui::Context, st: &mut UiState, bindings: &[Binding]) {
     let mut open = st.show_shortcuts;
     egui::Window::new("Keyboard Shortcuts").open(&mut open).default_size([640.0, 640.0]).resizable(true).collapsible(false).show(ctx, |ui| {
@@ -1006,7 +1163,90 @@ fn properties(ui: &mut egui::Ui, doc: &mut Document, actions: &mut Vec<Action>) 
                     n(ui, "Major segments", major_segments, 3, 256);
                     n(ui, "Minor segments", minor_segments, 3, 256);
                 }
-                Primitive::Monkey { size } | Primitive::Text { size } => f(ui, "Size", size),
+                Primitive::Monkey { size } => f(ui, "Size", size),
+                Primitive::Text { content, size, font, font_name, extrude, depth } => {
+                    ui.label("Content");
+                    let mut text = content.clone();
+                    let te = ui.add(
+                        egui::TextEdit::multiline(&mut text)
+                            .desired_width(180.0)
+                            .desired_rows(2)
+                            .hint_text("Enter text…"),
+                    );
+                    if te.changed() {
+                        *content = text;
+                    }
+                    ui.label("Font file");
+                    let loaded: Vec<String> = font_registry()
+                        .lock()
+                        .map(|r| r.names())
+                        .unwrap_or_default();
+                    let label = if font_name.is_empty() {
+                        format!("Built-in ({})", font.name())
+                    } else {
+                        font_name.clone()
+                    };
+                    egui::ComboBox::from_id_salt("text_font_file")
+                        .selected_text(label)
+                        .width(160.0)
+                        .show_ui(ui, |ui| {
+                            if ui.selectable_label(font_name.is_empty(), "Built-in procedural").clicked() {
+                                font_name.clear();
+                            }
+                            for n in &loaded {
+                                if ui.selectable_label(*font_name == *n, n).clicked() {
+                                    *font_name = n.clone();
+                                }
+                            }
+                        });
+                    if font_name.is_empty() {
+                        ui.horizontal(|ui| {
+                            ui.label("Built-in style");
+                            egui::ComboBox::from_id_salt("text_font_style")
+                                .selected_text(font.name())
+                                .width(100.0)
+                                .show_ui(ui, |ui| {
+                                    for fnt in TextFont::all() {
+                                        ui.selectable_value(font, fnt, fnt.name());
+                                    }
+                                });
+                        });
+                    }
+                    ui.horizontal(|ui| {
+                        #[cfg(not(target_arch = "wasm32"))]
+                        if ui.button("Import font…").clicked() {
+                            if let Some(path) = rfd::FileDialog::new()
+                                .add_filter("Fonts", &["ttf", "otf"])
+                                .pick_file()
+                            {
+                                match crate::fonts_io::import_font_file(&path) {
+                                    Ok(name) => {
+                                        *font_name = name;
+                                    }
+                                    Err(e) => log::warn!("font import: {e}"),
+                                }
+                            }
+                        }
+                        #[cfg(not(target_arch = "wasm32"))]
+                        if ui.button("Download free fonts…").clicked() {
+                            for f in free_font_catalog() {
+                                match crate::fonts_io::download_catalog_font(f.name) {
+                                    Ok(name) => {
+                                        if font_name.is_empty() {
+                                            *font_name = name;
+                                        }
+                                    }
+                                    Err(e) => log::warn!("font download {}: {e}", f.name),
+                                }
+                            }
+                        }
+                    });
+                    f(ui, "Size", size);
+                    ui.checkbox(extrude, "3D (extrude)");
+                    if *extrude {
+                        f(ui, "Depth", depth);
+                    }
+                }
                 Primitive::Pyramid { size, height } => {
                     f(ui, "Base size", size);
                     f(ui, "Height", height);
@@ -1033,18 +1273,43 @@ fn properties(ui: &mut egui::Ui, doc: &mut Document, actions: &mut Vec<Action>) 
                     n(ui, "Subdivisions", subdivisions, 1, 5);
                 }
             }
-            for r in rs.iter().chain(rs_i.iter()) {
+            // Rebuild mesh when any parameter response changed OR primitive data diverged
+            let orig = doc.scene.objects[i].primitive.clone();
+            let data_changed = orig.as_ref() != Some(&p);
+            let ui_changed = rs.iter().chain(rs_i.iter()).any(|r| r.changed());
+            if ui_changed || data_changed {
                 let p2 = p.clone();
-                commit(doc, r, |d| {
+                // Use first response if any, else force commit
+                if ui_changed {
+                    for r in rs.iter().chain(rs_i.iter()) {
+                        if r.changed() {
+                            commit(doc, r, |d| {
+                                let mesh = Arc::new(p2.build());
+                                let group = d.scene.objects[i].link_group;
+                                for (j, o) in d.scene.objects.iter_mut().enumerate() {
+                                    if j == i || (group.is_some() && o.link_group == group && o.primitive.is_some()) {
+                                        o.mesh = mesh.clone();
+                                        o.primitive = Some(p2.clone());
+                                    }
+                                }
+                            });
+                            break;
+                        }
+                    }
+                } else if data_changed {
+                    // Font / text content changed without a DragValue response
+                    doc.checkpoint();
                     let mesh = Arc::new(p2.build());
-                    let group = d.scene.objects[i].link_group;
-                    for (j, o) in d.scene.objects.iter_mut().enumerate() {
+                    let group = doc.scene.objects[i].link_group;
+                    for (j, o) in doc.scene.objects.iter_mut().enumerate() {
                         if j == i || (group.is_some() && o.link_group == group && o.primitive.is_some()) {
                             o.mesh = mesh.clone();
                             o.primitive = Some(p2.clone());
                         }
                     }
-                });
+                    doc.version = doc.version.wrapping_add(1);
+                    doc.dirty = true;
+                }
             }
         }
 

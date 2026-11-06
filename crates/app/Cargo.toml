@@ -24,6 +24,7 @@ image.workspace = true
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 rfd.workspace = true
+ureq.workspace = true
 egui-winit = { version = "0.29", default-features = false, features = ["clipboard", "links", "wayland", "x11"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]

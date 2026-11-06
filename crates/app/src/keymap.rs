@@ -20,6 +20,8 @@ pub enum Action {
     ExportObj,
     ExportGlbSelected,
     ExportObjSelected,
+    ExportFbx,
+    ExportFbxSelected,
     Quit,
     // edit
     Undo,
@@ -27,6 +29,8 @@ pub enum Action {
     Duplicate,
     DuplicateLinked,
     Delete,
+    Extrude,
+    MergeVerts,
     Rename,
     MakeSingleUser,
     // select
@@ -97,6 +101,10 @@ pub enum Action {
     // help
     ToggleShortcuts,
     ShowAbout,
+    ToggleEditMode,
+    EditDomainVertex,
+    EditDomainEdge,
+    EditDomainFace,
 }
 
 pub struct Binding {
@@ -155,6 +163,8 @@ pub fn bindings() -> Vec<Binding> {
     b("Edit", "Duplicate linked (then move)", "a", K::KeyD, A::DuplicateLinked);
     b("Edit", "Delete", "", K::KeyX, A::Delete);
     b("Edit", "Delete", "", K::Delete, A::Delete);
+    b("Edit", "Extrude", "", K::KeyE, A::Extrude);
+    b("Edit", "Merge verts", "", K::KeyM, A::MergeVerts);
     b("Edit", "Rename active object", "", K::F2, A::Rename);
 
     b("Select", "Select all", "", K::KeyA, A::SelectAll);
@@ -170,6 +180,10 @@ pub fn bindings() -> Vec<Binding> {
     b("Tools", "Lasso select tool", "", K::KeyL, A::SetTool(Tool::Lasso));
     b("Tools", "Cycle gizmo tool (Move / Rotate / Scale)", "", K::KeyT, A::CycleTool);
     b("Tools", "Toggle snapping", "s", K::Tab, A::ToggleSnap);
+    b("Mode", "Toggle Edit Mode", "", K::Tab, A::ToggleEditMode);
+    b("Mode", "Vertex select", "", K::Digit1, A::EditDomainVertex);
+    b("Mode", "Edge select", "", K::Digit2, A::EditDomainEdge);
+    b("Mode", "Face select", "", K::Digit3, A::EditDomainFace);
 
     b("Transform", "Move (modal)", "", K::KeyG, A::ModalMove);
     b("Transform", "Rotate (modal)", "", K::KeyR, A::ModalRotate);

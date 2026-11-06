@@ -2,7 +2,7 @@
 //! selection shapes (box / lasso / circle) and the modal-transform status text.
 use crate::tools::{project_px, SelShape};
 use egui::{Color32, Stroke};
-use forge_core::{helper_lines, Document, OrbitCamera};
+use forge_core::{helper_lines, Document, EditDomain, OrbitCamera};
 use glam::{Mat4, Vec2, Vec3, Vec4};
 
 pub struct Extra<'a> {
@@ -90,6 +90,82 @@ pub fn draw(ctx: &egui::Context, cam: &OrbitCamera, rect: egui::Rect, doc: &Docu
     }
     if let Some((c, r)) = extra.circle {
         painter.circle_stroke(pt(c), r / ppp, sel_stroke);
+    }
+
+
+    // Edit Mode: vertices / edges / faces
+    if let Some(session) = doc.edit.as_ref() {
+        if let Some(idx) = doc.scene.objects.iter().position(|o| o.id == session.object_id) {
+            let world = doc.scene.world_matrices()[idx];
+            let verts: Vec<Vec3> = session
+                .mesh
+                .vertices
+                .iter()
+                .map(|v| world.transform_point3(Vec3::from(v.position)))
+                .collect();
+            let selected_verts = session.selected_vert_indices();
+            // All mesh edges (topology) — shows points are connected
+            let edge_col = Color32::from_rgb(90, 160, 220);
+            let edge_sel = Color32::from_rgb(255, 180, 40);
+            for (a, b) in session.build_edges() {
+                let (Some(p0), Some(p1)) = (
+                    project_px(cam, vp, verts[a as usize]),
+                    project_px(cam, vp, verts[b as usize]),
+                ) else { continue };
+                let edge_selected = session.selection.edges.contains(&(a, b))
+                    || session.selection.edges.contains(&(b, a));
+                let both_sel = selected_verts.contains(&a) && selected_verts.contains(&b);
+                let sel = edge_selected || both_sel;
+                let stroke = Stroke::new(
+                    if sel { 2.5_f32 } else { 1.5_f32 },
+                    if sel { edge_sel } else { edge_col },
+                );
+                painter.line_segment([pt(p0), pt(p1)], stroke);
+            }
+            // Vertices as connected joints
+            for (i, w) in verts.iter().enumerate() {
+                let Some(p) = project_px(cam, vp, *w) else { continue };
+                let sel = selected_verts.contains(&(i as u32));
+                let r = if sel { 6.5 } else { 4.5 };
+                let fill = if sel {
+                    Color32::from_rgb(255, 210, 50)
+                } else {
+                    Color32::from_rgb(30, 30, 35)
+                };
+                painter.circle_filled(pt(p), r / ppp, fill);
+                painter.circle_stroke(
+                    pt(p),
+                    r / ppp,
+                    Stroke::new(1.2_f32, if sel { Color32::WHITE } else { Color32::from_rgb(180, 200, 230) }),
+                );
+            }
+            // face centers for face mode
+            if session.selection.domain == EditDomain::Face {
+                for (fi, tri) in session.mesh.indices.chunks_exact(3).enumerate() {
+                    let c = (verts[tri[0] as usize] + verts[tri[1] as usize] + verts[tri[2] as usize]) / 3.0;
+                    let Some(p) = project_px(cam, vp, c) else { continue };
+                    let sel = session.selection.faces.contains(&(fi as u32));
+                    let col = if sel {
+                        Color32::from_rgba_unmultiplied(255, 160, 0, 200)
+                    } else {
+                        Color32::from_rgba_unmultiplied(80, 80, 200, 120)
+                    };
+                    painter.circle_filled(pt(p), 4.0 / ppp, col);
+                }
+            }
+            // mode badge
+            let label = format!("Edit Mode — {}", session.selection.domain.name());
+            let galley = ctx.fonts(|f| {
+                f.layout_no_wrap(label, egui::FontId::proportional(14.0), Color32::from_rgb(255, 200, 80))
+            });
+            let pos = egui::pos2(rect.min.x + 12.0, rect.min.y + 12.0);
+            painter.rect_filled(
+                egui::Rect::from_min_size(pos, galley.size()).expand(6.0),
+                4.0,
+                Color32::from_black_alpha(180),
+            );
+            painter.galley(pos, galley, Color32::from_rgb(255, 200, 80));
+        }
     }
 
     // modal status line

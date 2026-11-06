@@ -2,7 +2,7 @@
 //! Undo is snapshot based; snapshots are cheap because meshes/textures are `Arc`-shared.
 use crate::kinds::{CameraData, LightData, LightType};
 use crate::mesh::Aabb;
-use crate::{Collection, Material, MeshData, Object, ObjectKind, Primitive, Scene, TextureData, Vertex};
+use crate::{Collection, EditDomain, EditSession, Material, MeshData, Object, ObjectKind, Primitive, Scene, TextureData, Vertex};
 use glam::{Mat4, Quat, Vec3};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
@@ -53,10 +53,20 @@ pub struct Document {
     pub version: u64,
     /// UI bookkeeping: a continuous edit (slider drag, typing) already has its undo snapshot.
     pub edit_open: bool,
+    /// Active mesh edit session (Tab / Edit Mode).
+    pub edit: Option<EditSession>,
     rng: u32,
-    undo: Vec<Scene>,
-    redo: Vec<Scene>,
+    undo: Vec<UndoSnap>,
+    redo: Vec<UndoSnap>,
 }
+
+/// Full snapshot for undo/redo: scene + optional Edit Mode session.
+#[derive(Clone)]
+struct UndoSnap {
+    scene: Scene,
+    edit: Option<EditSession>,
+}
+
 
 const MAX_UNDO: usize = 200;
 
@@ -104,6 +114,7 @@ impl Document {
             dirty: false,
             version: 1,
             edit_open: false,
+            edit: None,
             rng: 0x9E37_79B9,
             undo: Vec::new(),
             redo: Vec::new(),
@@ -121,8 +132,20 @@ impl Document {
 
     // ------------------------------------------------------------------ undo
     /// Call BEFORE mutating the scene.
+    fn take_snap(&self) -> UndoSnap {
+        UndoSnap {
+            scene: self.scene.clone(),
+            edit: self.edit.clone(),
+        }
+    }
+
+    fn restore_snap(&mut self, snap: UndoSnap) {
+        self.scene = snap.scene;
+        self.edit = snap.edit;
+    }
+
     pub fn checkpoint(&mut self) {
-        self.undo.push(self.scene.clone());
+        self.undo.push(self.take_snap());
         if self.undo.len() > MAX_UNDO {
             self.undo.remove(0);
         }
@@ -145,7 +168,9 @@ impl Document {
     pub fn undo(&mut self) -> bool {
         match self.undo.pop() {
             Some(prev) => {
-                self.redo.push(std::mem::replace(&mut self.scene, prev));
+                let current = self.take_snap();
+                self.restore_snap(prev);
+                self.redo.push(current);
                 self.after_history();
                 true
             }
@@ -156,7 +181,9 @@ impl Document {
     pub fn redo(&mut self) -> bool {
         match self.redo.pop() {
             Some(next) => {
-                self.undo.push(std::mem::replace(&mut self.scene, next));
+                let current = self.take_snap();
+                self.restore_snap(next);
+                self.undo.push(current);
                 self.after_history();
                 true
             }
@@ -169,6 +196,12 @@ impl Document {
         self.selection.retain(|id| ids.contains(id));
         if self.active.map_or(false, |a| !ids.contains(&a)) {
             self.active = None;
+        }
+        // Keep Edit Mode only if the edited object still exists
+        if let Some(e) = self.edit.as_ref() {
+            if !ids.contains(&e.object_id) {
+                self.edit = None;
+            }
         }
         self.touch();
     }
@@ -1013,6 +1046,199 @@ impl Document {
         self.sel_changed();
         count
     }
+
+    // ------------------------------------------------------------------ Edit Mode
+    pub fn in_edit_mode(&self) -> bool {
+        self.edit.is_some()
+    }
+
+    pub fn enter_edit_mode(&mut self) -> Result<(), String> {
+        if self.edit.is_some() {
+            return Ok(());
+        }
+        let id = self.active.or_else(|| self.selection.iter().copied().next())
+            .ok_or_else(|| "Select a mesh object first".to_string())?;
+        let idx = self.scene.objects.iter().position(|o| o.id == id)
+            .ok_or_else(|| "Object not found".to_string())?;
+        let obj = &self.scene.objects[idx];
+        if !matches!(obj.kind, ObjectKind::Mesh) {
+            return Err("Only mesh objects can enter Edit Mode".into());
+        }
+        if obj.mesh.vertices.is_empty() {
+            return Err("Mesh has no vertices".into());
+        }
+        let mesh = (*obj.mesh).clone();
+        // Focus selection on this object
+        self.checkpoint(); // so Ctrl+Z can leave Edit Mode / restore pre-edit scene
+        self.selection.clear();
+        self.selection.insert(id);
+        self.active = Some(id);
+        let mut session = EditSession::new(id, mesh);
+        session.weld_coincident(1e-5);
+        // Push welded mesh to the scene immediately
+        if let Some(obj) = self.scene.objects.iter_mut().find(|o| o.id == id) {
+            obj.mesh = std::sync::Arc::new(session.mesh.clone());
+            obj.primitive = None;
+        }
+        self.edit = Some(session);
+        Ok(())
+    }
+
+    /// Leave Edit Mode. `apply` keeps edits; otherwise restores the original mesh.
+    pub fn exit_edit_mode(&mut self, apply: bool) {
+        let Some(session) = self.edit.take() else { return };
+        if apply {
+            // Mesh was already live-synced during edits; keep current geometry.
+            if let Some(obj) = self.scene.objects.iter_mut().find(|o| o.id == session.object_id) {
+                obj.mesh = std::sync::Arc::new(session.mesh);
+            }
+        } else if let Some(obj) = self.scene.objects.iter_mut().find(|o| o.id == session.object_id) {
+            // Cancel: restore mesh from before entering Edit Mode
+            obj.mesh = std::sync::Arc::new(session.original);
+        }
+        self.version = self.version.wrapping_add(1);
+        self.dirty = true;
+    }
+
+    pub fn toggle_edit_mode(&mut self) -> Result<(), String> {
+        if self.edit.is_some() {
+            self.exit_edit_mode(true);
+            Ok(())
+        } else {
+            self.enter_edit_mode()
+        }
+    }
+
+    pub fn set_edit_domain(&mut self, domain: EditDomain) {
+        if let Some(e) = self.edit.as_mut() {
+            e.selection.domain = domain;
+            e.selection.clear();
+        }
+    }
+
+    /// Push working mesh to the scene object (live preview while editing).
+    pub fn sync_edit_mesh(&mut self) {
+        let Some(session) = self.edit.as_ref() else { return };
+        let id = session.object_id;
+        let mesh = session.mesh.clone();
+        if let Some(obj) = self.scene.objects.iter_mut().find(|o| o.id == id) {
+            obj.mesh = std::sync::Arc::new(mesh);
+            obj.primitive = None; // stop parametric rebuild overwriting edits
+        }
+        self.version = self.version.wrapping_add(1);
+        self.dirty = true;
+    }
+
+    pub fn edit_select_all(&mut self) {
+        let Some(e) = self.edit.as_mut() else { return };
+        match e.selection.domain {
+            EditDomain::Vertex => {
+                let n = e.mesh.vertices.len() as u32;
+                e.selection.select_all_verts(n);
+            }
+            EditDomain::Edge => {
+                let edges = e.build_edges();
+                e.selection.select_all_edges(&edges);
+            }
+            EditDomain::Face => {
+                let n = e.face_count();
+                e.selection.select_all_faces(n);
+            }
+        }
+    }
+
+    pub fn edit_select_none(&mut self) {
+        if let Some(e) = self.edit.as_mut() {
+            e.selection.clear();
+        }
+    }
+
+    pub fn edit_apply_pick(&mut self, pick: crate::edit::EditPick, extend: bool) {
+        let Some(e) = self.edit.as_mut() else { return };
+        if !extend {
+            e.selection.clear();
+        }
+        match pick {
+            crate::edit::EditPick::Vertex(i) => {
+                if extend && e.selection.verts.contains(&i) {
+                    e.selection.verts.remove(&i);
+                } else {
+                    e.selection.verts.insert(i);
+                    e.expand_vert_selection_by_position(1e-5);
+                }
+            }
+            crate::edit::EditPick::Edge(key) => {
+                if extend && e.selection.edges.contains(&key) {
+                    e.selection.edges.remove(&key);
+                } else {
+                    e.selection.edges.insert(key);
+                }
+            }
+            crate::edit::EditPick::Face(f) => {
+                if extend && e.selection.faces.contains(&f) {
+                    e.selection.faces.remove(&f);
+                } else {
+                    e.selection.faces.insert(f);
+                }
+            }
+        }
+    }
+    pub fn edit_delete(&mut self) {
+        if self.edit.is_none() { return; }
+        self.checkpoint();
+        if let Some(e) = self.edit.as_mut() {
+            e.delete_selection();
+        }
+        self.sync_edit_mesh();
+    }
+
+    pub fn edit_extrude(&mut self, amount: f32) {
+        if self.edit.is_none() { return; }
+        self.checkpoint();
+        if let Some(e) = self.edit.as_mut() {
+            e.extrude_faces(amount);
+        }
+        self.sync_edit_mesh();
+    }
+
+    pub fn edit_merge_verts(&mut self) {
+        if self.edit.is_none() { return; }
+        self.checkpoint();
+        if let Some(e) = self.edit.as_mut() {
+            e.merge_verts_at_center();
+        }
+        self.sync_edit_mesh();
+    }
+
+    pub fn edit_duplicate(&mut self) {
+        if self.edit.is_none() { return; }
+        self.checkpoint();
+        if let Some(e) = self.edit.as_mut() {
+            e.duplicate_faces(glam::Vec3::new(0.1, 0.1, 0.0));
+        }
+        self.sync_edit_mesh();
+    }
+
+    pub fn edit_invert_selection(&mut self) {
+        let Some(e) = self.edit.as_mut() else { return };
+        match e.selection.domain {
+            EditDomain::Vertex => {
+                let n = e.mesh.vertices.len() as u32;
+                e.selection.invert_verts(n);
+            }
+            EditDomain::Edge => {
+                let all = e.build_edges();
+                let cur = e.selection.edges.clone();
+                e.selection.edges = all.into_iter().filter(|x| !cur.contains(x)).collect();
+            }
+            EditDomain::Face => {
+                let n = e.face_count();
+                let cur = e.selection.faces.clone();
+                e.selection.faces = (0..n).filter(|f| !cur.contains(f)).collect();
+            }
+        }
+    }
+
 }
 
 impl Default for Document {
@@ -1020,6 +1246,7 @@ impl Default for Document {
         Self::new()
     }
 }
+
 
 #[cfg(test)]
 mod tests {

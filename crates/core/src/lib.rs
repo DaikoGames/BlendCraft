@@ -7,7 +7,9 @@ pub mod environment;
 pub mod kinds;
 pub mod material;
 pub mod mesh;
+mod edit;
 pub mod primitives;
+pub mod fonts;
 pub mod project;
 pub mod scene;
 
@@ -19,5 +21,7 @@ pub use document::{AlignMode, AlignTo, Document, OriginMode, SameKind};
 pub use environment::{sh_basis, EnvironmentMap};
 pub use material::{AlphaMode, Material, TextureData};
 pub use mesh::{Aabb, MeshData, MeshGroup, Vertex};
-pub use primitives::Primitive;
+pub use primitives::{Primitive, TextFont};
+pub use fonts::{font_registry, free_font_catalog, mesh_from_font, system_font_dirs, FontRegistry, CatalogFont};
+pub use edit::{EditDomain, EditPick, EditSelection, EditSession, edge_key, world_positions};
 pub use scene::{Collection, Object, Scene};
