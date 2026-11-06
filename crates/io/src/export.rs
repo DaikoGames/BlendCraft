@@ -87,6 +87,7 @@ fn add_mesh(b: &mut Builder, o: &Object, nmat: usize) -> Value {
 }
 
 /// `only`: if Some, only objects whose id is in the set are exported.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn export_glb(scene: &Scene, path: &Path, only: Option<&BTreeSet<u64>>) -> Result<()> {
     let mut b = Builder { bin: Vec::new(), views: Vec::new(), accessors: Vec::new() };
 
@@ -291,6 +292,7 @@ pub fn export_glb(scene: &Scene, path: &Path, only: Option<&BTreeSet<u64>>) -> R
 }
 
 /// Wavefront OBJ (geometry only, transforms baked, Y-up). Materials are not written.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn export_obj(scene: &Scene, path: &Path, only: Option<&BTreeSet<u64>>) -> Result<()> {
     let worlds = scene.world_matrices();
     let mut s = String::from("# Exported by Forge3D\n");
@@ -324,4 +326,13 @@ pub fn export_obj(scene: &Scene, path: &Path, only: Option<&BTreeSet<u64>>) -> R
     }
     std::fs::write(path, s).with_context(|| format!("writing {}", path.display()))?;
     Ok(())
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn export_glb(_scene: &Scene, _path: &Path, _only: Option<&BTreeSet<u64>>) -> Result<()> {
+    anyhow::bail!("GLB export is not available on WebAssembly")
+}
+#[cfg(target_arch = "wasm32")]
+pub fn export_obj(_scene: &Scene, _path: &Path, _only: Option<&BTreeSet<u64>>) -> Result<()> {
+    anyhow::bail!("OBJ export is not available on WebAssembly")
 }

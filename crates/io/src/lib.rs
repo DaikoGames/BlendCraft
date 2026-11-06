@@ -11,6 +11,7 @@ mod obj;
 pub use export::{export_glb, export_obj};
 pub use obj::load_obj;
 
+#[cfg(not(target_arch = "wasm32"))]
 pub fn load_gltf(path: &Path) -> Result<Scene> {
     let (doc, buffers, images) = gltf::import(path).with_context(|| format!("reading {}", path.display()))?;
     let mut scene = Scene::default();
@@ -29,6 +30,7 @@ pub fn load_gltf(path: &Path) -> Result<Scene> {
 }
 
 /// Decode a PNG/JPEG into an RGBA texture (used for "Image as Plane").
+#[cfg(not(target_arch = "wasm32"))]
 pub fn load_image(path: &Path) -> Result<TextureData> {
     let img = image::open(path).with_context(|| format!("reading {}", path.display()))?.to_rgba8();
     let (width, height) = img.dimensions();
@@ -37,6 +39,7 @@ pub fn load_image(path: &Path) -> Result<TextureData> {
 }
 
 /// Load an equirectangular environment map (.hdr preferred; png/jpg are treated as sRGB).
+#[cfg(not(target_arch = "wasm32"))]
 pub fn load_environment(path: &Path) -> Result<EnvironmentMap> {
     let img = image::open(path).with_context(|| format!("reading {}", path.display()))?;
     let is_hdr = matches!(img, image::DynamicImage::ImageRgb32F(_) | image::DynamicImage::ImageRgba32F(_));
@@ -169,4 +172,17 @@ fn visit(node: &gltf::Node, parent: Mat4, buffers: &[gltf::buffer::Data], scene:
     for child in node.children() {
         visit(&child, world, buffers, scene);
     }
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn load_gltf(_path: &Path) -> Result<Scene> {
+    anyhow::bail!("glTF load from path is not available on WebAssembly")
+}
+#[cfg(target_arch = "wasm32")]
+pub fn load_image(_path: &Path) -> Result<TextureData> {
+    anyhow::bail!("image load from path is not available on WebAssembly")
+}
+#[cfg(target_arch = "wasm32")]
+pub fn load_environment(_path: &Path) -> Result<EnvironmentMap> {
+    anyhow::bail!("environment load from path is not available on WebAssembly")
 }

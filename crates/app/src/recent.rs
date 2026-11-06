@@ -1,10 +1,10 @@
-//! "Open Recent" list, stored in a small text file in the user's config folder.
+//! "Open Recent" list. On native: stored in a small text file in the user's config folder.
+//! On wasm: in-memory only (no persistent storage for paths).
 use std::path::{Path, PathBuf};
 
 const MAX_RECENT: usize = 10;
 
-/// <config dir>/BlendCraft/recent.txt (APPDATA on Windows, ~/Library/Application Support on macOS,
-/// $XDG_CONFIG_HOME or ~/.config elsewhere).
+#[cfg(not(target_arch = "wasm32"))]
 fn config_file() -> Option<PathBuf> {
     let base = if cfg!(target_os = "windows") {
         std::env::var_os("APPDATA").map(PathBuf::from)?
@@ -18,7 +18,6 @@ fn config_file() -> Option<PathBuf> {
     Some(base.join("BlendCraft").join("recent.txt"))
 }
 
-/// Move `p` to the front (no duplicates), keep at most MAX_RECENT entries.
 fn push_recent(list: &mut Vec<PathBuf>, p: PathBuf) {
     list.retain(|x| x != &p);
     list.insert(0, p);
@@ -30,19 +29,25 @@ pub struct Recent {
 }
 
 impl Recent {
-    /// Loads the list; files that no longer exist are dropped.
     pub fn load() -> Self {
-        let mut paths: Vec<PathBuf> = Vec::new();
-        if let Some(text) = config_file().and_then(|f| std::fs::read_to_string(f).ok()) {
-            for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
-                let p = PathBuf::from(line);
-                if p.exists() && !paths.contains(&p) {
-                    paths.push(p);
+        #[cfg(target_arch = "wasm32")]
+        {
+            return Self { paths: Vec::new() };
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let mut paths: Vec<PathBuf> = Vec::new();
+            if let Some(text) = config_file().and_then(|f| std::fs::read_to_string(f).ok()) {
+                for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
+                    let p = PathBuf::from(line);
+                    if p.exists() && !paths.contains(&p) {
+                        paths.push(p);
+                    }
                 }
             }
+            paths.truncate(MAX_RECENT);
+            Self { paths }
         }
-        paths.truncate(MAX_RECENT);
-        Self { paths }
     }
 
     pub fn add(&mut self, p: &Path) {
@@ -61,13 +66,16 @@ impl Recent {
     }
 
     fn save(&self) {
-        let Some(f) = config_file() else { return };
-        if let Some(dir) = f.parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
-        let text: String = self.paths.iter().map(|p| format!("{}\n", p.to_string_lossy())).collect();
-        if let Err(e) = std::fs::write(&f, text) {
-            log::warn!("could not save recent files: {e}");
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let Some(f) = config_file() else { return };
+            if let Some(dir) = f.parent() {
+                let _ = std::fs::create_dir_all(dir);
+            }
+            let text: String = self.paths.iter().map(|p| format!("{}\n", p.to_string_lossy())).collect();
+            if let Err(e) = std::fs::write(&f, text) {
+                log::warn!("could not save recent files: {e}");
+            }
         }
     }
 }

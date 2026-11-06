@@ -155,12 +155,19 @@ impl App {
         if !self.doc.dirty {
             return true;
         }
-        rfd::MessageDialog::new()
-            .set_title("Unsaved changes")
-            .set_description("The current scene has unsaved changes. Discard them?")
-            .set_buttons(rfd::MessageButtons::YesNo)
-            .show()
-            == rfd::MessageDialogResult::Yes
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            rfd::MessageDialog::new()
+                .set_title("Unsaved changes")
+                .set_description("The current scene has unsaved changes. Discard them?")
+                .set_buttons(rfd::MessageButtons::YesNo)
+                .show()
+                == rfd::MessageDialogResult::Yes
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            true
+        }
     }
 
     fn reset_view_state(&mut self) {
@@ -375,16 +382,25 @@ impl App {
 
     // ------------------------------------------------------------------ files
     fn open_project(&mut self, path: PathBuf) {
-        let res = std::fs::read(&path).map_err(err_string).and_then(|b| project::from_bytes(&b).map_err(err_string));
-        match res {
-            Ok(scene) => {
-                self.doc = Document::from_scene(scene, Some(path.clone()));
-                self.recent.add(&path);
-                self.reset_view_state();
-                self.frame(false);
-                self.status(format!("Opened {}", path.display()));
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = path;
+            self.status("Open from path is not available on WebAssembly".to_string());
+            return;
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let res = std::fs::read(&path).map_err(err_string).and_then(|b| project::from_bytes(&b).map_err(err_string));
+            match res {
+                Ok(scene) => {
+                    self.doc = Document::from_scene(scene, Some(path.clone()));
+                    self.recent.add(&path);
+                    self.reset_view_state();
+                    self.frame(false);
+                    self.status(format!("Opened {}", path.display()));
+                }
+                Err(e) => self.status(format!("Open failed: {e}")),
             }
-            Err(e) => self.status(format!("Open failed: {e}")),
         }
     }
 
@@ -435,42 +451,60 @@ impl App {
     }
 
     fn save(&mut self, save_as: bool) {
-        let path = match (&self.doc.path, save_as) {
-            (Some(p), false) => p.clone(),
-            _ => {
-                let Some(mut p) = rfd::FileDialog::new().add_filter("BlendCraft project", &["forge"]).set_file_name("untitled.forge").save_file() else {
-                    return;
-                };
-                if p.extension().is_none() {
-                    p.set_extension("forge");
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = save_as;
+            self.status("Save is not available on WebAssembly yet".to_string());
+            return;
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let path = match (&self.doc.path, save_as) {
+                (Some(p), false) => p.clone(),
+                _ => {
+                    let Some(mut p) = rfd::FileDialog::new().add_filter("BlendCraft project", &["forge"]).set_file_name("untitled.forge").save_file() else {
+                        return;
+                    };
+                    if p.extension().is_none() {
+                        p.set_extension("forge");
+                    }
+                    p
                 }
-                p
+            };
+            match project::to_bytes(&self.doc.scene).and_then(|b| std::fs::write(&path, b).map_err(Into::into)) {
+                Ok(()) => {
+                    self.doc.path = Some(path.clone());
+                    self.doc.dirty = false;
+                    self.recent.add(&path);
+                    self.status(format!("Saved {}", path.display()));
+                }
+                Err(e) => self.status(format!("Save failed: {e:#}")),
             }
-        };
-        match project::to_bytes(&self.doc.scene).and_then(|b| std::fs::write(&path, b).map_err(Into::into)) {
-            Ok(()) => {
-                self.doc.path = Some(path.clone());
-                self.doc.dirty = false;
-                self.recent.add(&path);
-                self.status(format!("Saved {}", path.display()));
-            }
-            Err(e) => self.status(format!("Save failed: {e:#}")),
         }
     }
 
     fn export(&mut self, glb: bool, selected_only: bool) {
-        let (filter, ext, default) = if glb { ("glTF Binary", "glb", "model.glb") } else { ("Wavefront OBJ", "obj", "model.obj") };
-        let Some(mut p) = rfd::FileDialog::new().add_filter(filter, &[ext]).set_file_name(default).save_file() else {
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = (glb, selected_only);
+            self.status("Export is not available on WebAssembly yet".to_string());
             return;
-        };
-        if p.extension().is_none() {
-            p.set_extension(ext);
         }
-        let only = selected_only.then_some(&self.doc.selection);
-        let res = if glb { forge_io::export_glb(&self.doc.scene, &p, only) } else { forge_io::export_obj(&self.doc.scene, &p, only) };
-        match res {
-            Ok(()) => self.status(format!("Exported {}", p.display())),
-            Err(e) => self.status(format!("Export failed: {e:#}")),
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let (filter, ext, default) = if glb { ("glTF Binary", "glb", "model.glb") } else { ("Wavefront OBJ", "obj", "model.obj") };
+            let Some(mut p) = rfd::FileDialog::new().add_filter(filter, &[ext]).set_file_name(default).save_file() else {
+                return;
+            };
+            if p.extension().is_none() {
+                p.set_extension(ext);
+            }
+            let only = selected_only.then_some(&self.doc.selection);
+            let res = if glb { forge_io::export_glb(&self.doc.scene, &p, only) } else { forge_io::export_obj(&self.doc.scene, &p, only) };
+            match res {
+                Ok(()) => self.status(format!("Exported {}", p.display())),
+                Err(e) => self.status(format!("Export failed: {e:#}")),
+            }
         }
     }
 
@@ -486,26 +520,48 @@ impl App {
                 }
             }
             A::Open => {
-                if self.confirm_discard() {
-                    if let Some(p) = rfd::FileDialog::new().add_filter("BlendCraft project", &["forge"]).pick_file() {
-                        self.open_project(p);
+                #[cfg(target_arch = "wasm32")]
+                {
+                    self.status("Open file is not available on WebAssembly yet".to_string());
+                }
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    if self.confirm_discard() {
+                        if let Some(p) = rfd::FileDialog::new().add_filter("BlendCraft project", &["forge"]).pick_file() {
+                            self.open_project(p);
+                        }
                     }
                 }
             }
             A::OpenRecent(p) => {
-                if !p.exists() {
-                    self.recent.remove(&p);
-                    self.status(format!("File no longer exists: {}", p.display()));
-                } else if self.confirm_discard() {
-                    self.open_project(p);
+                #[cfg(target_arch = "wasm32")]
+                {
+                    let _ = p;
+                    self.status("Open recent is not available on WebAssembly yet".to_string());
+                }
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    if !p.exists() {
+                        self.recent.remove(&p);
+                        self.status(format!("File no longer exists: {}", p.display()));
+                    } else if self.confirm_discard() {
+                        self.open_project(p);
+                    }
                 }
             }
             A::ClearRecent => self.recent.clear(),
             A::Save => self.save(false),
             A::SaveAs => self.save(true),
             A::Import => {
-                if let Some(p) = rfd::FileDialog::new().add_filter("3D models", &["glb", "gltf", "obj"]).pick_file() {
-                    self.import_path(&p);
+                #[cfg(target_arch = "wasm32")]
+                {
+                    self.status("Import is not available on WebAssembly yet".to_string());
+                }
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    if let Some(p) = rfd::FileDialog::new().add_filter("3D models", &["glb", "gltf", "obj"]).pick_file() {
+                        self.import_path(&p);
+                    }
                 }
             }
             A::ExportGlb => self.export(true, false),
@@ -637,20 +693,34 @@ impl App {
             A::Add(p) => self.doc.add_primitive(p),
             A::AddKind(k) => self.doc.add_kind(k),
             A::AddImagePlane => {
-                if let Some(p) = rfd::FileDialog::new().add_filter("Images", &["png", "jpg", "jpeg"]).pick_file() {
-                    match forge_io::load_image(&p) {
-                        Ok(t) => {
-                            let name = t.name.clone();
-                            self.doc.add_image_plane(&name, t);
-                            self.status(format!("Added image plane {name}"));
+                #[cfg(target_arch = "wasm32")]
+                {
+                    self.status("Add Image Plane is not available on WebAssembly yet".to_string());
+                }
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    if let Some(p) = rfd::FileDialog::new().add_filter("Images", &["png", "jpg", "jpeg"]).pick_file() {
+                        match forge_io::load_image(&p) {
+                            Ok(t) => {
+                                let name = t.name.clone();
+                                self.doc.add_image_plane(&name, t);
+                                self.status(format!("Added image plane {name}"));
+                            }
+                            Err(e) => self.status(format!("Image failed: {e:#}")),
                         }
-                        Err(e) => self.status(format!("Image failed: {e:#}")),
                     }
                 }
             }
             A::LoadHdri => {
-                if let Some(p) = rfd::FileDialog::new().add_filter("HDR image", &["hdr", "png", "jpg", "jpeg"]).pick_file() {
-                    self.load_hdri(&p);
+                #[cfg(target_arch = "wasm32")]
+                {
+                    self.status("Load HDRI is not available on WebAssembly yet".to_string());
+                }
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    if let Some(p) = rfd::FileDialog::new().add_filter("HDR image", &["hdr", "png", "jpg", "jpeg"]).pick_file() {
+                        self.load_hdri(&p);
+                    }
                 }
             }
             A::ResetSky => {
@@ -677,34 +747,41 @@ impl App {
 
     /// Capture the current 3D viewport (no UI) to a PNG the user chooses.
     fn render_image(&mut self) {
-        let Some(g) = self.gfx.as_mut() else {
-            self.status("Renderer not ready");
+        #[cfg(target_arch = "wasm32")]
+        {
+            self.status("Render Image is not available on WebAssembly yet".to_string());
             return;
-        };
-        let Some(mut path) = rfd::FileDialog::new()
-            .add_filter("PNG image", &["png"])
-            .set_file_name("render.png")
-            .save_file()
-        else {
-            return;
-        };
-        if path.extension().is_none() {
-            path.set_extension("png");
         }
-        // Use current viewport size (physical)
-        let (w, h) = (
-            self.viewport[2].max(64.0) as u32,
-            self.viewport[3].max(64.0) as u32,
-        );
-        match g.renderer.capture(&self.camera, &self.settings, w, h) {
-            Ok(rgba) => {
-                if let Err(e) = image::save_buffer(&path, &rgba, w, h, image::ColorType::Rgba8) {
-                    self.status(&format!("Render failed: {e}"));
-                } else {
-                    self.status(&format!("Saved render to {}", path.display()));
-                }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let Some(g) = self.gfx.as_mut() else {
+                self.status("Renderer not ready");
+                return;
+            };
+            let Some(mut path) = rfd::FileDialog::new()
+                .add_filter("PNG image", &["png"])
+                .set_file_name("render.png")
+                .save_file()
+            else {
+                return;
+            };
+            if path.extension().is_none() {
+                path.set_extension("png");
             }
-            Err(e) => self.status(&format!("Render failed: {e}")),
+            let (w, h) = (
+                self.viewport[2].max(64.0) as u32,
+                self.viewport[3].max(64.0) as u32,
+            );
+            match g.renderer.capture(&self.camera, &self.settings, w, h) {
+                Ok(rgba) => {
+                    if let Err(e) = image::save_buffer(&path, &rgba, w, h, image::ColorType::Rgba8) {
+                        self.status(&format!("Render failed: {e}"));
+                    } else {
+                        self.status(&format!("Saved render to {}", path.display()));
+                    }
+                }
+                Err(e) => self.status(&format!("Render failed: {e}")),
+            }
         }
     }
 
@@ -1006,10 +1083,30 @@ impl ApplicationHandler for App {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     let initial = std::env::args().nth(1).map(PathBuf::from);
     let event_loop = EventLoop::new().expect("event loop");
     event_loop.set_control_flow(ControlFlow::Poll);
     event_loop.run_app(&mut App::new(initial)).expect("run");
+}
+
+#[cfg(target_arch = "wasm32")]
+fn main() {
+    console_error_panic_hook::set_once();
+    console_log::init_with_level(log::Level::Info).expect("console_log");
+    let event_loop = EventLoop::new().expect("event loop");
+    event_loop.set_control_flow(ControlFlow::Poll);
+    event_loop.run_app(&mut App::new(None)).expect("run");
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen::prelude::wasm_bindgen(start)]
+pub fn wasm_main() {
+    console_error_panic_hook::set_once();
+    console_log::init_with_level(log::Level::Info).expect("console_log");
+    let event_loop = EventLoop::new().expect("event loop");
+    event_loop.set_control_flow(ControlFlow::Poll);
+    let _ = event_loop.run_app(&mut App::new(None));
 }

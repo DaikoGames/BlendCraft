@@ -3,6 +3,7 @@ use forge_core::{Material, MeshData, Object, Scene, Vertex};
 use std::path::Path;
 
 /// Wavefront OBJ import (triangulated, single index). Diffuse colors become base colors.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn load_obj(path: &Path) -> Result<Scene> {
     let (models, mats) = tobj::load_obj(path, &tobj::LoadOptions { triangulate: true, single_index: true, ..Default::default() })?;
     let mut scene = Scene::default();
@@ -24,7 +25,6 @@ pub fn load_obj(path: &Path) -> Result<Scene> {
             .map(|i| Vertex {
                 position: [me.positions[i * 3], me.positions[i * 3 + 1], me.positions[i * 3 + 2]],
                 normal: if has_n { [me.normals[i * 3], me.normals[i * 3 + 1], me.normals[i * 3 + 2]] } else { [0.0; 3] },
-                // OBJ v points up, internal (glTF) v points down
                 uv: if has_t { [me.texcoords[i * 2], 1.0 - me.texcoords[i * 2 + 1]] } else { [0.0; 2] },
             })
             .collect();
@@ -37,4 +37,9 @@ pub fn load_obj(path: &Path) -> Result<Scene> {
         scene.objects.push(obj);
     }
     Ok(scene)
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn load_obj(_path: &Path) -> Result<Scene> {
+    anyhow::bail!("OBJ load from path is not available on WebAssembly")
 }
