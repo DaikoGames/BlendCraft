@@ -27,6 +27,12 @@ enum EditXformKind {
 }
 
 /// Modal transform for selected mesh components in Edit Mode (G / R / S).
+struct BoneExtrudeDrag {
+    bone_idx: u32,
+    /// Fixed head in armature local space
+    head: glam::Vec3,
+}
+
 struct EditGizmoDrag {
     axis: usize,
     /// World-space axis direction
@@ -86,6 +92,8 @@ struct App {
     /// Hovered axis of the Edit Mode move gizmo (0=X,1=Y,2=Z)
     edit_gizmo_hover: Option<usize>,
     edit_gizmo_drag: Option<EditGizmoDrag>,
+    bone_pose_drag: Option<(f64, f64)>,
+    bone_extrude_drag: Option<BoneExtrudeDrag>,
     sel_drag: Option<SelDrag>,
     ui: UiState,
     bindings: Vec<Binding>,
@@ -217,6 +225,8 @@ impl App {
             edit_xform: None,
             edit_gizmo_hover: None,
             edit_gizmo_drag: None,
+            bone_pose_drag: None,
+            bone_extrude_drag: None,
             sel_drag: None,
             ui: UiState::default(),
             bindings: keymap::bindings(),
@@ -500,6 +510,157 @@ impl App {
         self.edit_gizmo_drag = None;
     }
 
+
+    /// Blender-style: extrude bone from selected tip, then grab the new tip with the mouse.
+    fn start_bone_extrude(&mut self) {
+        if !self.doc.armature_edit {
+            self.status("Tab into Armature Edit Mode first");
+            return;
+        }
+        self.doc.checkpoint();
+        let new_idx = {
+            let Some(a) = self.doc.active_armature_mut() else {
+                self.status("Select an Armature");
+                return;
+            };
+            if a.selected.is_empty() {
+                if let Some(act) = a.active {
+                    a.selected.insert(act);
+                }
+            }
+            if a.selected.is_empty() {
+                self.status("Select a bone to extrude from");
+                return;
+            }
+            a.extrude_selected();
+            a.active
+        };
+        let Some(bi) = new_idx else {
+            self.status("Extrude failed");
+            return;
+        };
+        let head = self
+            .doc
+            .active_armature()
+            .and_then(|a| a.bones.get(bi as usize))
+            .map(|b| glam::Vec3::from(b.head))
+            .unwrap_or(glam::Vec3::ZERO);
+        self.bone_extrude_drag = Some(BoneExtrudeDrag { bone_idx: bi, head });
+        self.status("Extrude bone — move mouse to place tip, LMB confirm, RMB/Esc cancel");
+    }
+
+    fn update_bone_extrude(&mut self) {
+        let Some(drag) = self.bone_extrude_drag.as_ref() else { return };
+        let bi = drag.bone_idx;
+        let head = drag.head;
+        let id = match self.doc.active {
+            Some(id) => id,
+            None => return,
+        };
+        let Some(idx) = self.doc.scene.objects.iter().position(|o| o.id == id) else { return };
+        let [vx, vy, vw, vh] = self.viewport;
+        if vw < 1.0 || vh < 1.0 {
+            return;
+        }
+        let nx = (self.cursor.0 as f32 - vx) / vw * 2.0 - 1.0;
+        let ny = 1.0 - (self.cursor.1 as f32 - vy) / vh * 2.0;
+        let (ro, rd) = self.camera.ray((nx, ny), vw / vh);
+        let world = self.doc.scene.world_matrices()[idx];
+        let inv = world.inverse();
+        let local_o = inv.transform_point3(ro);
+        let local_d = inv.transform_vector3(rd).normalize_or_zero();
+        // Plane through head, facing the camera (armature local)
+        let cam_fwd_world = (self.camera.target - self.camera.eye()).normalize_or_zero();
+        let plane_n = inv.transform_vector3(cam_fwd_world).normalize_or_zero();
+        let denom = local_d.dot(plane_n);
+        let tip = if denom.abs() > 1e-6 {
+            let t = (head - local_o).dot(plane_n) / denom;
+            if t > 0.0 {
+                local_o + local_d * t
+            } else {
+                head + glam::Vec3::Y * 0.3
+            }
+        } else {
+            head + glam::Vec3::Y * 0.3
+        };
+        // Keep a minimum length
+        let mut tip = tip;
+        if (tip - head).length() < 0.05 {
+            tip = head + (tip - head).normalize_or_zero() * 0.05;
+            if (tip - head).length() < 0.04 {
+                tip = head + glam::Vec3::Y * 0.25;
+            }
+        }
+        if let Some(a) = self.doc.active_armature_mut() {
+            if let Some(b) = a.bones.get_mut(bi as usize) {
+                b.head = head.to_array();
+                b.tail = tip.to_array();
+            }
+        }
+        self.doc.touch();
+    }
+
+    fn confirm_bone_extrude(&mut self) {
+        self.bone_extrude_drag = None;
+        self.status("Bone extruded");
+    }
+
+    fn cancel_bone_extrude(&mut self) {
+        self.bone_extrude_drag = None;
+        // Undo the checkpoint taken at start of extrude
+        self.doc.undo();
+        self.status("Extrude cancelled");
+    }
+
+    fn start_bone_pose_rotate(&mut self) {
+        if self.doc.active_armature().map(|a| a.active.is_none()).unwrap_or(true) {
+            self.status("Select a bone first");
+            return;
+        }
+        self.doc.checkpoint();
+        self.bone_pose_drag = Some(self.cursor);
+        self.status("Pose rotate — move mouse, LMB confirm, RMB/Esc cancel");
+    }
+
+    fn try_pick_bone(&mut self, extend: bool) -> bool {
+        let Some(session_arm) = self.doc.active_armature() else { return false };
+        let id = self.doc.active.unwrap();
+        let Some(idx) = self.doc.scene.objects.iter().position(|o| o.id == id) else { return false };
+        let [vx, vy, vw, vh] = self.viewport;
+        if vw < 1.0 || vh < 1.0 {
+            return false;
+        }
+        let nx = (self.cursor.0 as f32 - vx) / vw * 2.0 - 1.0;
+        let ny = 1.0 - (self.cursor.1 as f32 - vy) / vh * 2.0;
+        let (ro, rd) = self.camera.ray((nx, ny), vw / vh);
+        let world = self.doc.scene.world_matrices()[idx];
+        let inv = world.inverse();
+        let local_o = inv.transform_point3(ro);
+        let local_d = inv.transform_vector3(rd);
+        let dist = (world.w_axis.truncate() - self.camera.target).length().max(0.5);
+        let thresh = dist * 0.12;
+        let pick = session_arm.pick_bone(local_o, local_d, thresh);
+        let Some(bi) = pick else { return false };
+        self.doc.checkpoint();
+        if let Some(a) = self.doc.active_armature_mut() {
+            a.select_bone(bi, extend);
+        }
+        self.status(format!("Bone {}", bi + 1));
+        true
+    }
+
+    /// Rotate active bone pose with mouse delta (call from ModalRotate when armature selected).
+    fn pose_rotate_active_bone(&mut self, dx: f32, dy: f32) {
+        let Some(a) = self.doc.active_armature_mut() else { return };
+        let Some(ai) = a.active else { return };
+        let Some(bone) = a.bones.get_mut(ai as usize) else { return };
+        let q = glam::Quat::from_xyzw(bone.pose_rot[0], bone.pose_rot[1], bone.pose_rot[2], bone.pose_rot[3]);
+        let delta = glam::Quat::from_euler(glam::EulerRot::YXZ, dx * 0.01, dy * 0.01, 0.0);
+        let nq = (delta * q).normalize();
+        bone.pose_rot = [nq.x, nq.y, nq.z, nq.w];
+        drop(a);
+        self.doc.apply_all_skinning();
+    }
 
     fn try_edit_click_drag(&mut self, extend: bool) -> bool {
         let Some(session) = self.doc.edit.as_ref() else { return false };
@@ -1101,17 +1262,27 @@ impl App {
                 }
             }
             A::Delete => {
-                if self.doc.in_edit_mode() {
+                if self.doc.armature_edit && self.doc.active_armature().is_some() {
+                    self.doc.armature_delete_bones();
+                    self.status("Deleted bones");
+                } else if self.doc.edit.is_some() {
                     self.doc.edit_delete();
                     self.status("Deleted selection");
+                } else if self.doc.active_armature().is_some() {
+                    self.doc.armature_delete_bones();
+                    self.status("Deleted bones");
                 } else {
                     self.doc.delete_selected();
                 }
             },
             A::Extrude => {
-                if self.doc.in_edit_mode() {
+                if self.doc.armature_edit && self.doc.active_armature().is_some() {
+                    self.start_bone_extrude();
+                } else if self.doc.edit.is_some() {
                     self.doc.edit_extrude(0.25);
                     self.status("Extruded");
+                } else if self.doc.active_armature().is_some() {
+                    self.status("Press Tab to enter Armature Edit Mode, then E to extrude");
                 } else {
                     self.status("Extrude only works in Edit Mode");
                 }
@@ -1181,7 +1352,9 @@ impl App {
                 }
             },
             A::ModalRotate => {
-                if self.doc.in_edit_mode() {
+                if self.doc.active_armature().is_some() && self.doc.edit.is_none() {
+                    self.start_bone_pose_rotate();
+                } else if self.doc.in_edit_mode() {
                     self.start_edit_xform(EditXformKind::Rotate);
                 } else {
                     self.start_modal(ModalKind::Rotate, true);
@@ -1325,8 +1498,10 @@ impl App {
                 self.edit_xform = None;
                 match self.doc.toggle_edit_mode() {
                     Ok(()) => {
-                        if self.doc.in_edit_mode() {
-                            // Stay off the object Move/Rotate/Scale tools while editing verts
+                        if self.doc.armature_edit {
+                            self.ts.tool = Tool::Select;
+                            self.status("Armature Edit Mode — select bone, E extrude tip, X delete".to_string());
+                        } else if self.doc.in_edit_mode() {
                             self.ts.tool = Tool::Select;
                             self.status("Edit Mode — select points, then G to move".to_string());
                         } else {
@@ -1348,6 +1523,31 @@ impl App {
             A::EditDomainFace => {
                 self.doc.set_edit_domain(EditDomain::Face);
                 self.status("Face select".to_string());
+            }
+            A::ArmatureAddBone => {
+                self.doc.armature_add_bone();
+                self.status("Bone added");
+            }
+            A::ArmatureExtrude => {
+                if self.doc.armature_edit {
+                    self.start_bone_extrude();
+                } else {
+                    self.status("Press Tab for Armature Edit Mode, then Extrude");
+                }
+            }
+            A::ArmatureDeleteBones => {
+                self.doc.armature_delete_bones();
+                self.status("Deleted bones");
+            }
+            A::ArmatureClearPose => {
+                self.doc.armature_clear_pose();
+                self.status("Pose cleared");
+            }
+            A::ArmatureBindMeshes => {
+                match self.doc.bind_selected_to_armature() {
+                    Ok(n) => self.status(format!("Bound {n} mesh(es) to armature")),
+                    Err(e) => self.status(e),
+                }
             }
 
         }
@@ -1395,11 +1595,26 @@ impl App {
 
     fn shortcut(&mut self, code: KeyCode, el: &ActiveEventLoop) {
         if code == KeyCode::Escape {
+            if self.bone_extrude_drag.is_some() {
+                self.cancel_bone_extrude();
+                return;
+            }
+            if self.bone_pose_drag.is_some() {
+                self.bone_pose_drag = None;
+                self.doc.undo();
+                self.status("Pose cancelled");
+                return;
+            }
             if self.edit_xform.is_some() {
                 self.cancel_edit_xform();
                 return;
             }
             self.sel_drag = None;
+            if self.doc.armature_edit {
+                self.doc.exit_armature_edit();
+                self.status("Object Mode");
+                return;
+            }
             if self.doc.in_edit_mode() {
                 self.doc.exit_edit_mode(true);
                 self.status("Object Mode");
@@ -1415,6 +1630,26 @@ impl App {
     // ------------------------------------------------------------------ input
     fn mouse_button(&mut self, state: ElementState, button: MouseButton, consumed: bool) {
         let down = state == ElementState::Pressed;
+        if self.bone_extrude_drag.is_some() {
+            if button == MouseButton::Left && !down {
+                self.confirm_bone_extrude();
+            } else if button == MouseButton::Right && down {
+                self.cancel_bone_extrude();
+            }
+            return;
+        }
+        if self.bone_pose_drag.is_some() {
+            if button == MouseButton::Left && !down {
+                self.bone_pose_drag = None;
+                self.doc.apply_all_skinning();
+                self.status("Pose applied");
+            } else if button == MouseButton::Right && down {
+                self.bone_pose_drag = None;
+                self.doc.undo(); // revert checkpoint
+                self.status("Pose cancelled");
+            }
+            return;
+        }
         if let Some(xf) = self.edit_xform.as_ref() {
             let on_release = xf.confirm_on_release;
             if on_release {
@@ -1451,7 +1686,12 @@ impl App {
                     if !start {
                         return;
                     }
-                    if self.doc.in_edit_mode() {
+                    if self.doc.active_armature().is_some() && self.doc.edit.is_none() {
+                        if self.try_pick_bone(shift) {
+                            return;
+                        }
+                    }
+                    if self.doc.in_edit_mode() && self.doc.edit.is_some() {
                         // Axis arrows first (like Object Mode gizmo)
                         if self.begin_edit_gizmo_drag() {
                             return;
@@ -1513,6 +1753,19 @@ impl App {
         let (dx, dy) = ((x - self.cursor.0) as f32, (y - self.cursor.1) as f32);
         self.cursor = (x, y);
         let (shift, ctrl) = (self.mods.shift_key(), self.ctrl());
+        if self.bone_extrude_drag.is_some() {
+            self.update_bone_extrude();
+            return;
+        }
+        if let Some(start) = self.bone_pose_drag {
+            let dx = (self.cursor.0 - start.0) as f32;
+            let dy = (self.cursor.1 - start.1) as f32;
+            // reset to checkpoint pose then apply? simpler: accumulate from start by restoring undo top then applying
+            // For smooth pose: store initial pose on start. For now apply delta from last frame:
+            self.pose_rotate_active_bone(dx * 0.15, dy * 0.15);
+            self.bone_pose_drag = Some(self.cursor);
+            return;
+        }
         if self.edit_gizmo_drag.is_some() {
             self.update_edit_gizmo_drag();
             return;

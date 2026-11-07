@@ -1,5 +1,6 @@
 //! The open document: scene + selection + undo/redo + file state, and all object-mode operations.
 //! Undo is snapshot based; snapshots are cheap because meshes/textures are `Arc`-shared.
+use crate::armature::{ArmatureData, SkinBinding};
 use crate::kinds::{CameraData, LightData, LightType};
 use crate::mesh::Aabb;
 use crate::{Collection, EditDomain, EditSession, Material, MeshData, Object, ObjectKind, Primitive, Scene, TextureData, Vertex};
@@ -55,6 +56,8 @@ pub struct Document {
     pub edit_open: bool,
     /// Active mesh edit session (Tab / Edit Mode).
     pub edit: Option<EditSession>,
+    /// When true, the active armature is in bone Edit Mode (structure).
+    pub armature_edit: bool,
     rng: u32,
     undo: Vec<UndoSnap>,
     redo: Vec<UndoSnap>,
@@ -115,6 +118,7 @@ impl Document {
             version: 1,
             edit_open: false,
             edit: None,
+            armature_edit: false,
             rng: 0x9E37_79B9,
             undo: Vec::new(),
             redo: Vec::new(),
@@ -1055,7 +1059,7 @@ impl Document {
 
     // ------------------------------------------------------------------ Edit Mode
     pub fn in_edit_mode(&self) -> bool {
-        self.edit.is_some()
+        self.edit.is_some() || self.armature_edit
     }
 
     pub fn enter_edit_mode(&mut self) -> Result<(), String> {
@@ -1067,8 +1071,13 @@ impl Document {
         let idx = self.scene.objects.iter().position(|o| o.id == id)
             .ok_or_else(|| "Object not found".to_string())?;
         let obj = &self.scene.objects[idx];
+        if matches!(obj.kind, ObjectKind::Armature(_)) {
+            self.armature_edit = true;
+            self.checkpoint();
+            return Ok(());
+        }
         if !matches!(obj.kind, ObjectKind::Mesh) {
-            return Err("Only mesh objects can enter Edit Mode".into());
+            return Err("Only mesh objects (or Armatures) can enter Edit Mode".into());
         }
         if obj.mesh.vertices.is_empty() {
             return Err("Mesh has no vertices".into());
@@ -1107,6 +1116,10 @@ impl Document {
     }
 
     pub fn toggle_edit_mode(&mut self) -> Result<(), String> {
+        if self.armature_edit {
+            self.armature_edit = false;
+            return Ok(());
+        }
         if self.edit.is_some() {
             self.exit_edit_mode(true);
             Ok(())
@@ -1245,6 +1258,181 @@ impl Document {
         }
     }
 
+    // ------------------------------------------------------------------ Armature
+    pub fn active_armature_mut(&mut self) -> Option<&mut ArmatureData> {
+        let id = self.active?;
+        let obj = self.scene.objects.iter_mut().find(|o| o.id == id)?;
+        match &mut obj.kind {
+            ObjectKind::Armature(a) => Some(a),
+            _ => None,
+        }
+    }
+
+    pub fn active_armature(&self) -> Option<&ArmatureData> {
+        let id = self.active?;
+        let obj = self.scene.objects.iter().find(|o| o.id == id)?;
+        match &obj.kind {
+            ObjectKind::Armature(a) => Some(&a),
+            _ => None,
+        }
+    }
+
+    pub fn enter_armature_edit(&mut self) -> Result<(), String> {
+        if self.active_armature().is_none() {
+            return Err("Select an Armature object".into());
+        }
+        self.checkpoint();
+        self.armature_edit = true;
+        Ok(())
+    }
+
+    pub fn exit_armature_edit(&mut self) {
+        self.armature_edit = false;
+    }
+
+    pub fn armature_extrude(&mut self) {
+        self.checkpoint();
+        if let Some(a) = self.active_armature_mut() {
+            a.extrude_selected();
+        }
+        self.touch();
+    }
+
+    pub fn armature_add_bone(&mut self) {
+        self.checkpoint();
+        if let Some(a) = self.active_armature_mut() {
+            let parent = a.active;
+            a.add_bone(parent);
+        }
+        self.touch();
+    }
+
+    pub fn armature_delete_bones(&mut self) {
+        self.checkpoint();
+        if let Some(a) = self.active_armature_mut() {
+            a.delete_selected();
+        }
+        self.touch();
+    }
+
+    pub fn armature_clear_pose(&mut self) {
+        self.checkpoint();
+        if let Some(a) = self.active_armature_mut() {
+            a.clear_pose();
+        }
+        self.apply_all_skinning();
+        self.touch();
+    }
+
+    /// Bind every selected mesh to the active armature (auto weights).
+    pub fn bind_selected_to_armature(&mut self) -> Result<usize, String> {
+        let arm_id = self.active.ok_or_else(|| "Select an Armature first".to_string())?;
+        let arm_idx = self.scene.index_of(arm_id).ok_or_else(|| "Armature not found".to_string())?;
+        let arm = match &self.scene.objects[arm_idx].kind {
+            ObjectKind::Armature(a) => a.clone(),
+            _ => return Err("Active object is not an Armature".into()),
+        };
+        if arm.bones.is_empty() {
+            return Err("Armature has no bones".into());
+        }
+        let mesh_ids: Vec<u64> = self
+            .selection
+            .iter()
+            .copied()
+            .filter(|&id| id != arm_id)
+            .filter(|&id| {
+                self.scene
+                    .objects
+                    .iter()
+                    .any(|o| o.id == id && o.kind.is_mesh())
+            })
+            .collect();
+        if mesh_ids.is_empty() {
+            return Err("Also select one or more Mesh objects to bind".into());
+        }
+        self.checkpoint();
+        let worlds = self.scene.world_matrices();
+        let arm_world = worlds[arm_idx];
+        let mut count = 0;
+        for mid in mesh_ids {
+            let Some(mi) = self.scene.index_of(mid) else { continue };
+            let mesh_world = worlds[mi];
+            // Bones into mesh-local space for weighting
+            let to_mesh = mesh_world.inverse() * arm_world;
+            let mut arm_local = arm.clone();
+            for b in &mut arm_local.bones {
+                let h = to_mesh.transform_point3(glam::Vec3::from(b.head));
+                let t = to_mesh.transform_point3(glam::Vec3::from(b.tail));
+                b.head = h.to_array();
+                b.tail = t.to_array();
+            }
+            let mesh = self.scene.objects[mi].mesh.clone();
+            let positions: Vec<[f32; 3]> = mesh.vertices.iter().map(|v| v.position).collect();
+            let normals: Vec<[f32; 3]> = mesh.vertices.iter().map(|v| v.normal).collect();
+            let skin = SkinBinding::auto_weights(arm_id, &arm_local, &positions, &normals);
+            // Remember the mesh->armature transform used at bind time for deform
+            self.scene.objects[mi].skin = Some(skin);
+            // Parent under armature (optional hierarchy)
+            self.scene.objects[mi].parent = Some(arm_id);
+            let local = arm_world.inverse() * mesh_world;
+            let (s, r, t) = local.to_scale_rotation_translation();
+            self.scene.objects[mi].scale = s;
+            self.scene.objects[mi].rotation = r;
+            self.scene.objects[mi].translation = t;
+            count += 1;
+        }
+        self.apply_all_skinning();
+        self.touch();
+        Ok(count)
+    }
+
+    /// Recompute every skinned mesh from rest pose + current armature pose.
+    pub fn apply_all_skinning(&mut self) {
+        // Armature world + deform (armature local)
+        let mut arm_info: Vec<(u64, glam::Mat4, Vec<glam::Mat4>)> = Vec::new();
+        {
+            let worlds = self.scene.world_matrices();
+            for (i, o) in self.scene.objects.iter().enumerate() {
+                if let ObjectKind::Armature(a) = &o.kind {
+                    arm_info.push((o.id, worlds[i], a.deform_matrices_hierarchical()));
+                }
+            }
+        }
+        let worlds = self.scene.world_matrices();
+        for (oi, o) in self.scene.objects.iter_mut().enumerate() {
+            let Some(skin) = o.skin.clone() else { continue };
+            let Some((_, arm_world, deform_arm)) = arm_info.iter().find(|(id, _, _)| *id == skin.armature_id) else {
+                continue;
+            };
+            // Mesh local deform mats: convert armature-local deform into mesh-local
+            // rest was weighted in mesh-local with bones mapped to mesh at bind.
+            // Pose deform in armature space D_arm; mesh-local D = inv(mesh_world) * arm_world * D_arm * inv(arm_world) * mesh_world
+            // At bind, bones were mapped with to_mesh = inv(mesh_w)*arm_w. Rest is mesh local.
+            // Approximate: D_mesh ≈ inv(local) * D_arm * local when parented (mesh_world = arm_world * local)
+            let mesh_world = worlds[oi];
+            let to_mesh = mesh_world.inverse() * *arm_world;
+            let from_mesh = to_mesh.inverse();
+            let deform_mesh: Vec<glam::Mat4> = deform_arm
+                .iter()
+                .map(|d| to_mesh * *d * from_mesh)
+                .collect();
+            let (pos, nrm) = skin.deform(&deform_mesh);
+            let mut mesh = (*o.mesh).clone();
+            for (i, v) in mesh.vertices.iter_mut().enumerate() {
+                if i < pos.len() {
+                    v.position = pos[i];
+                }
+                if i < nrm.len() {
+                    v.normal = nrm[i];
+                }
+            }
+            o.mesh = std::sync::Arc::new(mesh);
+            o.primitive = None;
+        }
+        self.version = self.version.wrapping_add(1);
+    }
+
+
 }
 
 impl Default for Document {
@@ -1252,6 +1440,7 @@ impl Default for Document {
         Self::new()
     }
 }
+
 
 
 #[cfg(test)]

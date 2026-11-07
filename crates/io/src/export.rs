@@ -228,6 +228,8 @@ pub fn export_glb(scene: &Scene, path: &Path, only: Option<&BTreeSet<u64>>) -> R
                 };
                 node["mesh"] = json!(mi);
             }
+            // Surface, Volume, GreasePencil, Armature, LightProbe, Speaker, ForceField: empty nodes
+            _ => {}
         }
         nodes.push(node);
         match parent_i.and_then(|pi| node_of[pi]) {

@@ -3,7 +3,8 @@ use crate::keymap::{self, Action, Binding};
 use crate::tools::{Tool, ToolState};
 use egui::RichText;
 use forge_core::{font_registry, free_font_catalog, TextFont, 
-    AlignMode, AlignTo, AlphaMode, CameraData, Constraint, ConstraintKind, Document, EmptyShape, LightData, LightType, Material, ObjectKind,
+    AlignMode, AlignTo, AlphaMode, ArmatureData, CameraData, Constraint, ConstraintKind, Document, EmptyShape, ForceFieldData, ForceFieldType,
+    GreasePencilData, LightData, LightProbeData, LightProbeType, LightType, Material, ObjectKind, SpeakerData, SurfaceData, VolumeData,
     OriginMode, Primitive,
 };
 use forge_render::{ShadingMode, ViewSettings, WireMode};
@@ -78,6 +79,13 @@ fn kind_tag(k: &ObjectKind) -> &'static str {
         ObjectKind::Empty { .. } => "E",
         ObjectKind::Camera(_) => "C",
         ObjectKind::Light(_) => "L",
+        ObjectKind::Surface(_) => "S",
+        ObjectKind::Volume(_) => "V",
+        ObjectKind::GreasePencil(_) => "G",
+        ObjectKind::Armature(_) => "A",
+        ObjectKind::LightProbe(_) => "P",
+        ObjectKind::Speaker(_) => "Sp",
+        ObjectKind::ForceField(_) => "F",
     }
 }
 
@@ -112,7 +120,12 @@ pub fn draw(
                     actions.push(Action::ToggleEditMode);
                 }
             }
-            if ui.add_enabled(mesh_ok || in_edit, egui::SelectableLabel::new(in_edit, "Edit Mode")).clicked() {
+            let edit_label = if doc.armature_edit {
+                "Armature Edit"
+            } else {
+                "Edit Mode"
+            };
+            if ui.add_enabled(mesh_ok || in_edit || doc.active_armature().is_some(), egui::SelectableLabel::new(in_edit, edit_label)).clicked() {
                 if !in_edit {
                     actions.push(Action::ToggleEditMode);
                 }
@@ -283,12 +296,11 @@ fn menu_bar(ui: &mut egui::Ui, doc: &mut Document, settings: &mut ViewSettings, 
                 }
                 soon(ui, "Nurbs Curve");
             });
-            soon(ui, "Surface");
-            // Metaball + Text are mesh approximations in Primitive::all()
-            soon(ui, "Volume");
-            soon(ui, "Grease Pencil");
+            mi(ui, actions, b, "Surface", Action::AddKind(ObjectKind::Surface(SurfaceData::default())), true);
+            mi(ui, actions, b, "Volume", Action::AddKind(ObjectKind::Volume(VolumeData::default())), true);
+            mi(ui, actions, b, "Grease Pencil", Action::AddKind(ObjectKind::GreasePencil(GreasePencilData::default())), true);
             ui.separator();
-            soon(ui, "Armature");
+            mi(ui, actions, b, "Armature", Action::AddKind(ObjectKind::Armature(ArmatureData::default())), true);
             soon(ui, "Lattice");
             ui.separator();
             ui.menu_button("Empty", |ui| {
@@ -306,14 +318,30 @@ fn menu_bar(ui: &mut egui::Ui, doc: &mut Document, settings: &mut ViewSettings, 
                     mi(ui, actions, b, t.name(), Action::AddKind(ObjectKind::Light(LightData::new(t))), true);
                 }
             });
-            soon(ui, "Light Probe");
+            ui.menu_button("Light Probe", |ui| {
+                mi(ui, actions, b, "Reflection", Action::AddKind(ObjectKind::LightProbe(LightProbeData {
+                    kind: LightProbeType::Reflection,
+                    ..Default::default()
+                })), true);
+                mi(ui, actions, b, "Irradiance Volume", Action::AddKind(ObjectKind::LightProbe(LightProbeData {
+                    kind: LightProbeType::Irradiance,
+                    ..Default::default()
+                })), true);
+            });
             ui.menu_button("Camera", |ui| {
                 mi(ui, actions, b, "Perspective", Action::AddKind(ObjectKind::Camera(CameraData::default())), true);
                 mi(ui, actions, b, "Orthographic", Action::AddKind(ObjectKind::Camera(CameraData { ortho: true, ..CameraData::default() })), true);
             });
             ui.separator();
-            soon(ui, "Speaker");
-            soon(ui, "Force Field");
+            mi(ui, actions, b, "Speaker", Action::AddKind(ObjectKind::Speaker(SpeakerData::default())), true);
+            ui.menu_button("Force Field", |ui| {
+                for t in ForceFieldType::ALL {
+                    mi(ui, actions, b, t.name(), Action::AddKind(ObjectKind::ForceField(ForceFieldData {
+                        kind: t,
+                        ..Default::default()
+                    })), true);
+                }
+            });
             soon(ui, "Collection Instance");
         });
 
@@ -1395,6 +1423,148 @@ fn properties(ui: &mut egui::Ui, doc: &mut Document, actions: &mut Vec<Action>) 
                     commit(doc, &r, |d| d.scene.objects[i].kind = ObjectKind::Light(l2));
                 }
                 ui.weak("Lights shine along their local -Z axis. No shadows yet.");
+            }
+            ObjectKind::Surface(s) => {
+                ui.add_space(6.0);
+                ui.label(RichText::new("Surface").strong());
+                let mut s2 = s;
+                let r = ui.add(egui::Slider::new(&mut s2.size, 0.1..=20.0).text("Size"));
+                commit(doc, &r, |d| d.scene.objects[i].kind = ObjectKind::Surface(s2));
+                let r = ui.add(egui::Slider::new(&mut s2.u_segments, 1..=32).text("U segments"));
+                commit(doc, &r, |d| d.scene.objects[i].kind = ObjectKind::Surface(s2));
+                let r = ui.add(egui::Slider::new(&mut s2.v_segments, 1..=32).text("V segments"));
+                commit(doc, &r, |d| d.scene.objects[i].kind = ObjectKind::Surface(s2));
+                ui.weak("NURBS surface placeholder — grid patch in the viewport.");
+            }
+            ObjectKind::Volume(v) => {
+                ui.add_space(6.0);
+                ui.label(RichText::new("Volume").strong());
+                let mut v2 = v;
+                ui.horizontal(|ui| {
+                    ui.label("Size");
+                    let r = ui.add(egui::DragValue::new(&mut v2.size[0]).speed(0.05).prefix("X "));
+                    let r2 = ui.add(egui::DragValue::new(&mut v2.size[1]).speed(0.05).prefix("Y "));
+                    let r3 = ui.add(egui::DragValue::new(&mut v2.size[2]).speed(0.05).prefix("Z "));
+                    if r.changed() || r2.changed() || r3.changed() {
+                        doc.checkpoint();
+                        doc.scene.objects[i].kind = ObjectKind::Volume(v2);
+                    }
+                });
+                let r = ui.add(egui::Slider::new(&mut v2.density, 0.0..=10.0).text("Density"));
+                commit(doc, &r, |d| d.scene.objects[i].kind = ObjectKind::Volume(v2));
+                ui.weak("Volume domain box (fog / SDF placeholder).");
+            }
+            ObjectKind::GreasePencil(g) => {
+                ui.add_space(6.0);
+                ui.label(RichText::new("Grease Pencil").strong());
+                let mut g2 = g;
+                let r = ui.add(egui::Slider::new(&mut g2.thickness, 0.001..=0.2).logarithmic(true).text("Stroke thickness"));
+                commit(doc, &r, |d| d.scene.objects[i].kind = ObjectKind::GreasePencil(g2));
+                let r = ui.add(egui::Slider::new(&mut g2.layers, 1..=8).text("Layers"));
+                commit(doc, &r, |d| d.scene.objects[i].kind = ObjectKind::GreasePencil(g2));
+                ui.weak("2D drawing object — strokes editable later.");
+            }
+            ObjectKind::Armature(a) => {
+                ui.add_space(6.0);
+                ui.label(RichText::new("Armature").strong());
+                ui.label(format!("{} bones", a.bones.len()));
+                ui.horizontal(|ui| {
+                    if ui.button("Add bone").clicked() {
+                        actions.push(crate::keymap::Action::ArmatureAddBone);
+                    }
+                    if ui.button("Extrude").on_hover_text("New bone from selected tip (E)").clicked() {
+                        actions.push(crate::keymap::Action::ArmatureExtrude);
+                    }
+                    if ui.button("Delete").clicked() {
+                        actions.push(crate::keymap::Action::ArmatureDeleteBones);
+                    }
+                });
+                ui.horizontal(|ui| {
+                    if ui.button("Clear pose").clicked() {
+                        actions.push(crate::keymap::Action::ArmatureClearPose);
+                    }
+                    if ui.button("Bind selected meshes").on_hover_text(
+                        "Select Armature + Mesh(es), then bind for skinning"
+                    ).clicked() {
+                        actions.push(crate::keymap::Action::ArmatureBindMeshes);
+                    }
+                });
+                ui.add_space(4.0);
+                ui.label(RichText::new("Bones").strong());
+                egui::ScrollArea::vertical().max_height(160.0).show(ui, |ui| {
+                    for (bi, bone) in a.bones.iter().enumerate() {
+                        let sel = a.selected.contains(&(bi as u32));
+                        let label = format!(
+                            "{}{}  ({:.2})",
+                            if a.active == Some(bi as u32) { "• " } else { "  " },
+                            bone.name,
+                            bone.length()
+                        );
+                        if ui.selectable_label(sel, label).clicked() {
+                            if let ObjectKind::Armature(ref mut am) = doc.scene.objects[i].kind {
+                                am.select_bone(bi as u32, ui.input(|inp| inp.modifiers.shift));
+                            }
+                        }
+                    }
+                });
+                if let Some(ai) = a.active {
+                    if let Some(bone) = a.bones.get(ai as usize) {
+                        ui.add_space(4.0);
+                        ui.label(format!("Active: {}", bone.name));
+                        ui.weak("Pose: R rotate · G move  |  Edit Mode (Tab): structure");
+                        ui.weak("E extrude · X delete · Bind meshes to deform");
+                    }
+                }
+            }
+            ObjectKind::LightProbe(p) => {
+                ui.add_space(6.0);
+                ui.label(RichText::new("Light Probe").strong());
+                let mut p2 = p;
+                egui::ComboBox::from_label("Type").selected_text(p2.kind.name()).show_ui(ui, |ui| {
+                    for t in [LightProbeType::Reflection, LightProbeType::Irradiance] {
+                        ui.selectable_value(&mut p2.kind, t, t.name());
+                    }
+                });
+                if p2.kind != p.kind {
+                    doc.checkpoint();
+                    doc.scene.objects[i].kind = ObjectKind::LightProbe(p2);
+                }
+                let r = ui.add(egui::Slider::new(&mut p2.radius, 0.1..=20.0).text("Radius"));
+                commit(doc, &r, |d| d.scene.objects[i].kind = ObjectKind::LightProbe(p2));
+                let r = ui.add(egui::Slider::new(&mut p2.intensity, 0.0..=5.0).text("Intensity"));
+                commit(doc, &r, |d| d.scene.objects[i].kind = ObjectKind::LightProbe(p2));
+                ui.weak("Reflection / irradiance probe (viewport helper for now).");
+            }
+            ObjectKind::Speaker(s) => {
+                ui.add_space(6.0);
+                ui.label(RichText::new("Speaker").strong());
+                let mut s2 = s;
+                let r = ui.add(egui::Slider::new(&mut s2.volume, 0.0..=2.0).text("Volume"));
+                commit(doc, &r, |d| d.scene.objects[i].kind = ObjectKind::Speaker(s2));
+                let r = ui.add(egui::Slider::new(&mut s2.distance, 0.1..=100.0).text("Distance"));
+                commit(doc, &r, |d| d.scene.objects[i].kind = ObjectKind::Speaker(s2));
+                let r = ui.checkbox(&mut s2.muted, "Muted");
+                commit(doc, &r, |d| d.scene.objects[i].kind = ObjectKind::Speaker(s2));
+                ui.weak("3D audio source placeholder (no audio playback yet).");
+            }
+            ObjectKind::ForceField(f) => {
+                ui.add_space(6.0);
+                ui.label(RichText::new("Force Field").strong());
+                let mut f2 = f;
+                egui::ComboBox::from_label("Type").selected_text(f2.kind.name()).show_ui(ui, |ui| {
+                    for t in ForceFieldType::ALL {
+                        ui.selectable_value(&mut f2.kind, t, t.name());
+                    }
+                });
+                if f2.kind != f.kind {
+                    doc.checkpoint();
+                    doc.scene.objects[i].kind = ObjectKind::ForceField(f2);
+                }
+                let r = ui.add(egui::Slider::new(&mut f2.strength, -10.0..=10.0).text("Strength"));
+                commit(doc, &r, |d| d.scene.objects[i].kind = ObjectKind::ForceField(f2));
+                let r = ui.add(egui::Slider::new(&mut f2.size, 0.1..=20.0).text("Size"));
+                commit(doc, &r, |d| d.scene.objects[i].kind = ObjectKind::ForceField(f2));
+                ui.weak("Physics force field helper (no simulation yet).");
             }
         }
         if !doc.scene.objects[i].kind.is_mesh() {

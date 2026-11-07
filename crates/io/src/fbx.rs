@@ -756,8 +756,8 @@ fn build_ascii_fbx(scene: &Scene, only: Option<&BTreeSet<u64>>) -> Result<String
             }
         }
         match &obj.kind {
-            ObjectKind::Light(_) | ObjectKind::Camera(_) | ObjectKind::Empty { .. } => continue,
             ObjectKind::Mesh => {}
+            _ => continue, // non-mesh helpers (surface, volume, armature, etc.)
         }
 
         let geom_id = next_id;
@@ -1484,8 +1484,8 @@ fn build_binary_fbx(scene: &Scene, only: Option<&BTreeSet<u64>>) -> Result<Vec<u
             }
         }
         match &obj.kind {
-            ObjectKind::Light(_) | ObjectKind::Camera(_) | ObjectKind::Empty { .. } => continue,
             ObjectKind::Mesh => {}
+            _ => continue, // non-mesh helpers (surface, volume, armature, etc.)
         }
         let world = Mat4::from_scale_rotation_translation(obj.scale, obj.rotation, obj.translation);
         let baked = obj.mesh.transformed(world);

@@ -1,4 +1,5 @@
 use crate::constraints::Constraint;
+use crate::armature::SkinBinding;
 use crate::kinds::{helper_radius, ObjectKind};
 use crate::material::{Material, TextureData};
 use crate::mesh::{Aabb, MeshData};
@@ -37,6 +38,8 @@ pub struct Object {
     /// Objects with the same link group share primitive parameters (linked duplicates).
     pub link_group: Option<u64>,
     pub constraints: Vec<Constraint>,
+    /// Optional armature skinning binding (mesh objects only).
+    pub skin: Option<SkinBinding>,
 }
 
 impl Object {
@@ -56,6 +59,7 @@ impl Object {
             collection: None,
             link_group: None,
             constraints: Vec::new(),
+            skin: None,
         }
     }
 
