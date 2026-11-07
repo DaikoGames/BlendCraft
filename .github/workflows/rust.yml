@@ -23,6 +23,8 @@ env:
   BIN: forge3d
   # Flatpak needs a reverse-DNS app ID. Change this to one you own.
   APP_ID: io.github.blendcraft.BlendCraft
+  # License shown in app stores (SPDX id). Change to your real license.
+  APP_LICENSE: LicenseRef-proprietary
 
 jobs:
 
@@ -266,7 +268,7 @@ jobs:
       - name: Install Flatpak tooling
         run: |
           sudo apt-get update
-          sudo apt-get install -y flatpak flatpak-builder
+          sudo apt-get install -y flatpak flatpak-builder appstream desktop-file-utils
           flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
 
       - name: Write manifest
@@ -282,6 +284,30 @@ jobs:
           Categories=Graphics;3DGraphics;
           Terminal=false
           EOF
+
+          cat > ${{ env.APP_ID }}.metainfo.xml <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <component type="desktop-application">
+            <id>${{ env.APP_ID }}</id>
+            <name>BlendCraft</name>
+            <summary>3D modelling and rendering</summary>
+            <metadata_license>CC0-1.0</metadata_license>
+            <project_license>${{ env.APP_LICENSE }}</project_license>
+            <description>
+              <p>BlendCraft is a 3D modelling and rendering application.</p>
+            </description>
+            <launchable type="desktop-id">${{ env.APP_ID }}.desktop</launchable>
+            <provides>
+              <binary>${{ env.BIN }}</binary>
+            </provides>
+            <content_rating type="oars-1.1"/>
+            <releases>
+              <release version="0.1.${{ github.run_number }}" date="$(date -u +%F)"/>
+            </releases>
+          </component>
+          EOF
+          desktop-file-validate ${{ env.APP_ID }}.desktop || true
+          appstreamcli validate --no-net ${{ env.APP_ID }}.metainfo.xml || true
 
           cat > manifest.yml <<'EOF'
           app-id: ${{ env.APP_ID }}
@@ -302,6 +328,7 @@ jobs:
                 - install -Dm755 ${{ env.BIN }} /app/bin/${{ env.BIN }}
                 - install -Dm644 ${{ env.APP_ID }}.desktop /app/share/applications/${{ env.APP_ID }}.desktop
                 - install -Dm644 blendcraft.png /app/share/icons/hicolor/256x256/apps/${{ env.APP_ID }}.png
+                - install -Dm644 ${{ env.APP_ID }}.metainfo.xml /app/share/metainfo/${{ env.APP_ID }}.metainfo.xml
               sources:
                 - type: file
                   path: ${{ env.BIN }}
@@ -309,6 +336,8 @@ jobs:
                   path: blendcraft.png
                 - type: file
                   path: ${{ env.APP_ID }}.desktop
+                - type: file
+                  path: ${{ env.APP_ID }}.metainfo.xml
           EOF
 
       - name: Build Flatpak
@@ -739,6 +768,16 @@ jobs:
           name: BlendCraft v0.1.${{ github.run_number }}
           target_commitish: ${{ github.sha }}
           generate_release_notes: true
+          body: |
+            ### Linux
+            **AppImage:** `chmod +x blendcraft-linux-*.AppImage && ./blendcraft-linux-*.AppImage`
+
+            **Flatpak** (needs Flathub for the runtime):
+            ```
+            flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+            flatpak install --user ./blendcraft-linux-x64.flatpak
+            flatpak run ${{ env.APP_ID }}
+            ```
           files: dist/*
           fail_on_unmatched_files: true
 
