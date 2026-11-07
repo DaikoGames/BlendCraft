@@ -434,15 +434,14 @@ jobs:
         run: cargo test -p forge-core -p forge-io
 
   # ==========================================
-  # FREEBSD BUILDS (x64 + ARM64)
+  # FREEBSD BUILD (x64)
   # ==========================================
-  # ARM64 runs in QEMU emulation on an x64 runner, so it is slow.
 
   freebsd:
     name: ${{ matrix.name }}
     runs-on: ubuntu-latest
     continue-on-error: true
-    timeout-minutes: 360
+    timeout-minutes: 120
 
     strategy:
       fail-fast: false
@@ -451,9 +450,6 @@ jobs:
           - name: FreeBSD x64
             vm_arch: ""
             artifact: blendcraft-freebsd-x64
-          - name: FreeBSD ARM64
-            vm_arch: aarch64
-            artifact: blendcraft-freebsd-arm64
 
     steps:
       - name: Checkout
@@ -489,6 +485,89 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14
+
+  # ==========================================
+  # FREEBSD ARM64 (cross-compiled, no emulation)
+  # ==========================================
+  # Runs in the fast KVM-accelerated x64 FreeBSD VM and cross-compiles to
+  # aarch64-unknown-freebsd using:
+  #   - nightly Rust + -Zbuild-std (this target is tier 3: no prebuilt std)
+  #   - base clang/lld from FreeBSD, pointed at an arm64 sysroot
+  #     (base.txz for arm64 + the GUI libs installed from the arm64 pkg repo)
+  # Not in the release job's `needs`: when it finishes, release-freebsd-arm64
+  # (at the bottom) attaches the binary to the release.
+
+  freebsd-arm64:
+    name: FreeBSD ARM64
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Cross-compile for FreeBSD aarch64
+        uses: vmactions/freebsd-vm@v1
+        env:
+          OUT: blendcraft-freebsd-arm64
+        with:
+          release: "14.3"
+          usesh: true
+          envs: "PKG BIN OUT"
+          prepare: |
+            set -ex
+            pkg install -y pkgconf
+
+            # Nightly toolchain with rust-src (needed for -Zbuild-std)
+            fetch -o /tmp/rustup-init https://static.rust-lang.org/rustup/dist/x86_64-unknown-freebsd/rustup-init
+            chmod +x /tmp/rustup-init
+            /tmp/rustup-init -y --profile minimal --default-toolchain nightly -c rust-src
+
+            # arm64 sysroot: base system, then the GUI libraries (best effort;
+            # if your crates dlopen X11/Wayland, only the base system is needed)
+            SYSROOT=/opt/sysroot-arm64
+            mkdir -p "$SYSROOT"
+            fetch -o /tmp/base.txz https://download.freebsd.org/releases/arm64/aarch64/14.3-RELEASE/base.txz
+            tar -xf /tmp/base.txz -C "$SYSROOT"
+            pkg -r "$SYSROOT" -o ABI=FreeBSD:14:aarch64 -o IGNORE_OSVERSION=yes -o ASSUME_ALWAYS_YES=yes \
+              install -y -I libxkbcommon wayland libX11 libXcursor libXrandr libXi mesa-libs \
+              || echo "WARNING: could not install arm64 GUI libs into sysroot; continuing"
+          run: |
+            set -ex
+            . "$HOME/.cargo/env"
+            SYSROOT=/opt/sysroot-arm64
+            TARGET=aarch64-unknown-freebsd
+
+            # clang wrapper used as both C compiler and linker
+            cat > /usr/local/bin/aarch64-freebsd-cc <<EOF
+            #!/bin/sh
+            exec clang --target=aarch64-unknown-freebsd14 --sysroot=$SYSROOT -fuse-ld=lld "\$@"
+            EOF
+            chmod +x /usr/local/bin/aarch64-freebsd-cc
+
+            export CARGO_TARGET_AARCH64_UNKNOWN_FREEBSD_LINKER=/usr/local/bin/aarch64-freebsd-cc
+            export CC_aarch64_unknown_freebsd=/usr/local/bin/aarch64-freebsd-cc
+            export AR_aarch64_unknown_freebsd=ar
+            export PKG_CONFIG_ALLOW_CROSS=1
+            export PKG_CONFIG_SYSROOT_DIR="$SYSROOT"
+            export PKG_CONFIG_LIBDIR="$SYSROOT/usr/local/libdata/pkgconfig:$SYSROOT/usr/libdata/pkgconfig"
+
+            cargo +nightly build --release -p "$PKG" \
+              -Zbuild-std=std,panic_abort --target "$TARGET"
+
+            mkdir -p dist
+            cp "target/$TARGET/release/$BIN" "dist/$OUT"
+            chmod +x "dist/$OUT"
+            file "dist/$OUT"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: blendcraft-freebsd-arm64
           path: dist/*
           if-no-files-found: error
           retention-days: 14
@@ -645,5 +724,31 @@ jobs:
           name: BlendCraft v0.1.${{ github.run_number }}
           target_commitish: ${{ github.sha }}
           generate_release_notes: true
+          files: dist/*
+          fail_on_unmatched_files: true
+
+  # Adds the FreeBSD ARM64 binary to the release once it is ready.
+  release-freebsd-arm64:
+    name: Attach FreeBSD ARM64 to release
+    needs:
+      - release
+      - freebsd-arm64
+    if: ${{ !cancelled() && needs.release.result == 'success' && needs.freebsd-arm64.result == 'success' }}
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download FreeBSD ARM64 artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: blendcraft-freebsd-arm64
+          path: dist
+
+      - name: Upload to existing release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v0.1.${{ github.run_number }}
           files: dist/*
           fail_on_unmatched_files: true
