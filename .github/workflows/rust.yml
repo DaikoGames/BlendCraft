@@ -1,4 +1,3 @@
-
 # BlendCraft — Multi-platform builds and automatic GitHub Releases
 
 name: Build
@@ -22,11 +21,324 @@ env:
   CARGO_INCREMENTAL: 0
   PKG: forge-app
   BIN: forge3d
+  # Flatpak needs a reverse-DNS app ID. Change this to one you own.
+  APP_ID: io.github.blendcraft.BlendCraft
 
 jobs:
 
   # ==========================================
-  # DESKTOP BUILDS
+  # LINUX: AppImage (all archs)
+  # ==========================================
+  # x64 and ARM64 are built natively (ARM64 on GitHub's arm runner).
+  # x86 and ARMv7 are cross-compiled with `cross` and are experimental.
+  # Built on Ubuntu 22.04 so the binaries run on older glibc systems.
+
+  linux:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.experimental == true }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux x64
+            os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            artifact: blendcraft-linux-x64
+            appimage_arch: x86_64
+            flatpak: true
+
+          - name: Linux ARM64
+            os: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+            artifact: blendcraft-linux-arm64
+            appimage_arch: aarch64
+            flatpak: true
+
+          - name: Linux x86
+            os: ubuntu-22.04
+            target: i686-unknown-linux-gnu
+            artifact: blendcraft-linux-x86
+            appimage_arch: i686
+            cross: true
+            experimental: true
+
+          - name: Linux ARMv7
+            os: ubuntu-22.04
+            target: armv7-unknown-linux-gnueabihf
+            artifact: blendcraft-linux-armv7
+            appimage_arch: armhf
+            cross: true
+            experimental: true
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Install Linux dependencies
+        if: matrix.cross != true
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            pkg-config \
+            libxkbcommon-dev \
+            libwayland-dev \
+            libx11-dev \
+            libxcursor-dev \
+            libxrandr-dev \
+            libxi-dev \
+            libgl1-mesa-dev
+
+      - name: Install cross
+        if: matrix.cross == true
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross
+
+      # The default cross images have no GUI dev libraries, which is why
+      # the old cross builds could never link. Install them for the target arch.
+      - name: Write cross config
+        if: matrix.cross == true
+        run: |
+          cat > "$RUNNER_TEMP/Cross.toml" <<'EOF'
+          [target.i686-unknown-linux-gnu]
+          pre-build = [
+            "dpkg --add-architecture $CROSS_DEB_ARCH",
+            "apt-get update && apt-get install --assume-yes pkg-config libxkbcommon-dev:$CROSS_DEB_ARCH libwayland-dev:$CROSS_DEB_ARCH libx11-dev:$CROSS_DEB_ARCH libxcursor-dev:$CROSS_DEB_ARCH libxrandr-dev:$CROSS_DEB_ARCH libxi-dev:$CROSS_DEB_ARCH libgl1-mesa-dev:$CROSS_DEB_ARCH"
+          ]
+
+          [target.armv7-unknown-linux-gnueabihf]
+          pre-build = [
+            "dpkg --add-architecture $CROSS_DEB_ARCH",
+            "apt-get update && apt-get install --assume-yes pkg-config libxkbcommon-dev:$CROSS_DEB_ARCH libwayland-dev:$CROSS_DEB_ARCH libx11-dev:$CROSS_DEB_ARCH libxcursor-dev:$CROSS_DEB_ARCH libxrandr-dev:$CROSS_DEB_ARCH libxi-dev:$CROSS_DEB_ARCH libgl1-mesa-dev:$CROSS_DEB_ARCH"
+          ]
+          EOF
+          echo "CROSS_CONFIG=$RUNNER_TEMP/Cross.toml" >> "$GITHUB_ENV"
+
+      - name: Build native
+        if: matrix.cross != true
+        run: cargo build --release -p ${{ env.PKG }} --target ${{ matrix.target }}
+
+      - name: Build cross
+        if: matrix.cross == true
+        run: cross build --release -p ${{ env.PKG }} --target ${{ matrix.target }}
+
+      # Uses assets/icon.png from the repo if present, otherwise a placeholder.
+      - name: Prepare icon
+        run: |
+          mkdir -p "$RUNNER_TEMP/assets"
+          if [ -f assets/icon.png ]; then
+            cp assets/icon.png "$RUNNER_TEMP/assets/blendcraft.png"
+          else
+            python3 - <<'PY'
+          import os, struct, zlib
+          W = H = 256
+          rows = bytearray()
+          for y in range(H):
+              rows.append(0)
+              for x in range(W):
+                  rows += bytes((30 + x // 3, 80 + y // 4, 200 - x // 4, 255))
+          def chunk(t, d):
+              c = struct.pack(">I", len(d)) + t + d
+              return c + struct.pack(">I", zlib.crc32(t + d) & 0xFFFFFFFF)
+          png = (b"\x89PNG\r\n\x1a\n"
+                 + chunk(b"IHDR", struct.pack(">IIBBBBB", W, H, 8, 6, 0, 0, 0))
+                 + chunk(b"IDAT", zlib.compress(bytes(rows), 9))
+                 + chunk(b"IEND", b""))
+          with open(os.path.join(os.environ["RUNNER_TEMP"], "assets", "blendcraft.png"), "wb") as f:
+              f.write(png)
+          PY
+          fi
+
+      - name: Package AppImage
+        env:
+          ARCH: ${{ matrix.appimage_arch }}
+          APPIMAGE_EXTRACT_AND_RUN: "1"
+        run: |
+          set -euo pipefail
+          APPDIR="$RUNNER_TEMP/AppDir"
+          rm -rf "$APPDIR"
+          mkdir -p "$APPDIR/usr/bin" "$APPDIR/usr/share/applications" \
+                   "$APPDIR/usr/share/icons/hicolor/256x256/apps"
+
+          cp "target/${{ matrix.target }}/release/${{ env.BIN }}" "$APPDIR/usr/bin/${{ env.BIN }}"
+          chmod +x "$APPDIR/usr/bin/${{ env.BIN }}"
+
+          cat > "$APPDIR/AppRun" <<'EOF'
+          #!/bin/sh
+          HERE="$(dirname "$(readlink -f "$0")")"
+          exec "$HERE/usr/bin/${{ env.BIN }}" "$@"
+          EOF
+          chmod +x "$APPDIR/AppRun"
+
+          cat > "$APPDIR/blendcraft.desktop" <<'EOF'
+          [Desktop Entry]
+          Type=Application
+          Name=BlendCraft
+          Comment=3D modelling and rendering
+          Exec=${{ env.BIN }}
+          Icon=blendcraft
+          Categories=Graphics;3DGraphics;
+          Terminal=false
+          EOF
+          cp "$APPDIR/blendcraft.desktop" "$APPDIR/usr/share/applications/"
+
+          cp "$RUNNER_TEMP/assets/blendcraft.png" "$APPDIR/blendcraft.png"
+          cp "$RUNNER_TEMP/assets/blendcraft.png" "$APPDIR/.DirIcon"
+          cp "$RUNNER_TEMP/assets/blendcraft.png" "$APPDIR/usr/share/icons/hicolor/256x256/apps/blendcraft.png"
+
+          # appimagetool runs on the *runner's* arch; ARCH selects the target runtime.
+          HOST_ARCH="$(uname -m)"
+          curl -fsSL -o "$RUNNER_TEMP/appimagetool" \
+            "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-${HOST_ARCH}.AppImage"
+          chmod +x "$RUNNER_TEMP/appimagetool"
+
+          mkdir -p dist
+          "$RUNNER_TEMP/appimagetool" "$APPDIR" "dist/${{ matrix.artifact }}.AppImage"
+
+      - name: Upload AppImage
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/*.AppImage
+          if-no-files-found: error
+          retention-days: 14
+
+      # Raw binary + icon, consumed by the Flatpak job (not published in the release).
+      - name: Stage raw files for Flatpak
+        if: matrix.flatpak == true
+        run: |
+          mkdir -p raw
+          cp "target/${{ matrix.target }}/release/${{ env.BIN }}" raw/
+          cp "$RUNNER_TEMP/assets/blendcraft.png" raw/
+
+      - name: Upload raw files
+        if: matrix.flatpak == true
+        uses: actions/upload-artifact@v4
+        with:
+          name: bin-${{ matrix.artifact }}
+          path: raw/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # ==========================================
+  # LINUX: Flatpak (x64 + ARM64 only)
+  # ==========================================
+  # Packages the prebuilt binary from the linux job, so no second
+  # compile and no QEMU: each arch runs on a native runner.
+
+  flatpak:
+    name: Flatpak ${{ matrix.name }}
+    needs: linux
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: x64
+            os: ubuntu-24.04
+            arch: x86_64
+            artifact: blendcraft-linux-x64
+          - name: ARM64
+            os: ubuntu-24.04-arm
+            arch: aarch64
+            artifact: blendcraft-linux-arm64
+
+    steps:
+      - name: Download binary
+        uses: actions/download-artifact@v4
+        with:
+          name: bin-${{ matrix.artifact }}
+          path: flatpak
+
+      - name: Install Flatpak tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y flatpak flatpak-builder
+          flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+
+      - name: Write manifest
+        working-directory: flatpak
+        run: |
+          cat > ${{ env.APP_ID }}.desktop <<'EOF'
+          [Desktop Entry]
+          Type=Application
+          Name=BlendCraft
+          Comment=3D modelling and rendering
+          Exec=${{ env.BIN }}
+          Icon=${{ env.APP_ID }}
+          Categories=Graphics;3DGraphics;
+          Terminal=false
+          EOF
+
+          cat > manifest.yml <<'EOF'
+          app-id: ${{ env.APP_ID }}
+          runtime: org.freedesktop.Platform
+          runtime-version: '24.08'
+          sdk: org.freedesktop.Sdk
+          command: ${{ env.BIN }}
+          finish-args:
+            - --share=ipc
+            - --socket=wayland
+            - --socket=fallback-x11
+            - --device=dri
+            - --filesystem=home
+          modules:
+            - name: blendcraft
+              buildsystem: simple
+              build-commands:
+                - install -Dm755 ${{ env.BIN }} /app/bin/${{ env.BIN }}
+                - install -Dm644 ${{ env.APP_ID }}.desktop /app/share/applications/${{ env.APP_ID }}.desktop
+                - install -Dm644 blendcraft.png /app/share/icons/hicolor/256x256/apps/${{ env.APP_ID }}.png
+              sources:
+                - type: file
+                  path: ${{ env.BIN }}
+                - type: file
+                  path: blendcraft.png
+                - type: file
+                  path: ${{ env.APP_ID }}.desktop
+          EOF
+
+      - name: Build Flatpak
+        working-directory: flatpak
+        run: |
+          flatpak-builder --user --force-clean --disable-rofiles-fuse \
+            --install-deps-from=flathub \
+            --arch=${{ matrix.arch }} \
+            --default-branch=stable \
+            --repo=repo builddir manifest.yml
+
+      - name: Create bundle
+        working-directory: flatpak
+        run: |
+          mkdir -p ../dist
+          flatpak build-bundle \
+            --arch=${{ matrix.arch }} \
+            --runtime-repo=https://flathub.org/repo/flathub.flatpakrepo \
+            repo "../dist/${{ matrix.artifact }}.flatpak" ${{ env.APP_ID }} stable
+
+      - name: Upload Flatpak
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}-flatpak
+          path: dist/*.flatpak
+          if-no-files-found: error
+          retention-days: 14
+
+  # ==========================================
+  # DESKTOP BUILDS (Windows + macOS)
   # ==========================================
 
   desktop:
@@ -38,32 +350,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: Linux x64
-            os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-            artifact: blendcraft-linux-x64
-
-          - name: Linux ARM64
-            os: ubuntu-latest
-            target: aarch64-unknown-linux-gnu
-            artifact: blendcraft-linux-arm64
-            cross: true
-            experimental: true
-
-          - name: Linux x86
-            os: ubuntu-latest
-            target: i686-unknown-linux-gnu
-            artifact: blendcraft-linux-x86
-            cross: true
-            experimental: true
-
-          - name: Linux ARMv7
-            os: ubuntu-latest
-            target: armv7-unknown-linux-gnueabihf
-            artifact: blendcraft-linux-armv7
-            cross: true
-            experimental: true
-
           - name: Windows x64
             os: windows-latest
             target: x86_64-pc-windows-msvc
@@ -105,35 +391,10 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
-      - name: Install Linux dependencies
-        if: runner.os == 'Linux' && matrix.cross != true
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            pkg-config \
-            libxkbcommon-dev \
-            libwayland-dev \
-            libx11-dev \
-            libxcursor-dev \
-            libxrandr-dev \
-            libxi-dev \
-            libgl1-mesa-dev
-
-      - name: Install cross
-        if: matrix.cross == true
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cross
-
       - name: Build native
-        if: matrix.cross != true
         run: cargo build --release -p ${{ env.PKG }} --target ${{ matrix.target }}
 
-      - name: Build cross
-        if: matrix.cross == true
-        run: cross build --release -p ${{ env.PKG }} --target ${{ matrix.target }}
-
-      - name: Stage Linux and macOS artifact
+      - name: Stage macOS artifact
         if: runner.os != 'Windows'
         run: |
           mkdir -p dist
@@ -173,13 +434,26 @@ jobs:
         run: cargo test -p forge-core -p forge-io
 
   # ==========================================
-  # FREEBSD BUILD
+  # FREEBSD BUILDS (x64 + ARM64)
   # ==========================================
+  # ARM64 runs in QEMU emulation on an x64 runner, so it is slow.
 
   freebsd:
-    name: FreeBSD x64
+    name: ${{ matrix.name }}
     runs-on: ubuntu-latest
     continue-on-error: true
+    timeout-minutes: 360
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: FreeBSD x64
+            vm_arch: ""
+            artifact: blendcraft-freebsd-x64
+          - name: FreeBSD ARM64
+            vm_arch: aarch64
+            artifact: blendcraft-freebsd-arm64
 
     steps:
       - name: Checkout
@@ -187,10 +461,13 @@ jobs:
 
       - name: Build on FreeBSD
         uses: vmactions/freebsd-vm@v1
+        env:
+          OUT: ${{ matrix.artifact }}
         with:
           release: "14.3"
+          arch: ${{ matrix.vm_arch }}
           usesh: true
-          envs: "PKG BIN"
+          envs: "PKG BIN OUT"
           prepare: |
             pkg install -y \
               rust \
@@ -205,23 +482,26 @@ jobs:
           run: |
             cargo build --release -p "$PKG"
             mkdir -p dist
-            cp "target/release/$BIN" dist/blendcraft-freebsd-x64
-            chmod +x dist/blendcraft-freebsd-x64
+            cp "target/release/$BIN" "dist/$OUT"
+            chmod +x "dist/$OUT"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: blendcraft-freebsd-x64
+          name: ${{ matrix.artifact }}
           path: dist/*
           if-no-files-found: error
           retention-days: 14
 
   # ==========================================
-  # WEBASSEMBLY CHECK
+  # WEBASSEMBLY
   # ==========================================
+  # forge-core and forge-io must compile for wasm32 (hard requirement).
+  # The GUI app is built best-effort; if it builds, it is bundled with
+  # wasm-bindgen into blendcraft-wasm.zip (wasm + JS glue + index.html).
 
   wasm:
-    name: WebAssembly check
+    name: WebAssembly
     runs-on: ubuntu-latest
 
     env:
@@ -247,26 +527,72 @@ jobs:
       - name: Check forge-io
         run: cargo check -p forge-io --target wasm32-unknown-unknown
 
-      - name: Check GUI application
+      - name: Build GUI application
+        id: gui
         continue-on-error: true
-        run: cargo check -p ${{ env.PKG }} --target wasm32-unknown-unknown
+        run: cargo build --release -p ${{ env.PKG }} --target wasm32-unknown-unknown
 
-      - name: Write WebAssembly notes
+      - name: Detect wasm-bindgen version
+        id: wb
+        if: steps.gui.outcome == 'success'
         run: |
-          mkdir -p dist
-          printf '%s\n' \
-            "BlendCraft WebAssembly" \
-            "" \
-            "forge-core and forge-io are checked for wasm32." \
-            "The GUI may require a dedicated web entry point." \
-            "Desktop-only APIs may need platform-specific handling." \
-            > dist/README-wasm.txt
+          VER=""
+          if [ -f Cargo.lock ]; then
+            VER="$(awk '/^name = "wasm-bindgen"$/ { getline; gsub(/[^0-9.]/, "", $0); print; exit }' Cargo.lock)"
+          fi
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+
+      - name: Install wasm-bindgen
+        if: steps.wb.outputs.version != ''
+        uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-bindgen@${{ steps.wb.outputs.version }}
+
+      - name: Bundle web build
+        id: bundle
+        if: steps.wb.outputs.version != ''
+        run: |
+          set -euo pipefail
+          REL="target/wasm32-unknown-unknown/release"
+          WASM="$REL/${{ env.BIN }}.wasm"
+          [ -f "$WASM" ] || WASM="$REL/$(echo '${{ env.PKG }}' | tr '-' '_').wasm"
+          if [ ! -f "$WASM" ]; then
+            echo "No .wasm produced by the GUI build; skipping bundle."
+            echo "built=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          mkdir -p dist/web
+          wasm-bindgen --target web --no-typescript \
+            --out-dir dist/web --out-name blendcraft "$WASM"
+
+          cat > dist/web/index.html <<'EOF'
+          <!doctype html>
+          <html>
+            <head>
+              <meta charset="utf-8">
+              <title>BlendCraft</title>
+              <style>html,body{margin:0;height:100%}canvas{width:100%;height:100%}</style>
+            </head>
+            <body>
+              <canvas id="the_canvas_id"></canvas>
+              <script type="module">
+                import init from "./blendcraft.js";
+                init();
+              </script>
+            </body>
+          </html>
+          EOF
+
+          (cd dist/web && zip -r ../blendcraft-wasm.zip .)
+          echo "built=true" >> "$GITHUB_OUTPUT"
 
       - name: Upload artifact
+        if: steps.bundle.outputs.built == 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: blendcraft-wasm-notes
-          path: dist/*
+          name: blendcraft-wasm
+          path: dist/blendcraft-wasm.zip
           if-no-files-found: error
           retention-days: 14
 
@@ -278,6 +604,8 @@ jobs:
     name: Automatically publish GitHub Release
 
     needs:
+      - linux
+      - flatpak
       - desktop
       - freebsd
       - wasm
@@ -299,9 +627,11 @@ jobs:
       contents: write
 
     steps:
+      # The pattern skips the internal bin-* artifacts used by the Flatpak job.
       - name: Download all build artifacts
         uses: actions/download-artifact@v4
         with:
+          pattern: blendcraft-*
           path: dist
           merge-multiple: true
 
