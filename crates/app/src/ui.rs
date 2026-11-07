@@ -120,6 +120,7 @@ pub fn draw(
             ui.separator();
             ui.add_enabled_ui(in_edit, |ui| {
                 let domain = doc.edit.as_ref().map(|e| e.selection.domain);
+                // One control per select mode (Vertex = points, Edge = lines, Face = surfaces)
                 if ui.selectable_label(domain == Some(forge_core::EditDomain::Vertex), "Vertex").clicked() {
                     actions.push(Action::EditDomainVertex);
                 }
@@ -128,6 +129,9 @@ pub fn draw(
                 }
                 if ui.selectable_label(domain == Some(forge_core::EditDomain::Face), "Face").clicked() {
                     actions.push(Action::EditDomainFace);
+                }
+                if domain == Some(forge_core::EditDomain::Edge) {
+                    ui.weak("click a line to select, drag to move");
                 }
             });
             if !mesh_ok && !in_edit {
@@ -245,9 +249,9 @@ fn menu_bar(ui: &mut egui::Ui, doc: &mut Document, settings: &mut ViewSettings, 
             mi(ui, actions, b, if in_edit { "Object Mode" } else { "Edit Mode" }, Action::ToggleEditMode, true);
             ui.separator();
             ui.add_enabled_ui(in_edit, |ui| {
-                mi(ui, actions, b, "Vertex", Action::EditDomainVertex, true);
-                mi(ui, actions, b, "Edge", Action::EditDomainEdge, true);
-                mi(ui, actions, b, "Face", Action::EditDomainFace, true);
+                mi(ui, actions, b, "Vertex (points)", Action::EditDomainVertex, true);
+                mi(ui, actions, b, "Edge (lines)", Action::EditDomainEdge, true);
+                mi(ui, actions, b, "Face (surfaces)", Action::EditDomainFace, true);
             });
             if !in_edit {
                 ui.weak("Select a mesh object, then Edit Mode.");
@@ -430,7 +434,6 @@ fn menu_bar(ui: &mut egui::Ui, doc: &mut Document, settings: &mut ViewSettings, 
         });
 
         ui.menu_button("Tools", |ui| {
-            soon(ui, "Edit mode (vertices / edges / faces)");
             soon(ui, "Modifiers");
             soon(ui, "UV editor");
             soon(ui, "Texture painting");

@@ -595,6 +595,30 @@ impl EditSession {
         }
     }
 
+    /// Pick the edge whose screen projection is closest to the cursor (pixel distance).
+    /// Much more reliable than world-space ray distance for thin lines.
+    pub fn pick_edge_screen(
+        &self,
+        world: glam::Mat4,
+        project: &dyn Fn(Vec3) -> Option<(f32, f32)>,
+        cursor: (f32, f32),
+        max_px: f32,
+    ) -> Option<EditPick> {
+        let mut best: Option<(EdgeKey, f32)> = None;
+        for &(a, b) in &self.build_edges() {
+            let wa = world.transform_point3(Vec3::from(self.mesh.vertices[a as usize].position));
+            let wb = world.transform_point3(Vec3::from(self.mesh.vertices[b as usize].position));
+            let (Some((x0, y0)), Some((x1, y1))) = (project(wa), project(wb)) else {
+                continue;
+            };
+            let d = point_to_segment_px(cursor.0, cursor.1, x0, y0, x1, y1);
+            if d <= max_px && best.map_or(true, |(_, bd)| d < bd) {
+                best = Some(((a, b), d));
+            }
+        }
+        best.map(|(e, _)| EditPick::Edge(e))
+    }
+
     pub fn pick_component(&self, ray_o: Vec3, ray_d: Vec3, thresh: f32) -> Option<EditPick> {
         let dir = ray_d.normalize_or_zero();
         if dir.length_squared() < 1e-12 {
@@ -618,12 +642,14 @@ impl EditSession {
                 best.map(|(i, _)| EditPick::Vertex(i))
             }
             EditDomain::Edge => {
+                // Generous hit radius so clicking the visible line always works
+                let edge_thresh = thresh.max(0.05) * 2.5;
                 let mut best: Option<(EdgeKey, f32)> = None;
                 for &(a, b) in &self.build_edges() {
                     let pa = Vec3::from(self.mesh.vertices[a as usize].position);
                     let pb = Vec3::from(self.mesh.vertices[b as usize].position);
                     if let Some(dist) = ray_segment_dist(ray_o, dir, pa, pb) {
-                        if dist < thresh && best.map_or(true, |(_, bd)| dist < bd) {
+                        if dist < edge_thresh && best.map_or(true, |(_, bd)| dist < bd) {
                             best = Some(((a, b), dist));
                         }
                     }
@@ -704,6 +730,24 @@ impl EditSession {
             }
         }
     }
+}
+
+fn point_to_segment_px(px: f32, py: f32, x0: f32, y0: f32, x1: f32, y1: f32) -> f32 {
+    let abx = x1 - x0;
+    let aby = y1 - y0;
+    let ab2 = abx * abx + aby * aby;
+    if ab2 < 1e-6 {
+        let dx = px - x0;
+        let dy = py - y0;
+        return (dx * dx + dy * dy).sqrt();
+    }
+    let t = ((px - x0) * abx + (py - y0) * aby) / ab2;
+    let t = t.clamp(0.0, 1.0);
+    let cx = x0 + abx * t;
+    let cy = y0 + aby * t;
+    let dx = px - cx;
+    let dy = py - cy;
+    (dx * dx + dy * dy).sqrt()
 }
 
 fn ray_segment_dist(ro: Vec3, rd: Vec3, a: Vec3, b: Vec3) -> Option<f32> {

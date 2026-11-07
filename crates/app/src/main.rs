@@ -517,24 +517,31 @@ impl App {
         let local_o = inv.transform_point3(ro);
         let local_d = inv.transform_vector3(rd);
         let dist = (world.w_axis.truncate() - self.camera.target).length().max(0.5);
-        // Prefer grabbing vertices regardless of current domain
-        let thresh = dist * 0.06;
-        let mut tmp = session.clone();
-        tmp.selection.domain = forge_core::EditDomain::Vertex;
-        let pick_vert = tmp.pick_component(local_o, local_d, thresh);
-        let pick_other = session.pick_component(local_o, local_d, thresh);
-        let pick = pick_vert.or(pick_other);
+        let thresh = dist * 0.08;
+        // Edge mode: pick in screen space so clicking the drawn line always hits
+        let pick = if session.selection.domain == forge_core::EditDomain::Edge {
+            let cam = self.camera.clone();
+            let vp = self.viewport;
+            let project = move |p: glam::Vec3| -> Option<(f32, f32)> {
+                crate::tools::project_px(&cam, vp, p).map(|v| (v.x, v.y))
+            };
+            session
+                .pick_edge_screen(
+                    world,
+                    &project,
+                    (self.cursor.0 as f32, self.cursor.1 as f32),
+                    16.0, // ~16px hit radius around the drawn line
+                )
+                .or_else(|| session.pick_component(local_o, local_d, thresh * 3.0))
+        } else {
+            session.pick_component(local_o, local_d, thresh)
+        };
         let Some(pick) = pick else {
             if !extend {
                 self.doc.edit_select_none();
             }
             return false;
         };
-        if matches!(pick, forge_core::EditPick::Vertex(_)) {
-            if let Some(e) = self.doc.edit.as_mut() {
-                e.selection.domain = forge_core::EditDomain::Vertex;
-            }
-        }
         self.doc.edit_apply_pick(pick, extend);
         // If we now have verts to move, start drag immediately
         let has = self
@@ -1045,17 +1052,37 @@ impl App {
             }
 
             A::Undo => {
+                // Abort any in-progress drag first (without double-undo)
                 if self.edit_xform.is_some() {
                     self.cancel_edit_xform();
-                } else if self.doc.undo() {
                     self.status("Undo");
+                    return;
+                }
+                if self.edit_gizmo_drag.is_some() {
+                    // restore from checkpoint taken at drag start
+                    self.edit_gizmo_drag = None;
+                    if self.doc.undo() {
+                        self.status("Undo");
+                    }
+                    return;
+                }
+                if self.gizmo.dragging() {
+                    self.gizmo.end();
+                    // gizmo already checkpointed at begin — undo the transform
+                    if self.doc.undo() {
+                        self.status("Undo");
+                    }
+                    return;
+                }
+                if self.doc.undo() {
+                    self.status(format!("Undo ({} left)", self.doc.undo_len()));
                 } else {
                     self.status("Nothing to undo");
                 }
             }
             A::Redo => {
                 if self.doc.redo() {
-                    self.status("Redo");
+                    self.status(format!("Redo ({} left)", self.doc.redo_len()));
                 } else {
                     self.status("Nothing to redo");
                 }
@@ -1719,11 +1746,33 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed && !event.repeat => {
+                // Undo/Redo via logical character so Ctrl+Z works on German QWERTZ (Z/Y swapped)
+                {
+                    use winit::keyboard::Key;
+                    let ctrl = self.ctrl();
+                    let shift = self.mods.shift_key();
+                    let is_undo = ctrl && !shift && matches!(
+                        &event.logical_key,
+                        Key::Character(c) if c.eq_ignore_ascii_case("z")
+                    );
+                    let is_redo = ctrl && (
+                        (shift && matches!(&event.logical_key, Key::Character(c) if c.eq_ignore_ascii_case("z")))
+                        || matches!(&event.logical_key, Key::Character(c) if c.eq_ignore_ascii_case("y"))
+                    );
+                    if is_undo {
+                        self.apply(keymap::Action::Undo, el);
+                        return;
+                    }
+                    if is_redo {
+                        self.apply(keymap::Action::Redo, el);
+                        return;
+                    }
+                    
+                }
                 if let PhysicalKey::Code(code) = event.physical_key {
                     if self.modal.is_some() {
                         self.modal_key(code);
                     } else if !self.egui_ctx.wants_keyboard_input() {
-                        // egui marks Tab as "consumed" for focus cycling — still allow our mode shortcuts
                         let viewport_key = matches!(
                             code,
                             KeyCode::Tab

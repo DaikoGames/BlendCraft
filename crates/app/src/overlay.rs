@@ -154,7 +154,11 @@ pub fn draw(ctx: &egui::Context, cam: &OrbitCamera, rect: egui::Rect, doc: &Docu
                 }
             }
             // mode badge
-            let label = format!("Edit Mode — {}", session.selection.domain.name());
+            let label = match session.selection.domain {
+                EditDomain::Vertex => "Edit Mode — Vertex".to_string(),
+                EditDomain::Edge => "Edit Mode — Edge (lines)".to_string(),
+                EditDomain::Face => "Edit Mode — Face".to_string(),
+            };
             let galley = ctx.fonts(|f| {
                 f.layout_no_wrap(label, egui::FontId::proportional(14.0), Color32::from_rgb(255, 200, 80))
             });
