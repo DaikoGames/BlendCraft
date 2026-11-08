@@ -65,7 +65,8 @@ jobs:
           - { name: linux-arm64,   os: ubuntu-24.04,   target: aarch64-unknown-linux-gnu,     cross: true,  ext: "",     experimental: true  }
           - { name: linux-armv7,   os: ubuntu-24.04,   target: armv7-unknown-linux-gnueabihf, cross: true,  ext: "",     experimental: true  }
           - { name: linux-riscv64,      os: ubuntu-24.04, target: riscv64gc-unknown-linux-gnu,  cross: true, ext: "", experimental: true }
-          - { name: linux-riscv64-musl, os: ubuntu-24.04, target: riscv64gc-unknown-linux-musl, cross: true, ext: "", experimental: true }
+          # No cross image exists for this target, so it is built with cargo-zigbuild (zig as C cross-compiler).
+          - { name: linux-riscv64-musl, os: ubuntu-24.04, target: riscv64gc-unknown-linux-musl, cross: false, zig: true, ext: "", experimental: true }
           # ---- Windows ----
           - { name: windows-x64,   os: windows-latest, target: x86_64-pc-windows-msvc,        cross: false, ext: ".exe", experimental: false }
           - { name: windows-x86,   os: windows-latest, target: i686-pc-windows-msvc,          cross: false, ext: ".exe", experimental: true  }
@@ -109,13 +110,21 @@ jobs:
         with:
           tool: cross
 
+      - name: Install zig + cargo-zigbuild
+        if: matrix.zig
+        run: python3 -m pip install --break-system-packages cargo-zigbuild ziglang
+
       - name: Build (cargo)
-        if: ${{ !matrix.cross }}
+        if: ${{ !matrix.cross && !matrix.zig }}
         run: cargo build --release -p ${{ env.APP_PACKAGE }} --target ${{ matrix.target }}
 
       - name: Build (cross)
         if: matrix.cross
         run: cross build --release -p ${{ env.APP_PACKAGE }} --target ${{ matrix.target }}
+
+      - name: Build (zigbuild)
+        if: matrix.zig
+        run: cargo zigbuild --release -p ${{ env.APP_PACKAGE }} --target ${{ matrix.target }}
 
       - name: Upload artifact
         uses: actions/upload-artifact@v5
@@ -128,9 +137,8 @@ jobs:
   # FreeBSD (built inside a FreeBSD VM)
   #   x64  : normal target
   #   x86  : i686-unknown-freebsd (experimental)
-  #   arm32: armv7-unknown-freebsd is Rust "tier 3" (nightly + build-std and
-  #          a 32-bit ARM sysroot). Expected to fail without extra setup, so
-  #          it is allowed to fail.
+  #   arm32: NOT included. armv7-unknown-freebsd is Rust "tier 3" and there is
+  #          no 32-bit ARM FreeBSD VM or sysroot available on GitHub runners.
   # ---------------------------------------------------------------------------
   freebsd:
     name: ${{ matrix.name }}
@@ -143,7 +151,6 @@ jobs:
         include:
           - { name: freebsd-x64,   target: x86_64-unknown-freebsd, experimental: false }
           - { name: freebsd-x86,   target: i686-unknown-freebsd,   experimental: true  }
-          - { name: freebsd-armv7, target: armv7-unknown-freebsd,  experimental: true  }
     steps:
       - uses: actions/checkout@v5
 
@@ -175,16 +182,10 @@ jobs:
             curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal
             . "$HOME/.cargo/env"
 
-            if [ "$TARGET" = "armv7-unknown-freebsd" ]; then
-              # Tier 3 target: no prebuilt std, so build it from source on nightly.
-              rustup toolchain install nightly --profile minimal --component rust-src
-              cargo +nightly build --release -p "$APP_PACKAGE" --target "$TARGET" -Zbuild-std=std,panic_abort
-            else
-              if [ "$TARGET" != "x86_64-unknown-freebsd" ]; then
-                rustup target add "$TARGET"
-              fi
-              cargo build --release -p "$APP_PACKAGE" --target "$TARGET"
+            if [ "$TARGET" != "x86_64-unknown-freebsd" ]; then
+              rustup target add "$TARGET"
             fi
+            cargo build --release -p "$APP_PACKAGE" --target "$TARGET"
 
             mkdir -p dist
             cp "target/$TARGET/release/$BIN" dist/
@@ -413,5 +414,5 @@ jobs:
           generate_release_notes: true
           body: |
             Experimental, untested builds: Linux x86 / ARM64 / ARMv7 / RISC-V 64 (glibc and musl), Windows x86 / ARM64,
-            FreeBSD x86 / ARM64 / ARMv7. Flatpaks are built for x86_64 and aarch64. On Linux/macOS/FreeBSD run chmod +x on the downloaded file first. If one is missing from the assets, its build failed.
+            FreeBSD x86 / ARM64. Flatpaks are built for x86_64 and aarch64. On Linux/macOS/FreeBSD run chmod +x on the downloaded file first. If one is missing from the assets, its build failed.
           files: out/*
