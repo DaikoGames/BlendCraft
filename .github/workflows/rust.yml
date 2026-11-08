@@ -9,9 +9,9 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  # Name of the binary produced by the forge-app crate.
-  # Change this if your [[bin]] / package name differs.
-  BIN: forge-app
+  # Package that contains the app. The binary name is detected automatically
+  # (see "Detect binary name" steps), so it no longer has to match this.
+  APP_PACKAGE: forge-app
 
 jobs:
   # ---------------------------------------------------------------------------
@@ -19,9 +19,9 @@ jobs:
   # ---------------------------------------------------------------------------
   test:
     name: Test
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Install Linux build dependencies
@@ -29,7 +29,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y pkg-config libx11-dev libxcursor-dev libxrandr-dev \
             libxi-dev libxkbcommon-dev libwayland-dev libgl1-mesa-dev libasound2-dev \
-            libudev-dev libgtk-3-dev
+            libudev-dev
       - run: cargo test -p forge-core
 
   # ---------------------------------------------------------------------------
@@ -37,15 +37,14 @@ jobs:
   # ---------------------------------------------------------------------------
   wasm:
     name: WebAssembly (check)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
-      # Adjust crate names if yours differ.
       - run: cargo check -p forge-core -p forge-io --target wasm32-unknown-unknown
 
   # ---------------------------------------------------------------------------
@@ -61,20 +60,22 @@ jobs:
       matrix:
         include:
           # ---- Linux ----
-          - { name: linux-x64,    os: ubuntu-latest,  target: x86_64-unknown-linux-gnu,        cross: false, ext: "",     experimental: false }
-          - { name: linux-x86,    os: ubuntu-latest,  target: i686-unknown-linux-gnu,          cross: true,  ext: "",     experimental: true  }
-          - { name: linux-arm64,  os: ubuntu-latest,  target: aarch64-unknown-linux-gnu,       cross: true,  ext: "",     experimental: true  }
-          - { name: linux-armv7,  os: ubuntu-latest,  target: armv7-unknown-linux-gnueabihf,   cross: true,  ext: "",     experimental: true  }
+          - { name: linux-x64,     os: ubuntu-24.04,   target: x86_64-unknown-linux-gnu,      cross: false, ext: "",     experimental: false }
+          - { name: linux-x86,     os: ubuntu-24.04,   target: i686-unknown-linux-gnu,        cross: true,  ext: "",     experimental: true  }
+          - { name: linux-arm64,   os: ubuntu-24.04,   target: aarch64-unknown-linux-gnu,     cross: true,  ext: "",     experimental: true  }
+          - { name: linux-armv7,   os: ubuntu-24.04,   target: armv7-unknown-linux-gnueabihf, cross: true,  ext: "",     experimental: true  }
+          - { name: linux-riscv64,      os: ubuntu-24.04, target: riscv64gc-unknown-linux-gnu,  cross: true, ext: "", experimental: true }
+          - { name: linux-riscv64-musl, os: ubuntu-24.04, target: riscv64gc-unknown-linux-musl, cross: true, ext: "", experimental: true }
           # ---- Windows ----
-          - { name: windows-x64,   os: windows-latest, target: x86_64-pc-windows-msvc,         cross: false, ext: ".exe", experimental: false }
-          - { name: windows-x86,   os: windows-latest, target: i686-pc-windows-msvc,           cross: false, ext: ".exe", experimental: true  }
-          - { name: windows-arm64, os: windows-latest, target: aarch64-pc-windows-msvc,        cross: false, ext: ".exe", experimental: true  }
+          - { name: windows-x64,   os: windows-latest, target: x86_64-pc-windows-msvc,        cross: false, ext: ".exe", experimental: false }
+          - { name: windows-x86,   os: windows-latest, target: i686-pc-windows-msvc,          cross: false, ext: ".exe", experimental: true  }
+          - { name: windows-arm64, os: windows-latest, target: aarch64-pc-windows-msvc,       cross: false, ext: ".exe", experimental: true  }
           # ---- macOS ----
-          # macos-13 was retired by GitHub; macos-15-intel is the Intel runner now.
-          - { name: macos-x64,    os: macos-15-intel, target: x86_64-apple-darwin,             cross: false, ext: "",     experimental: false }
-          - { name: macos-arm64,  os: macos-14,       target: aarch64-apple-darwin,            cross: false, ext: "",     experimental: false }
+          # macos-13 and macos-14 are retired. macos-15-intel = Intel, macos-15 = Apple Silicon.
+          - { name: macos-x64,     os: macos-15-intel, target: x86_64-apple-darwin,           cross: false, ext: "",     experimental: false }
+          - { name: macos-arm64,   os: macos-15,       target: aarch64-apple-darwin,          cross: false, ext: "",     experimental: false }
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -84,13 +85,23 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
+      - name: Detect binary name
+        shell: bash
+        run: |
+          BIN=$(cargo metadata --no-deps --format-version 1 \
+            | jq -r --arg pkg "$APP_PACKAGE" '.packages[] | select(.name==$pkg) | .targets[] | select(.kind | index("bin")) | .name' \
+            | head -n1 | tr -d '\r')
+          test -n "$BIN" || { echo "No binary target found in package $APP_PACKAGE"; exit 1; }
+          echo "Binary name: $BIN"
+          echo "BIN=$BIN" >> "$GITHUB_ENV"
+
       - name: Install Linux build dependencies (native build only)
         if: runner.os == 'Linux' && !matrix.cross
         run: |
           sudo apt-get update
           sudo apt-get install -y pkg-config libx11-dev libxcursor-dev libxrandr-dev \
             libxi-dev libxkbcommon-dev libwayland-dev libgl1-mesa-dev libasound2-dev \
-            libudev-dev libgtk-3-dev
+            libudev-dev
 
       - name: Install cross
         if: matrix.cross
@@ -100,14 +111,14 @@ jobs:
 
       - name: Build (cargo)
         if: ${{ !matrix.cross }}
-        run: cargo build --release -p forge-app --target ${{ matrix.target }}
+        run: cargo build --release -p ${{ env.APP_PACKAGE }} --target ${{ matrix.target }}
 
       - name: Build (cross)
         if: matrix.cross
-        run: cross build --release -p forge-app --target ${{ matrix.target }}
+        run: cross build --release -p ${{ env.APP_PACKAGE }} --target ${{ matrix.target }}
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: blendcraft-${{ matrix.name }}
           path: target/${{ matrix.target }}/release/${{ env.BIN }}${{ matrix.ext }}
@@ -116,32 +127,46 @@ jobs:
   # ---------------------------------------------------------------------------
   # FreeBSD (built inside a FreeBSD VM)
   #   x64  : normal target
-  #   x86  : i686-unknown-freebsd (experimental, needs 32-bit libs in the VM)
+  #   x86  : i686-unknown-freebsd (experimental)
   #   arm32: armv7-unknown-freebsd is Rust "tier 3" (nightly + build-std and
   #          a 32-bit ARM sysroot). Expected to fail without extra setup, so
   #          it is allowed to fail.
   # ---------------------------------------------------------------------------
   freebsd:
     name: ${{ matrix.name }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
     continue-on-error: ${{ matrix.experimental }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { name: freebsd-x64,   target: x86_64-unknown-freebsd,  experimental: false }
-          - { name: freebsd-x86,   target: i686-unknown-freebsd,    experimental: true  }
-          - { name: freebsd-armv7, target: armv7-unknown-freebsd,   experimental: true  }
+          - { name: freebsd-x64,   target: x86_64-unknown-freebsd, experimental: false }
+          - { name: freebsd-x86,   target: i686-unknown-freebsd,   experimental: true  }
+          - { name: freebsd-armv7, target: armv7-unknown-freebsd,  experimental: true  }
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
+
+      # Detect the binary name here (on the Ubuntu runner) so the VM script
+      # does not need jq. Rust/cargo are preinstalled on GitHub's Ubuntu runners.
+      - name: Detect binary name
+        shell: bash
+        run: |
+          BIN=$(cargo metadata --no-deps --format-version 1 \
+            | jq -r --arg pkg "$APP_PACKAGE" '.packages[] | select(.name==$pkg) | .targets[] | select(.kind | index("bin")) | .name' \
+            | head -n1 | tr -d '\r')
+          test -n "$BIN" || { echo "No binary target found in package $APP_PACKAGE"; exit 1; }
+          echo "Binary name: $BIN"
+          echo "BIN=$BIN" >> "$GITHUB_ENV"
 
       - name: Build in FreeBSD VM
         uses: vmactions/freebsd-vm@v1
         env:
           TARGET: ${{ matrix.target }}
           BIN: ${{ env.BIN }}
+          APP_PACKAGE: ${{ env.APP_PACKAGE }}
         with:
-          envs: "TARGET BIN"
+          envs: "TARGET BIN APP_PACKAGE"
           usesh: true
           prepare: |
             pkg install -y curl pkgconf
@@ -153,12 +178,12 @@ jobs:
             if [ "$TARGET" = "armv7-unknown-freebsd" ]; then
               # Tier 3 target: no prebuilt std, so build it from source on nightly.
               rustup toolchain install nightly --profile minimal --component rust-src
-              cargo +nightly build --release -p forge-app --target "$TARGET" -Zbuild-std=std,panic_abort
+              cargo +nightly build --release -p "$APP_PACKAGE" --target "$TARGET" -Zbuild-std=std,panic_abort
             else
               if [ "$TARGET" != "x86_64-unknown-freebsd" ]; then
                 rustup target add "$TARGET"
               fi
-              cargo build --release -p forge-app --target "$TARGET"
+              cargo build --release -p "$APP_PACKAGE" --target "$TARGET"
             fi
 
             mkdir -p dist
@@ -166,10 +191,187 @@ jobs:
             rm -rf target
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: blendcraft-${{ matrix.name }}
           path: dist/${{ env.BIN }}
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # FreeBSD ARM64 (aarch64), built inside an emulated FreeBSD aarch64 VM.
+  # Rust's aarch64-unknown-freebsd is "tier 3" (no official toolchain), so this
+  # uses FreeBSD's own `rust` package and builds natively inside the VM.
+  # Emulation is SLOW (expect 1-3+ hours), so this only runs on version tags and
+  # manual runs, not on every push/PR. It is allowed to fail.
+  # ---------------------------------------------------------------------------
+  freebsd-arm64:
+    name: freebsd-arm64
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 340
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Detect binary name
+        shell: bash
+        run: |
+          BIN=$(cargo metadata --no-deps --format-version 1 \
+            | jq -r --arg pkg "$APP_PACKAGE" '.packages[] | select(.name==$pkg) | .targets[] | select(.kind | index("bin")) | .name' \
+            | head -n1 | tr -d '\r')
+          test -n "$BIN" || { echo "No binary target found in package $APP_PACKAGE"; exit 1; }
+          echo "Binary name: $BIN"
+          echo "BIN=$BIN" >> "$GITHUB_ENV"
+
+      - name: Build in FreeBSD aarch64 VM
+        uses: vmactions/freebsd-vm@v1
+        env:
+          BIN: ${{ env.BIN }}
+          APP_PACKAGE: ${{ env.APP_PACKAGE }}
+        with:
+          arch: aarch64
+          envs: "BIN APP_PACKAGE"
+          usesh: true
+          prepare: |
+            pkg install -y rust pkgconf
+          run: |
+            set -e
+            cargo build --release -p "$APP_PACKAGE"
+            mkdir -p dist
+            cp "target/release/$BIN" dist/
+            rm -rf target
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v5
+        with:
+          name: blendcraft-freebsd-arm64
+          path: dist/${{ env.BIN }}
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # Flatpak (x86_64 + aarch64): packages the already-built Linux binaries into
+  # .flatpak bundles, so nothing is compiled twice. The manifest, desktop file,
+  # metainfo (license + metadata) and icon are generated inline below.
+  # ---------------------------------------------------------------------------
+  flatpak:
+    name: flatpak-${{ matrix.name }}
+    needs: build
+    # ARM64 is built natively on GitHub's free Linux ARM runner (public repos).
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: x64,   os: ubuntu-24.04,     arch: x86_64,  artifact: blendcraft-linux-x64 }
+          - { name: arm64, os: ubuntu-24.04-arm, arch: aarch64, artifact: blendcraft-linux-arm64 }
+    env:
+      APP_ID: io.github.DaikoGames.BlendCraft
+    steps:
+      - uses: actions/download-artifact@v5
+        with:
+          name: ${{ matrix.artifact }}
+          path: flatpak-in
+
+      - name: Install flatpak tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y flatpak flatpak-builder
+          flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+
+      - name: Generate Flatpak files
+        run: |
+          set -e
+          BIN=$(ls flatpak-in | head -n1)
+          chmod +x "flatpak-in/$BIN"
+          VERSION="${GITHUB_REF_NAME#v}"
+          case "$GITHUB_REF" in refs/tags/v*) ;; *) VERSION="0.1.0" ;; esac
+          mkdir -p fp && cp "flatpak-in/$BIN" "fp/$BIN"
+          cd fp
+
+          cat > "$APP_ID.desktop" <<EOF
+          [Desktop Entry]
+          Type=Application
+          Name=BlendCraft
+          Comment=Open-source 3D suite for game assets
+          Exec=$BIN %f
+          Icon=$APP_ID
+          Terminal=false
+          Categories=Graphics;3DGraphics;
+          MimeType=model/gltf-binary;
+          EOF
+
+          cat > "$APP_ID.metainfo.xml" <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <component type="desktop-application">
+            <id>$APP_ID</id>
+            <name>BlendCraft</name>
+            <summary>Open-source 3D suite for game assets, written in Rust</summary>
+            <metadata_license>CC0-1.0</metadata_license>
+            <project_license>MIT</project_license>
+            <description>
+              <p>BlendCraft is an early, independent open-source 3D suite written in Rust. It is not affiliated with the Blender Foundation.</p>
+            </description>
+            <launchable type="desktop-id">$APP_ID.desktop</launchable>
+            <url type="homepage">https://github.com/DaikoGames/BlendCraft</url>
+            <provides><binary>$BIN</binary></provides>
+            <releases><release version="$VERSION" date="$(date +%F)"/></releases>
+            <content_rating type="oars-1.1"/>
+          </component>
+          EOF
+
+          cat > icon.svg <<EOF
+          <svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+            <rect width="128" height="128" rx="24" fill="#1e2327"/>
+            <path d="M64 24 100 44v40L64 104 28 84V44z" fill="#ea7600"/>
+            <path d="M64 24 100 44 64 64 28 44z" fill="#ffb066"/>
+          </svg>
+          EOF
+
+          cat > "$APP_ID.yml" <<EOF
+          app-id: $APP_ID
+          runtime: org.freedesktop.Platform
+          runtime-version: '25.08'
+          sdk: org.freedesktop.Sdk
+          command: $BIN
+          finish-args:
+            - --share=ipc
+            - --share=network
+            - --socket=x11
+            - --socket=wayland
+            - --device=dri
+          modules:
+            - name: blendcraft
+              buildsystem: simple
+              build-commands:
+                - install -Dm755 $BIN /app/bin/$BIN
+                - install -Dm644 $APP_ID.desktop /app/share/applications/$APP_ID.desktop
+                - install -Dm644 $APP_ID.metainfo.xml /app/share/metainfo/$APP_ID.metainfo.xml
+                - install -Dm644 icon.svg /app/share/icons/hicolor/scalable/apps/$APP_ID.svg
+              sources:
+                - type: file
+                  path: $BIN
+                - type: file
+                  path: $APP_ID.desktop
+                - type: file
+                  path: $APP_ID.metainfo.xml
+                - type: file
+                  path: icon.svg
+          EOF
+
+      - name: Build Flatpak bundle
+        working-directory: fp
+        run: |
+          flatpak-builder --user --force-clean --install-deps-from=flathub \
+            --repo=repo builddir "$APP_ID.yml"
+          flatpak build-bundle repo "BlendCraft-${{ matrix.arch }}.flatpak" "$APP_ID"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v5
+        with:
+          name: blendcraft-flatpak-${{ matrix.name }}
+          path: fp/BlendCraft-${{ matrix.arch }}.flatpak
           if-no-files-found: error
 
   # ---------------------------------------------------------------------------
@@ -178,37 +380,38 @@ jobs:
   release:
     name: Publish release
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [test, build, freebsd]
-    runs-on: ubuntu-latest
+    needs: [test, build, freebsd, freebsd-arm64, flatpak]
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
         with:
           pattern: blendcraft-*
           path: dist
 
-      - name: Package binaries
+      # No archives: each binary is uploaded as-is, renamed so the platform
+      # is in the file name (e.g. blendcraft-linux-x64, blendcraft-windows-x64.exe).
+      - name: Collect binaries
         run: |
-          cd dist
-          for d in */; do
-            n="${d%/}"
-            if ls "$n"/*.exe >/dev/null 2>&1; then
-              (cd "$n" && zip -q "../$n.zip" ./*)
-            else
-              chmod +x "$n"/*
-              tar -czf "$n.tar.gz" -C "$n" .
-            fi
+          mkdir -p out
+          for d in dist/*/; do
+            n=$(basename "$d")
+            for f in "$d"*; do
+              case "$f" in
+                *.flatpak) mv "$f" out/ ;;
+                *.exe)     mv "$f" "out/$n.exe" ;;
+                *)         mv "$f" "out/$n" ;;
+              esac
+            done
           done
-          ls -lh
+          ls -lh out
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
           body: |
-            Experimental, untested builds: Linux x86 / ARM64 / ARMv7, Windows x86 / ARM64,
-            FreeBSD x86 / ARMv7. If one is missing from the assets, its build failed.
-          files: |
-            dist/*.zip
-            dist/*.tar.gz
+            Experimental, untested builds: Linux x86 / ARM64 / ARMv7 / RISC-V 64 (glibc and musl), Windows x86 / ARM64,
+            FreeBSD x86 / ARM64 / ARMv7. Flatpaks are built for x86_64 and aarch64. On Linux/macOS/FreeBSD run chmod +x on the downloaded file first. If one is missing from the assets, its build failed.
+          files: out/*
