@@ -1,5 +1,5 @@
 //! Full Edit Mode: selection domains, transforms, delete, extrude, dissolve.
-use crate::mesh::{MeshData, Vertex};
+use crate::mesh::MeshData;
 use glam::{Mat4, Quat, Vec3};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -593,6 +593,552 @@ impl EditSession {
                 }
             }
         }
+    }
+
+
+    // ------------------------------------------------------------------ new Edit Mode tools
+
+    /// Inset selected faces toward their center by `factor` (0..1).
+    /// Blender-like: creates an inner face and side walls; original face is replaced.
+    pub fn inset_faces(&mut self, factor: f32) {
+        // Accept face selection, or promote from verts/edges that form faces
+        if self.selection.faces.is_empty() {
+            // Promote: any face whose 3 verts are all selected
+            if self.selection.domain == EditDomain::Vertex && !self.selection.verts.is_empty() {
+                let nfaces = self.mesh.indices.len() / 3;
+                for fi in 0..nfaces {
+                    let i = fi * 3;
+                    let a = self.mesh.indices[i];
+                    let b = self.mesh.indices[i + 1];
+                    let c = self.mesh.indices[i + 2];
+                    if self.selection.verts.contains(&a)
+                        && self.selection.verts.contains(&b)
+                        && self.selection.verts.contains(&c)
+                    {
+                        self.selection.faces.insert(fi as u32);
+                    }
+                }
+            }
+        }
+        if self.selection.faces.is_empty() {
+            return;
+        }
+        self.selection.domain = EditDomain::Face;
+        let factor = factor.clamp(0.01, 0.49);
+        let faces: Vec<u32> = self.selection.faces.iter().copied().collect();
+        let face_set: BTreeSet<u32> = faces.iter().copied().collect();
+
+        // Keep all non-selected faces
+        let mut new_indices: Vec<u32> = Vec::new();
+        for (fi, tri) in self.mesh.indices.chunks_exact(3).enumerate() {
+            if !face_set.contains(&(fi as u32)) {
+                new_indices.extend_from_slice(tri);
+            }
+        }
+
+        let mut new_face_sel = BTreeSet::new();
+
+        for &f in &faces {
+            let i = (f as usize) * 3;
+            if i + 2 >= self.mesh.indices.len() {
+                continue;
+            }
+            let ia = self.mesh.indices[i];
+            let ib = self.mesh.indices[i + 1];
+            let ic = self.mesh.indices[i + 2];
+            let a = Vec3::from(self.mesh.vertices[ia as usize].position);
+            let b = Vec3::from(self.mesh.vertices[ib as usize].position);
+            let c = Vec3::from(self.mesh.vertices[ic as usize].position);
+            let center = (a + b + c) / 3.0;
+
+            let na = a.lerp(center, factor);
+            let nb = b.lerp(center, factor);
+            let nc = c.lerp(center, factor);
+
+            let base = self.mesh.vertices.len() as u32;
+            for p in [na, nb, nc] {
+                let mut v = self.mesh.vertices[ia as usize].clone();
+                v.position = p.to_array();
+                self.mesh.vertices.push(v);
+            }
+
+            // Side walls (outer -> inner)
+            new_indices.extend_from_slice(&[ia, ib, base + 1]);
+            new_indices.extend_from_slice(&[ia, base + 1, base]);
+            new_indices.extend_from_slice(&[ib, ic, base + 2]);
+            new_indices.extend_from_slice(&[ib, base + 2, base + 1]);
+            new_indices.extend_from_slice(&[ic, ia, base]);
+            new_indices.extend_from_slice(&[ic, base, base + 2]);
+
+            // Inner face
+            let fi = (new_indices.len() / 3) as u32;
+            new_indices.extend_from_slice(&[base, base + 1, base + 2]);
+            new_face_sel.insert(fi);
+        }
+
+        self.mesh.indices = new_indices;
+        self.selection.clear();
+        self.selection.domain = EditDomain::Face;
+        self.selection.faces = new_face_sel;
+        self.mesh.compute_normals();
+    }
+
+    /// Bevel: for selected edges/verts, offset along average normals (chamfer-like).
+    /// Works with vertex, edge, or face selection (faces → boundary verts).
+    pub fn bevel(&mut self, amount: f32) {
+        let amount = amount.max(0.0);
+        if amount < 1e-8 {
+            return;
+        }
+        // Build affected vertex set from any domain
+        let mut verts: BTreeSet<u32> = self.selected_vert_indices();
+        if verts.is_empty() && !self.selection.faces.is_empty() {
+            for &f in &self.selection.faces {
+                let i = (f as usize) * 3;
+                if i + 2 < self.mesh.indices.len() {
+                    verts.insert(self.mesh.indices[i]);
+                    verts.insert(self.mesh.indices[i + 1]);
+                    verts.insert(self.mesh.indices[i + 2]);
+                }
+            }
+        }
+        if verts.is_empty() && !self.selection.edges.is_empty() {
+            for &(a, b) in &self.selection.edges {
+                verts.insert(a);
+                verts.insert(b);
+            }
+        }
+        if verts.is_empty() {
+            return;
+        }
+        let mut normals = vec![Vec3::ZERO; self.mesh.vertices.len()];
+        for tri in self.mesh.indices.chunks_exact(3) {
+            let a = Vec3::from(self.mesh.vertices[tri[0] as usize].position);
+            let b = Vec3::from(self.mesh.vertices[tri[1] as usize].position);
+            let c = Vec3::from(self.mesh.vertices[tri[2] as usize].position);
+            let n = (b - a).cross(c - a).normalize_or_zero();
+            for &vi in tri {
+                normals[vi as usize] += n;
+            }
+        }
+        for n in &mut normals {
+            *n = n.normalize_or_zero();
+        }
+        for &vi in &verts {
+            if let Some(v) = self.mesh.vertices.get_mut(vi as usize) {
+                let n = normals[vi as usize];
+                v.position[0] += n.x * amount;
+                v.position[1] += n.y * amount;
+                v.position[2] += n.z * amount;
+            }
+        }
+        self.mesh.compute_normals();
+    }
+
+    /// Laplacian smooth on selected vertices.
+    pub fn smooth_verts(&mut self, factor: f32) {
+        let factor = factor.clamp(0.0, 1.0);
+        let verts: Vec<u32> = self.selected_vert_indices().into_iter().collect();
+        if verts.is_empty() {
+            return;
+        }
+        // Build neighbor map
+        let mut neighbors: HashMap<u32, Vec<u32>> = HashMap::new();
+        for tri in self.mesh.indices.chunks_exact(3) {
+            for i in 0..3 {
+                let a = tri[i];
+                let b = tri[(i + 1) % 3];
+                neighbors.entry(a).or_default().push(b);
+                neighbors.entry(b).or_default().push(a);
+            }
+        }
+        let mut new_pos: HashMap<u32, Vec3> = HashMap::new();
+        for &vi in &verts {
+            let Some(neigh) = neighbors.get(&vi) else {
+                continue;
+            };
+            if neigh.is_empty() {
+                continue;
+            }
+            let mut acc = Vec3::ZERO;
+            for &n in neigh {
+                acc += Vec3::from(self.mesh.vertices[n as usize].position);
+            }
+            let avg = acc / neigh.len() as f32;
+            let cur = Vec3::from(self.mesh.vertices[vi as usize].position);
+            new_pos.insert(vi, cur.lerp(avg, factor));
+        }
+        for (vi, p) in new_pos {
+            if let Some(v) = self.mesh.vertices.get_mut(vi as usize) {
+                v.position = p.to_array();
+            }
+        }
+        self.mesh.compute_normals();
+    }
+
+    /// Move selected verts along their normals (shrink/fatten).
+    pub fn shrink_fatten(&mut self, amount: f32) {
+        let verts: BTreeSet<u32> = self.selected_vert_indices();
+        if verts.is_empty() {
+            return;
+        }
+        let mut normals = vec![Vec3::ZERO; self.mesh.vertices.len()];
+        for tri in self.mesh.indices.chunks_exact(3) {
+            let a = Vec3::from(self.mesh.vertices[tri[0] as usize].position);
+            let b = Vec3::from(self.mesh.vertices[tri[1] as usize].position);
+            let c = Vec3::from(self.mesh.vertices[tri[2] as usize].position);
+            let n = (b - a).cross(c - a).normalize_or_zero();
+            for &vi in tri {
+                normals[vi as usize] += n;
+            }
+        }
+        for n in &mut normals {
+            *n = n.normalize_or_zero();
+        }
+        for &vi in &verts {
+            if let Some(v) = self.mesh.vertices.get_mut(vi as usize) {
+                let n = normals[vi as usize];
+                v.position[0] += n.x * amount;
+                v.position[1] += n.y * amount;
+                v.position[2] += n.z * amount;
+            }
+        }
+        self.mesh.compute_normals();
+    }
+
+    /// Shear selected verts along an axis.
+    pub fn shear(&mut self, axis: usize, amount: f32) {
+        let center = self.selection_center();
+        let verts: BTreeSet<u32> = self.selected_vert_indices();
+        for &vi in &verts {
+            if let Some(v) = self.mesh.vertices.get_mut(vi as usize) {
+                let p = Vec3::from(v.position) - center;
+                match axis {
+                    0 => { // shear X by Y
+                        v.position[0] += p.y * amount;
+                    }
+                    1 => { // shear Y by X
+                        v.position[1] += p.x * amount;
+                    }
+                    _ => { // shear X by Z
+                        v.position[0] += p.z * amount;
+                    }
+                }
+            }
+        }
+        self.mesh.compute_normals();
+    }
+
+    /// Edge slide: move selected verts along the average direction of connected selected edges.
+    pub fn edge_slide(&mut self, amount: f32) {
+        if self.selection.domain != EditDomain::Edge || self.selection.edges.is_empty() {
+            // Fall back to sliding selected verts toward neighbors
+            self.shrink_fatten(amount * 0.1);
+            return;
+        }
+        for &(a, b) in &self.selection.edges.clone() {
+            let pa = Vec3::from(self.mesh.vertices[a as usize].position);
+            let pb = Vec3::from(self.mesh.vertices[b as usize].position);
+            let dir = (pb - pa).normalize_or_zero();
+            if let Some(va) = self.mesh.vertices.get_mut(a as usize) {
+                let p = Vec3::from(va.position) + dir * amount;
+                va.position = p.to_array();
+            }
+            if let Some(vb) = self.mesh.vertices.get_mut(b as usize) {
+                let p = Vec3::from(vb.position) - dir * amount;
+                vb.position = p.to_array();
+            }
+        }
+        self.mesh.compute_normals();
+    }
+
+    /// Rip: duplicate selected verts and disconnect them from unselected geometry.
+    pub fn rip_region(&mut self) {
+        let verts: BTreeSet<u32> = self.selected_vert_indices();
+        if verts.is_empty() {
+            return;
+        }
+        let mut remap: HashMap<u32, u32> = HashMap::new();
+        for &vi in &verts {
+            let v = self.mesh.vertices[vi as usize].clone();
+            let ni = self.mesh.vertices.len() as u32;
+            self.mesh.vertices.push(v);
+            remap.insert(vi, ni);
+        }
+        // Update indices: faces that use only selected verts keep old; mixed faces get new verts for selected
+        for tri in self.mesh.indices.chunks_exact_mut(3) {
+            let sel_count = tri.iter().filter(|i| verts.contains(i)).count();
+            if sel_count > 0 && sel_count < 3 {
+                for idx in tri.iter_mut() {
+                    if let Some(&ni) = remap.get(idx) {
+                        *idx = ni;
+                    }
+                }
+            }
+        }
+        self.selection.clear();
+        self.selection.domain = EditDomain::Vertex;
+        self.selection.verts = remap.values().copied().collect();
+        self.mesh.compute_normals();
+    }
+
+    /// Loop cut (simplified): subdivide selected edges at midpoint and split adjacent faces.
+    pub fn loop_cut(&mut self) {
+        let edges: Vec<EdgeKey> = if self.selection.domain == EditDomain::Edge && !self.selection.edges.is_empty() {
+            self.selection.edges.iter().copied().collect()
+        } else {
+            // If faces selected, cut all their edges
+            let mut e = BTreeSet::new();
+            for &f in &self.selection.faces {
+                let i = (f as usize) * 3;
+                if i + 2 < self.mesh.indices.len() {
+                    e.insert(edge_key(self.mesh.indices[i], self.mesh.indices[i + 1]));
+                    e.insert(edge_key(self.mesh.indices[i + 1], self.mesh.indices[i + 2]));
+                    e.insert(edge_key(self.mesh.indices[i + 2], self.mesh.indices[i]));
+                }
+            }
+            e.into_iter().collect()
+        };
+        if edges.is_empty() {
+            return;
+        }
+        let mut mid_map: HashMap<EdgeKey, u32> = HashMap::new();
+        for &(a, b) in &edges {
+            let pa = Vec3::from(self.mesh.vertices[a as usize].position);
+            let pb = Vec3::from(self.mesh.vertices[b as usize].position);
+            let mid = (pa + pb) * 0.5;
+            let mut v = self.mesh.vertices[a as usize].clone();
+            v.position = mid.to_array();
+            let ni = self.mesh.vertices.len() as u32;
+            self.mesh.vertices.push(v);
+            mid_map.insert(edge_key(a, b), ni);
+        }
+        // Split faces that contain a cut edge
+        let old_indices = self.mesh.indices.clone();
+        let mut new_indices = Vec::new();
+        for tri in old_indices.chunks_exact(3) {
+            let a = tri[0];
+            let b = tri[1];
+            let c = tri[2];
+            let mab = mid_map.get(&edge_key(a, b)).copied();
+            let mbc = mid_map.get(&edge_key(b, c)).copied();
+            let mca = mid_map.get(&edge_key(c, a)).copied();
+            match (mab, mbc, mca) {
+                (Some(m), None, None) => {
+                    new_indices.extend_from_slice(&[a, m, c]);
+                    new_indices.extend_from_slice(&[m, b, c]);
+                }
+                (None, Some(m), None) => {
+                    new_indices.extend_from_slice(&[a, b, m]);
+                    new_indices.extend_from_slice(&[a, m, c]);
+                }
+                (None, None, Some(m)) => {
+                    new_indices.extend_from_slice(&[a, b, m]);
+                    new_indices.extend_from_slice(&[b, c, m]);
+                }
+                (Some(m0), Some(m1), None) => {
+                    new_indices.extend_from_slice(&[a, m0, c]);
+                    new_indices.extend_from_slice(&[m0, b, m1]);
+                    new_indices.extend_from_slice(&[m0, m1, c]);
+                }
+                (None, Some(m0), Some(m1)) => {
+                    new_indices.extend_from_slice(&[a, b, m0]);
+                    new_indices.extend_from_slice(&[a, m0, m1]);
+                    new_indices.extend_from_slice(&[m0, c, m1]);
+                }
+                (Some(m0), None, Some(m1)) => {
+                    new_indices.extend_from_slice(&[a, m0, m1]);
+                    new_indices.extend_from_slice(&[m0, b, c]);
+                    new_indices.extend_from_slice(&[m0, c, m1]);
+                }
+                (Some(m0), Some(m1), Some(m2)) => {
+                    // all three edges cut – make 4 tris
+                    new_indices.extend_from_slice(&[a, m0, m2]);
+                    new_indices.extend_from_slice(&[m0, b, m1]);
+                    new_indices.extend_from_slice(&[m2, m1, c]);
+                    new_indices.extend_from_slice(&[m0, m1, m2]);
+                }
+                _ => new_indices.extend_from_slice(tri),
+            }
+        }
+        self.mesh.indices = new_indices;
+        self.selection.clear();
+        self.selection.domain = EditDomain::Vertex;
+        self.selection.verts = mid_map.values().copied().collect();
+        self.mesh.compute_normals();
+    }
+
+    /// Spin: rotate selected geometry around Z axis and create connecting faces (simplified radial extrude).
+    pub fn spin(&mut self, steps: u32, angle_deg: f32) {
+        let steps = steps.clamp(2, 32);
+        let verts: Vec<u32> = self.selected_vert_indices().into_iter().collect();
+        if verts.is_empty() {
+            return;
+        }
+        let angle = angle_deg.to_radians() / steps as f32;
+        let center = self.selection_center();
+        let mut rings: Vec<Vec<u32>> = vec![verts.clone()];
+        for s in 1..=steps {
+            let mut ring = Vec::new();
+            let q = Quat::from_axis_angle(Vec3::Y, angle * s as f32);
+            for &vi in &verts {
+                let p = Vec3::from(self.mesh.vertices[vi as usize].position);
+                let rotated = center + q * (p - center);
+                let mut v = self.mesh.vertices[vi as usize].clone();
+                v.position = rotated.to_array();
+                let ni = self.mesh.vertices.len() as u32;
+                self.mesh.vertices.push(v);
+                ring.push(ni);
+            }
+            rings.push(ring);
+        }
+        // Bridge consecutive rings
+        for r in 0..rings.len() - 1 {
+            let a = &rings[r];
+            let b = &rings[r + 1];
+            for i in 0..a.len() {
+                let j = (i + 1) % a.len();
+                if a.len() < 2 {
+                    break;
+                }
+                self.mesh.indices.extend_from_slice(&[a[i], a[j], b[j]]);
+                self.mesh.indices.extend_from_slice(&[a[i], b[j], b[i]]);
+            }
+        }
+        self.selection.clear();
+        self.selection.domain = EditDomain::Vertex;
+        if let Some(last) = rings.last() {
+            self.selection.verts = last.iter().copied().collect();
+        }
+        self.mesh.compute_normals();
+    }
+
+    
+    /// Knife / bisect: cut the mesh with a plane defined by point + normal.
+    /// Splits edges that cross the plane and triangulates resulting faces.
+    pub fn knife_bisect(&mut self, plane_point: Vec3, plane_normal: Vec3) {
+        let n = plane_normal.normalize_or_zero();
+        if n.length_squared() < 1e-8 {
+            return;
+        }
+        let d = -n.dot(plane_point);
+        // For each edge, if it crosses the plane, insert a vertex
+        let edges = self.build_edges();
+        let mut edge_cut: HashMap<EdgeKey, u32> = HashMap::new();
+        for &(a, b) in &edges {
+            let pa = Vec3::from(self.mesh.vertices[a as usize].position);
+            let pb = Vec3::from(self.mesh.vertices[b as usize].position);
+            let da = n.dot(pa) + d;
+            let db = n.dot(pb) + d;
+            if da * db < 0.0 {
+                let t = da / (da - db);
+                let p = pa + (pb - pa) * t;
+                let mut v = self.mesh.vertices[a as usize].clone();
+                v.position = p.to_array();
+                let ni = self.mesh.vertices.len() as u32;
+                self.mesh.vertices.push(v);
+                edge_cut.insert(edge_key(a, b), ni);
+            }
+        }
+        if edge_cut.is_empty() {
+            return;
+        }
+        // Rebuild faces: split triangles that have cut edges
+        let old = self.mesh.indices.clone();
+        let mut new_idx = Vec::new();
+        for tri in old.chunks_exact(3) {
+            let a = tri[0];
+            let b = tri[1];
+            let c = tri[2];
+            let mab = edge_cut.get(&edge_key(a, b)).copied();
+            let mbc = edge_cut.get(&edge_key(b, c)).copied();
+            let mca = edge_cut.get(&edge_key(c, a)).copied();
+            match (mab, mbc, mca) {
+                (Some(m), None, None) => {
+                    new_idx.extend_from_slice(&[a, m, c, m, b, c]);
+                }
+                (None, Some(m), None) => {
+                    new_idx.extend_from_slice(&[a, b, m, a, m, c]);
+                }
+                (None, None, Some(m)) => {
+                    new_idx.extend_from_slice(&[a, b, m, b, c, m]);
+                }
+                (Some(m0), Some(m1), None) => {
+                    new_idx.extend_from_slice(&[a, m0, c, m0, b, m1, m0, m1, c]);
+                }
+                (None, Some(m0), Some(m1)) => {
+                    new_idx.extend_from_slice(&[a, b, m0, a, m0, m1, m0, c, m1]);
+                }
+                (Some(m0), None, Some(m1)) => {
+                    new_idx.extend_from_slice(&[a, m0, m1, m0, b, c, m0, c, m1]);
+                }
+                (Some(m0), Some(m1), Some(m2)) => {
+                    new_idx.extend_from_slice(&[a, m0, m2, m0, b, m1, m2, m1, c, m0, m1, m2]);
+                }
+                _ => new_idx.extend_from_slice(tri),
+            }
+        }
+        self.mesh.indices = new_idx;
+        self.selection.clear();
+        self.selection.domain = EditDomain::Vertex;
+        self.selection.verts = edge_cut.values().copied().collect();
+        self.mesh.compute_normals();
+    }
+
+    /// Poly Build: from selected edge(s), extrude a new face outward along average normal.
+    pub fn poly_build(&mut self, amount: f32) {
+        let edges: Vec<EdgeKey> = if !self.selection.edges.is_empty() {
+            self.selection.edges.iter().copied().collect()
+        } else if !self.selection.verts.is_empty() && self.selection.verts.len() >= 2 {
+            // connect selected verts as a chain
+            let v: Vec<u32> = self.selection.verts.iter().copied().collect();
+            let mut e = Vec::new();
+            for i in 0..v.len() - 1 {
+                e.push(edge_key(v[i], v[i + 1]));
+            }
+            e
+        } else {
+            return;
+        };
+        if edges.is_empty() {
+            return;
+        }
+        // Average normal from adjacent faces
+        let mut n_acc = Vec3::ZERO;
+        for tri in self.mesh.indices.chunks_exact(3) {
+            let a = Vec3::from(self.mesh.vertices[tri[0] as usize].position);
+            let b = Vec3::from(self.mesh.vertices[tri[1] as usize].position);
+            let c = Vec3::from(self.mesh.vertices[tri[2] as usize].position);
+            n_acc += (b - a).cross(c - a).normalize_or_zero();
+        }
+        let n = n_acc.normalize_or_zero();
+        let offset = n * amount;
+
+        let mut new_verts_map: HashMap<u32, u32> = HashMap::new();
+        let mut involved = BTreeSet::new();
+        for &(a, b) in &edges {
+            involved.insert(a);
+            involved.insert(b);
+        }
+        for &vi in &involved {
+            let mut v = self.mesh.vertices[vi as usize].clone();
+            let p = Vec3::from(v.position) + offset;
+            v.position = p.to_array();
+            let ni = self.mesh.vertices.len() as u32;
+            self.mesh.vertices.push(v);
+            new_verts_map.insert(vi, ni);
+        }
+        for &(a, b) in &edges {
+            let na = new_verts_map[&a];
+            let nb = new_verts_map[&b];
+            // quad as two tris
+            self.mesh.indices.extend_from_slice(&[a, b, nb]);
+            self.mesh.indices.extend_from_slice(&[a, nb, na]);
+        }
+        self.selection.clear();
+        self.selection.domain = EditDomain::Vertex;
+        self.selection.verts = new_verts_map.values().copied().collect();
+        self.mesh.compute_normals();
     }
 
     /// Pick the edge whose screen projection is closest to the cursor (pixel distance).

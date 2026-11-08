@@ -30,6 +30,17 @@ pub enum Action {
     DuplicateLinked,
     Delete,
     Extrude,
+    InsetFaces,
+    Bevel,
+    LoopCut,
+    Knife,
+    PolyBuild,
+    Spin,
+    SmoothVerts,
+    EdgeSlide,
+    ShrinkFatten,
+    Shear,
+    RipRegion,
     MergeVerts,
     Rename,
     MakeSingleUser,
@@ -102,6 +113,7 @@ pub enum Action {
     ToggleShortcuts,
     ShowAbout,
     ToggleEditMode,
+    ToggleSculptMode,
     ArmatureAddBone,
     ArmatureExtrude,
     ArmatureDeleteBones,
@@ -169,6 +181,15 @@ pub fn bindings() -> Vec<Binding> {
     b("Edit", "Delete", "", K::KeyX, A::Delete);
     b("Edit", "Delete", "", K::Delete, A::Delete);
     b("Edit", "Extrude", "", K::KeyE, A::Extrude);
+    b("Edit", "Inset Faces", "", K::KeyI, A::InsetFaces);
+    b("Edit", "Bevel", "c", K::KeyB, A::Bevel);
+    b("Edit", "Loop Cut", "c", K::KeyR, A::LoopCut);
+    b("Edit", "Knife bisect", "", K::KeyK, A::Knife);
+    b("Edit", "Shrink/Fatten", "a", K::KeyS, A::ShrinkFatten);
+    b("Edit", "Smooth verts", "", K::KeyO, A::SmoothVerts);
+    b("Edit", "Rip Region", "", K::KeyV, A::RipRegion);
+    b("Edit", "Poly Build", "", K::KeyP, A::PolyBuild);
+    b("Edit", "Spin", "a", K::KeyE, A::Spin);
     b("Edit", "Merge verts", "", K::KeyM, A::MergeVerts);
     b("Edit", "Rename active object", "", K::F2, A::Rename);
 
@@ -186,6 +207,7 @@ pub fn bindings() -> Vec<Binding> {
     b("Tools", "Cycle gizmo tool (Move / Rotate / Scale)", "", K::KeyT, A::CycleTool);
     b("Tools", "Toggle snapping", "s", K::Tab, A::ToggleSnap);
     b("Mode", "Toggle Edit Mode", "", K::Tab, A::ToggleEditMode);
+    b("Mode", "Toggle Sculpt Mode", "c", K::Tab, A::ToggleSculptMode);
     b("Mode", "Vertex select", "", K::Digit1, A::EditDomainVertex);
     b("Mode", "Edge select", "", K::Digit2, A::EditDomainEdge);
     b("Mode", "Face select", "", K::Digit3, A::EditDomainFace);

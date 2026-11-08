@@ -8,7 +8,7 @@ mod transform;
 mod ui;
 
 use egui_wgpu::wgpu;
-use forge_core::{project, Constraint, Document, EditDomain, EnvironmentMap, FixedView, ObjectKind, OrbitCamera, SameKind};
+use forge_core::{project, Constraint, Document, EditDomain, EnvironmentMap, FixedView, ObjectKind, OrbitCamera, SameKind, SculptSettings, SculptBrush};
 use forge_render::{Highlight, Renderer, ViewSettings};
 use glam::{Mat4, Vec2};
 use keymap::{Action, Binding};
@@ -79,6 +79,14 @@ struct SelDrag {
     op: SelectOp,
 }
 
+/// Interactive Edit Mode tool drag (Ctrl+LMB): amount follows mouse.
+struct ToolDrag {
+    tool: Tool,
+    start: (f64, f64),
+    /// Last applied parameter (so we can re-apply from checkpoint)
+    last_amount: f32,
+}
+
 struct App {
     gfx: Option<Gfx>,
     egui_ctx: egui::Context,
@@ -95,6 +103,23 @@ struct App {
     bone_pose_drag: Option<(f64, f64)>,
     bone_extrude_drag: Option<BoneExtrudeDrag>,
     sel_drag: Option<SelDrag>,
+    /// Measure tool: first click point in world space
+    measure_a: Option<glam::Vec3>,
+    /// Measure tool: second point (live while moving)
+    measure_b: Option<glam::Vec3>,
+    /// Annotate tool: strokes as lists of world-space points
+    annotations: Vec<Vec<glam::Vec3>>,
+    /// Stroke currently being drawn
+    annotate_stroke: Option<Vec<glam::Vec3>>,
+    /// Ctrl+LMB interactive edit tool
+    tool_drag: Option<ToolDrag>,
+    sculpt: SculptSettings,
+    /// True while LMB is held painting in Sculpt Mode
+    sculpt_stroke: bool,
+    /// Last world hit for grab delta
+    sculpt_last_hit: Option<glam::Vec3>,
+    /// Cursor pos of last sculpt sample (throttle density)
+    sculpt_last_sample: Option<(f64, f64)>,
     ui: UiState,
     bindings: Vec<Binding>,
     recent: recent::Recent,
@@ -228,6 +253,15 @@ impl App {
             bone_pose_drag: None,
             bone_extrude_drag: None,
             sel_drag: None,
+            measure_a: None,
+            measure_b: None,
+            annotations: Vec::new(),
+            annotate_stroke: None,
+            tool_drag: None,
+            sculpt: SculptSettings::default(),
+            sculpt_stroke: false,
+            sculpt_last_hit: None,
+            sculpt_last_sample: None,
             ui: UiState::default(),
             bindings: keymap::bindings(),
             recent: recent::Recent::load(),
@@ -264,6 +298,268 @@ impl App {
         if let Some(b) = b.or_else(|| self.doc.scene.bounds()) {
             self.camera.frame(b);
         }
+    }
+
+
+    /// Raycast against ground plane y=0 or return point along ray at distance 5.
+
+    /// Tools that support Ctrl+LMB interactive drag in Edit Mode.
+    fn is_ctrl_lmb_tool(tool: Tool) -> bool {
+        matches!(
+            tool,
+            Tool::ExtrudeRegion
+                | Tool::InsetFaces
+                | Tool::Bevel
+                | Tool::LoopCut
+                | Tool::Knife
+                | Tool::PolyBuild
+                | Tool::Spin
+                | Tool::Smooth
+                | Tool::EdgeSlide
+                | Tool::ShrinkFatten
+                | Tool::Shear
+                | Tool::RipRegion
+        )
+    }
+
+    fn begin_tool_drag(&mut self) {
+        if !self.doc.in_edit_mode() {
+            self.status("Tab into Edit Mode first");
+            return;
+        }
+        let empty = self.doc.edit.as_ref().map(|e| e.selection.is_empty()).unwrap_or(true);
+        // LoopCut/Knife can work with empty selection differently; others need selection
+        let needs_sel = !matches!(self.ts.tool, Tool::Knife | Tool::LoopCut);
+        if empty && needs_sel {
+            self.status(format!(
+                "{}: select geometry first (1/2/3 + click)",
+                self.ts.tool.name()
+            ));
+            return;
+        }
+        // Checkpoint once at start; we'll undo+reapply each frame for live feedback
+        self.doc.checkpoint();
+        self.tool_drag = Some(ToolDrag {
+            tool: self.ts.tool,
+            start: self.cursor,
+            last_amount: 0.0,
+        });
+        self.status(format!("{}: drag to adjust, release to confirm", self.ts.tool.name()));
+    }
+
+    fn update_tool_drag(&mut self) {
+        let Some(drag) = self.tool_drag.as_ref() else { return };
+        let tool = drag.tool;
+        let start = drag.start;
+        let dy = (start.1 - self.cursor.1) as f32; // mouse up = positive
+        let dx = (self.cursor.0 - start.0) as f32;
+        let amount = match tool {
+            Tool::ExtrudeRegion => dy * 0.005,
+            Tool::InsetFaces => (dy.abs() * 0.002).clamp(0.01, 0.49),
+            Tool::Bevel => (dy.abs() * 0.002).max(0.0),
+            Tool::ShrinkFatten => dy * 0.004,
+            Tool::Smooth => (dy.abs() * 0.002).clamp(0.0, 1.0),
+            Tool::EdgeSlide => dx * 0.004,
+            Tool::Shear => dx * 0.004,
+            Tool::Spin => dy.abs() * 0.8,
+            _ => dy * 0.005,
+        };
+        // Restore pre-drag snapshot, re-save it, then apply without extra checkpoints
+        self.doc.undo();
+        self.doc.checkpoint();
+        // Apply directly on the edit session (avoid edit_* wrappers that checkpoint again)
+        if let Some(e) = self.doc.edit.as_mut() {
+            match tool {
+                Tool::ExtrudeRegion => {
+                    e.extrude_faces(amount);
+                    self.status(format!("Extrude: {:.3}  (release to confirm)", amount));
+                }
+                Tool::InsetFaces => {
+                    e.inset_faces(amount);
+                    self.status(format!("Inset: {:.3}  (release to confirm)", amount));
+                }
+                Tool::Bevel => {
+                    e.bevel(amount);
+                    self.status(format!("Bevel: {:.3}  (release to confirm)", amount));
+                }
+                Tool::ShrinkFatten => {
+                    e.shrink_fatten(amount);
+                    self.status(format!("Shrink/Fatten: {:.3}  (release to confirm)", amount));
+                }
+                Tool::Smooth => {
+                    e.smooth_verts(amount);
+                    self.status(format!("Smooth: {:.2}  (release to confirm)", amount));
+                }
+                Tool::EdgeSlide => {
+                    e.edge_slide(amount);
+                    self.status(format!("Edge Slide: {:.3}  (release to confirm)", amount));
+                }
+                Tool::Shear => {
+                    e.shear(0, amount);
+                    self.status(format!("Shear: {:.3}  (release to confirm)", amount));
+                }
+                Tool::LoopCut => {
+                    e.loop_cut();
+                    self.status("Loop Cut");
+                    self.doc.sync_edit_mesh();
+                    self.tool_drag = None;
+                    return;
+                }
+                Tool::PolyBuild => {
+                    e.poly_build(amount.abs().max(0.05));
+                    self.status(format!("Poly Build: {:.3}", amount.abs()));
+                    self.doc.sync_edit_mesh();
+                    self.tool_drag = None;
+                    return;
+                }
+                Tool::Spin => {
+                    let ang = amount.clamp(15.0, 360.0);
+                    e.spin(8, ang);
+                    self.status(format!("Spin: {:.0}°  (release to confirm)", ang));
+                }
+                Tool::RipRegion => {
+                    e.rip_region();
+                    self.status("Rip Region");
+                    self.doc.sync_edit_mesh();
+                    self.tool_drag = None;
+                    return;
+                }
+                Tool::Knife => {
+                    self.doc.sync_edit_mesh();
+                    self.apply_knife_now();
+                    self.tool_drag = None;
+                    return;
+                }
+                _ => {}
+            }
+            self.doc.sync_edit_mesh();
+        }
+        if let Some(d) = self.tool_drag.as_mut() {
+            d.last_amount = amount;
+        }
+    }
+
+    fn end_tool_drag(&mut self) {
+        if self.tool_drag.take().is_some() {
+            self.status("Tool confirmed");
+        }
+    }
+
+    fn apply_knife_now(&mut self) {
+        if !self.doc.in_edit_mode() {
+            return;
+        }
+        let center = self.doc.edit.as_ref().map(|e| e.selection_center()).unwrap_or(glam::Vec3::ZERO);
+        let world_center = if let Some(session) = self.doc.edit.as_ref() {
+            if let Some(idx) = self.doc.scene.objects.iter().position(|o| o.id == session.object_id) {
+                let w = self.doc.scene.world_matrices()[idx];
+                w.transform_point3(center)
+            } else {
+                center
+            }
+        } else {
+            center
+        };
+        let normal = (self.camera.target - self.camera.eye()).normalize_or_zero();
+        if let Some(session) = self.doc.edit.as_ref() {
+            if let Some(idx) = self.doc.scene.objects.iter().position(|o| o.id == session.object_id) {
+                let inv = self.doc.scene.world_matrices()[idx].inverse();
+                let local_pt = inv.transform_point3(world_center);
+                let local_n = inv.transform_vector3(normal).normalize_or_zero();
+                self.doc.edit_knife_bisect(local_pt, local_n);
+                self.status("Knife bisect");
+            }
+        }
+    }
+
+
+    fn sync_sculpt_brush_from_tool(&mut self) {
+        use forge_core::SculptBrush as B;
+        self.sculpt.brush = match self.ts.tool {
+            Tool::SculptDrawSharp => B::DrawSharp,
+            Tool::SculptClay => B::Clay,
+            Tool::SculptClayStrips => B::ClayStrips,
+            Tool::SculptLayer => B::Layer,
+            Tool::SculptInflate => B::Inflate,
+            Tool::SculptBlob => B::Blob,
+            Tool::SculptCrease => B::Crease,
+            Tool::SculptSmooth => B::Smooth,
+            Tool::SculptFlatten => B::Flatten,
+            Tool::SculptFill => B::Fill,
+            Tool::SculptScrape => B::Scrape,
+            Tool::SculptPinch => B::Pinch,
+            Tool::SculptGrab => B::Grab,
+            Tool::SculptSnakeHook => B::SnakeHook,
+            Tool::SculptNudge => B::Nudge,
+            Tool::SculptThumb => B::Thumb,
+            _ => B::Draw,
+        };
+    }
+
+    fn sculpt_sample(&mut self) {
+        if !self.doc.sculpt_mode {
+            return;
+        }
+        // Throttle: at least ~6 px between samples (prevents crash / meltdown)
+        if let Some((lx, ly)) = self.sculpt_last_sample {
+            let dist = ((self.cursor.0 - lx).powi(2) + (self.cursor.1 - ly).powi(2)).sqrt();
+            if dist < 6.0 {
+                return;
+            }
+        }
+        self.sculpt_last_sample = Some(self.cursor);
+
+        self.sync_sculpt_brush_from_tool();
+        self.sculpt.invert = self.ctrl();
+        let (vx, vy, vw, vh) = (self.viewport[0], self.viewport[1], self.viewport[2], self.viewport[3]);
+        if vw < 1.0 || vh < 1.0 {
+            return;
+        }
+        let nx = ((self.cursor.0 as f32 - vx) / vw) * 2.0 - 1.0;
+        let ny = 1.0 - ((self.cursor.1 as f32 - vy) / vh) * 2.0;
+        let (origin, dir) = self.camera.ray((nx, ny), vw / vh);
+        let grab_delta = if matches!(self.sculpt.brush, forge_core::SculptBrush::Grab | forge_core::SculptBrush::SnakeHook | forge_core::SculptBrush::Nudge | forge_core::SculptBrush::Thumb) {
+            let dx = (self.cursor.0 - self.press.0) as f32 * 0.0025 * self.camera.distance;
+            let dy = (self.press.1 - self.cursor.1) as f32 * 0.0025 * self.camera.distance;
+            let view = self.camera.view().inverse();
+            let right = view.x_axis.truncate();
+            let up = view.y_axis.truncate();
+            Some(right * dx + up * dy)
+        } else {
+            None
+        };
+        let _ = self.doc.sculpt_stroke(origin, dir, &self.sculpt, grab_delta);
+        // Live status: vertex count + dyntopo
+        if let Some(id) = self.doc.active {
+            if let Some(obj) = self.doc.scene.objects.iter().find(|o| o.id == id) {
+                let n = obj.mesh.vertices.len();
+                if self.sculpt.dyntopo {
+                    self.status(format!(
+                        "Dyntopo ON · relative {:.0}% · {} verts  ([ ] or Alt+Wheel)",
+                        self.sculpt.dyntopo_detail * 100.0,
+                        n
+                    ));
+                }
+            }
+        }
+    }
+
+    fn raycast_ground_or_mesh(&self) -> Option<glam::Vec3> {
+        let (vx, vy, vw, vh) = (self.viewport[0], self.viewport[1], self.viewport[2], self.viewport[3]);
+        if vw < 1.0 || vh < 1.0 {
+            return None;
+        }
+        let nx = ((self.cursor.0 as f32 - vx) / vw) * 2.0 - 1.0;
+        let ny = 1.0 - ((self.cursor.1 as f32 - vy) / vh) * 2.0;
+        let (origin, dir) = self.camera.ray((nx, ny), vw / vh);
+        // Ground plane y = 0
+        if dir.y.abs() > 1e-6 {
+            let t = -origin.y / dir.y;
+            if t > 0.0 {
+                return Some(origin + dir * t);
+            }
+        }
+        Some(origin + dir * 5.0)
     }
 
     fn status(&mut self, s: impl Into<String>) {
@@ -1278,13 +1574,171 @@ impl App {
             A::Extrude => {
                 if self.doc.armature_edit && self.doc.active_armature().is_some() {
                     self.start_bone_extrude();
-                } else if self.doc.edit.is_some() {
-                    self.doc.edit_extrude(0.25);
-                    self.status("Extruded");
+                } else if self.doc.in_edit_mode() {
+                    let empty = self.doc.edit.as_ref().map(|e| e.selection.is_empty()).unwrap_or(true);
+                    if empty {
+                        self.status("Extrude: select verts/edges/faces first (1/2/3 for domain, click components)");
+                    } else {
+                        self.doc.edit_extrude(0.25);
+                        self.status("Extruded (E)");
+                    }
                 } else if self.doc.active_armature().is_some() {
-                    self.status("Press Tab to enter Armature Edit Mode, then E to extrude");
+                    self.status("Press Tab for Armature Edit Mode, then E");
                 } else {
-                    self.status("Extrude only works in Edit Mode");
+                    self.status("Extrude: Tab into Edit Mode first");
+                }
+            },
+            A::InsetFaces => {
+                if self.doc.in_edit_mode() {
+                    let ok = self.doc.edit.as_ref().map(|e| {
+                        !e.selection.faces.is_empty()
+                            || (!e.selection.verts.is_empty() && e.selection.domain == forge_core::EditDomain::Vertex)
+                    }).unwrap_or(false);
+                    if !ok {
+                        self.status("Inset: switch to Face select (3) and select faces, or select face verts");
+                    } else {
+                        self.doc.edit_inset(0.25);
+                        self.status("Inset Faces (I)");
+                    }
+                } else {
+                    self.status("Inset: Tab into Edit Mode first");
+                }
+            },
+            A::Bevel => {
+                if self.doc.in_edit_mode() {
+                    let empty = self.doc.edit.as_ref().map(|e| e.selection.is_empty()).unwrap_or(true);
+                    if empty {
+                        self.status("Bevel: select edges/verts/faces first");
+                    } else {
+                        self.doc.edit_bevel(0.05);
+                        self.status("Bevel (Ctrl+B)");
+                    }
+                } else {
+                    self.status("Bevel: Tab into Edit Mode first");
+                }
+            },
+            A::LoopCut => {
+                if self.doc.in_edit_mode() {
+                    let empty = self.doc.edit.as_ref().map(|e| {
+                        e.selection.edges.is_empty() && e.selection.faces.is_empty()
+                    }).unwrap_or(true);
+                    if empty {
+                        self.status("Loop Cut: select edges (2) or faces (3) first");
+                    } else {
+                        self.doc.edit_loop_cut();
+                        self.status("Loop Cut (Ctrl+R)");
+                    }
+                } else {
+                    self.status("Loop Cut: Tab into Edit Mode first");
+                }
+            },
+            A::Knife => {
+                if self.doc.in_edit_mode() {
+                    // Bisect through selection center with view plane normal
+                    let center = self.doc.edit.as_ref()
+                        .map(|e| e.selection_center())
+                        .unwrap_or(glam::Vec3::ZERO);
+                    // Transform center to world
+                    let world_center = if let Some(session) = self.doc.edit.as_ref() {
+                        if let Some(idx) = self.doc.scene.objects.iter().position(|o| o.id == session.object_id) {
+                            let w = self.doc.scene.world_matrices()[idx];
+                            w.transform_point3(center)
+                        } else { center }
+                    } else { center };
+                    let normal = (self.camera.target - self.camera.eye()).normalize_or_zero();
+                    // Convert plane into object local space
+                    if let Some(session) = self.doc.edit.as_ref() {
+                        if let Some(idx) = self.doc.scene.objects.iter().position(|o| o.id == session.object_id) {
+                            let inv = self.doc.scene.world_matrices()[idx].inverse();
+                            let local_pt = inv.transform_point3(world_center);
+                            let local_n = inv.transform_vector3(normal).normalize_or_zero();
+                            self.doc.edit_knife_bisect(local_pt, local_n);
+                            self.status("Knife bisect (view plane)");
+                        }
+                    }
+                } else {
+                    self.status("Knife only works in Edit Mode");
+                }
+            },
+            A::PolyBuild => {
+                if self.doc.in_edit_mode() {
+                    self.doc.edit_poly_build(0.25);
+                    self.status("Poly Build");
+                } else {
+                    self.status("Poly Build only works in Edit Mode (select edge/verts)");
+                }
+            },
+            A::Spin => {
+                if self.doc.in_edit_mode() {
+                    self.doc.edit_spin(8, 360.0);
+                    self.status("Spin");
+                } else {
+                    self.status("Spin only works in Edit Mode");
+                }
+            },
+            A::SmoothVerts => {
+                if self.doc.in_edit_mode() {
+                    let empty = self.doc.edit.as_ref().map(|e| e.selection.is_empty()).unwrap_or(true);
+                    if empty {
+                        self.status("Smooth: select vertices first (1)");
+                    } else {
+                        self.doc.edit_smooth(0.5);
+                        self.status("Smooth");
+                    }
+                } else {
+                    self.status("Smooth: Tab into Edit Mode first");
+                }
+            },
+            A::EdgeSlide => {
+                if self.doc.in_edit_mode() {
+                    let empty = self.doc.edit.as_ref().map(|e| e.selection.is_empty()).unwrap_or(true);
+                    if empty {
+                        self.status("Edge Slide: select edges first (2)");
+                    } else {
+                        self.doc.edit_edge_slide(0.1);
+                        self.status("Edge Slide (G G)");
+                    }
+                } else {
+                    self.status("Edge Slide: Tab into Edit Mode first");
+                }
+            },
+            A::ShrinkFatten => {
+                if self.doc.in_edit_mode() {
+                    let empty = self.doc.edit.as_ref().map(|e| e.selection.is_empty()).unwrap_or(true);
+                    if empty {
+                        self.status("Shrink/Fatten: select verts/faces first");
+                    } else {
+                        self.doc.edit_shrink_fatten(0.1);
+                        self.status("Shrink/Fatten (Alt+S)");
+                    }
+                } else {
+                    self.status("Shrink/Fatten: Tab into Edit Mode first");
+                }
+            },
+            A::Shear => {
+                if self.doc.in_edit_mode() {
+                    let empty = self.doc.edit.as_ref().map(|e| e.selection.is_empty()).unwrap_or(true);
+                    if empty {
+                        self.status("Shear: select verts first");
+                    } else {
+                        self.doc.edit_shear(0, 0.25);
+                        self.status("Shear (Ctrl+Shift+Alt+S)");
+                    }
+                } else {
+                    self.status("Shear: Tab into Edit Mode first");
+                }
+            },
+            A::RipRegion => {
+                if self.doc.in_edit_mode() {
+                    let empty = self.doc.edit.as_ref().map(|e| e.selection.is_empty()).unwrap_or(true);
+                    if empty {
+                        self.status("Rip: select verts first");
+                    } else {
+                        self.doc.edit_rip();
+                        self.status("Rip Region (V)");
+                    }
+                } else {
+                    self.status("Rip: Tab into Edit Mode first");
                 }
             },
             A::MergeVerts => {
@@ -1490,6 +1944,20 @@ impl App {
 
             A::ToggleShortcuts => self.ui.show_shortcuts = !self.ui.show_shortcuts,
             A::ShowAbout => self.ui.show_about = true,
+            A::ToggleSculptMode => {
+                match self.doc.toggle_sculpt_mode() {
+                    Ok(()) => {
+                        if self.doc.sculpt_mode {
+                            self.ts.tool = Tool::SculptDraw;
+                            self.status("Sculpt: LMB paint · Alt+LMB / MMB / RMB orbit · Shift+pan · D dyntopo");
+                        } else {
+                            self.ts.tool = Tool::Select;
+                            self.status("Object Mode");
+                        }
+                    }
+                    Err(e) => self.status(e),
+                }
+            },
             A::ToggleEditMode => {
                 // Drop any object-gizmo drag so it cannot move the whole object
                 if self.gizmo.dragging() {
@@ -1622,6 +2090,38 @@ impl App {
             return;
         }
         let (ctrl, shift, alt) = (self.ctrl(), self.mods.shift_key(), self.mods.alt_key());
+        // Sculpt Mode: D toggles Dyntopo, [ ] adjust detail size
+        if self.doc.sculpt_mode && !ctrl && !shift && !alt {
+            if code == KeyCode::KeyD {
+                self.sculpt.dyntopo = !self.sculpt.dyntopo;
+                self.status(if self.sculpt.dyntopo {
+                    format!(
+                        "Dyntopo ON · relative {:.0}% · [ ] denser/coarser · Alt+Wheel",
+                        self.sculpt.dyntopo_detail * 100.0
+                    )
+                } else {
+                    "Dyntopo OFF – press D to add verts while sculpting".into()
+                });
+                return;
+            }
+            if code == KeyCode::BracketLeft {
+                // denser = smaller relative %
+                self.sculpt.dyntopo_detail = (self.sculpt.dyntopo_detail - 0.05).clamp(0.15, 1.5);
+                self.status(format!(
+                    "Dyntopo relative detail: {:.0}% (smaller % = denser mesh)",
+                    self.sculpt.dyntopo_detail * 100.0
+                ));
+                return;
+            }
+            if code == KeyCode::BracketRight {
+                self.sculpt.dyntopo_detail = (self.sculpt.dyntopo_detail + 0.05).clamp(0.15, 1.5);
+                self.status(format!(
+                    "Dyntopo relative detail: {:.0}% (larger % = fewer verts)",
+                    self.sculpt.dyntopo_detail * 100.0
+                ));
+                return;
+            }
+        }
         if let Some(a) = keymap::find_action(&self.bindings, ctrl, shift, alt, code) {
             self.apply(a, el);
         }
@@ -1686,12 +2186,79 @@ impl App {
                     if !start {
                         return;
                     }
+                    // --- Sculpt Mode ---
+                    if self.doc.sculpt_mode {
+                        // Alt+LMB = orbit / Alt+Shift+LMB = pan (Blender "Emulate 3 Button Mouse")
+                        // so you can navigate without damaging the sculpt.
+                        let alt = self.mods.alt_key();
+                        if alt {
+                            self.left = true;
+                            self.press = self.cursor;
+                            self.dragged = false;
+                            return;
+                        }
+                        // Plain LMB = sculpt stroke
+                        self.doc.checkpoint();
+                        self.sculpt_stroke = true;
+                        self.sculpt_last_hit = None;
+                        self.sculpt_last_sample = None;
+                        self.press = self.cursor;
+                        self.sculpt_sample();
+                        return;
+                    }
+                    // --- Measure tool ---
+                    if self.ts.tool == Tool::Measure {
+                        if let Some(hit) = self.raycast_ground_or_mesh() {
+                            if self.measure_a.is_none() {
+                                self.measure_a = Some(hit);
+                                self.measure_b = Some(hit);
+                                self.status("Measure: click second point");
+                            } else {
+                                self.measure_b = Some(hit);
+                                let a = self.measure_a.unwrap();
+                                let dist = (hit - a).length();
+                                self.status(format!("Distance: {:.4} m", dist));
+                                // keep for overlay; next click starts new measure
+                                self.measure_a = Some(hit);
+                                self.measure_b = None;
+                            }
+                        }
+                        return;
+                    }
+                    // --- Annotate tool ---
+                    if self.ts.tool == Tool::Annotate {
+                        if let Some(hit) = self.raycast_ground_or_mesh() {
+                            if self.annotate_stroke.is_none() {
+                                self.annotate_stroke = Some(vec![hit]);
+                            } else if let Some(s) = self.annotate_stroke.as_mut() {
+                                s.push(hit);
+                            }
+                            self.status("Annotate: drag to draw, release to finish");
+                        }
+                        self.left = true;
+                        self.press = self.cursor;
+                        self.dragged = false;
+                        return;
+                    }
+                    // --- Transform tool: use move gizmo ---
+                    if self.ts.tool == Tool::Transform {
+                        self.ts.tool = Tool::Move;
+                        if self.gizmo.begin(self.cursor, &self.camera, self.viewport, &mut self.doc, &self.ts) {
+                            return;
+                        }
+                        self.ts.tool = Tool::Transform;
+                    }
                     if self.doc.active_armature().is_some() && self.doc.edit.is_none() {
                         if self.try_pick_bone(shift) {
                             return;
                         }
                     }
                     if self.doc.in_edit_mode() && self.doc.edit.is_some() {
+                        // Ctrl+LMB: interactive edit tool (Extrude, Inset, Bevel, ...)
+                        if ctrl && Self::is_ctrl_lmb_tool(self.ts.tool) {
+                            self.begin_tool_drag();
+                            return;
+                        }
                         // Axis arrows first (like Object Mode gizmo)
                         if self.begin_edit_gizmo_drag() {
                             return;
@@ -1719,6 +2286,12 @@ impl App {
                             self.dragged = false;
                         }
                     }
+                } else if self.sculpt_stroke {
+                    self.sculpt_stroke = false;
+                    self.sculpt_last_hit = None;
+                    self.status("Sculpt stroke done");
+                } else if self.tool_drag.is_some() {
+                    self.end_tool_drag();
                 } else if self.edit_gizmo_drag.is_some() {
                     self.end_edit_gizmo_drag();
                 } else if self.gizmo.dragging() {
@@ -1727,7 +2300,15 @@ impl App {
                     self.finish_sel_drag();
                 } else if self.left {
                     self.left = false;
-                    if !self.dragged {
+                    // Finish annotate stroke
+                    if self.ts.tool == Tool::Annotate {
+                        if let Some(stroke) = self.annotate_stroke.take() {
+                            if stroke.len() >= 2 {
+                                self.annotations.push(stroke);
+                                self.status(format!("Annotation saved ({} strokes)", self.annotations.len()));
+                            }
+                        }
+                    } else if !self.dragged {
                         self.pick(shift);
                     }
                 }
@@ -1753,6 +2334,33 @@ impl App {
         let (dx, dy) = ((x - self.cursor.0) as f32, (y - self.cursor.1) as f32);
         self.cursor = (x, y);
         let (shift, ctrl) = (self.mods.shift_key(), self.ctrl());
+        // Live measure second point
+        if self.ts.tool == Tool::Measure && self.measure_a.is_some() {
+            if let Some(hit) = self.raycast_ground_or_mesh() {
+                self.measure_b = Some(hit);
+                let a = self.measure_a.unwrap();
+                let dist = (hit - a).length();
+                self.status(format!("Distance: {:.4} m", dist));
+            }
+        }
+        // Annotate stroke while dragging
+        if self.ts.tool == Tool::Annotate && self.left {
+            if let Some(hit) = self.raycast_ground_or_mesh() {
+                if let Some(s) = self.annotate_stroke.as_mut() {
+                    if s.last().map(|p| (*p - hit).length() > 0.02).unwrap_or(true) {
+                        s.push(hit);
+                    }
+                }
+            }
+        }
+        if self.sculpt_stroke {
+            self.sculpt_sample();
+            return;
+        }
+        if self.tool_drag.is_some() {
+            self.update_tool_drag();
+            return;
+        }
         if self.bone_extrude_drag.is_some() {
             self.update_bone_extrude();
             return;
@@ -1811,7 +2419,17 @@ impl App {
                 self.right_dragged = true;
             }
             if self.right_dragged {
-                self.camera.pan(dx, dy);
+                // In Sculpt Mode: RMB orbits (Unity-style look) so you never paint by mistake.
+                // Elsewhere: RMB pans (existing behavior).
+                if self.doc.sculpt_mode {
+                    if shift {
+                        self.camera.pan(dx, dy);
+                    } else {
+                        self.camera.orbit(dx, dy);
+                    }
+                } else {
+                    self.camera.pan(dx, dy);
+                }
             }
         }
     }
@@ -1834,7 +2452,18 @@ impl App {
         let out = self.egui_ctx.run(raw, |ctx| {
             let (a, r) = ui::draw(ctx, &mut self.doc, &mut self.settings, &mut self.ts, &mut self.ui, &self.bindings, &self.recent.paths);
             tools::draw_toolbar(ctx, r, &mut self.ts);
-            let extra = overlay::Extra { shape: shape.as_ref(), modal: modal_text.as_deref(), circle };
+            let measure = match (self.measure_a, self.measure_b) {
+                (Some(a), Some(b)) => Some((a, b)),
+                _ => None,
+            };
+            let extra = overlay::Extra {
+                shape: shape.as_ref(),
+                modal: modal_text.as_deref(),
+                circle,
+                measure,
+                annotations: &self.annotations,
+                annotate_stroke: self.annotate_stroke.as_deref(),
+            };
             overlay::draw(ctx, &self.camera, r, &self.doc, &extra);
             if self.doc.in_edit_mode() {
                 draw_edit_gizmo_ui(
@@ -1991,7 +2620,22 @@ impl ApplicationHandler for App {
                         MouseScrollDelta::LineDelta(_, y) => y,
                         MouseScrollDelta::PixelDelta(p) => p.y as f32 / 50.0,
                     };
-                    if self.ts.tool == Tool::Circle {
+                    if self.doc.sculpt_mode {
+                        if self.mods.alt_key() {
+                            self.sculpt.dyntopo_detail = (self.sculpt.dyntopo_detail - y * 0.05).clamp(0.15, 1.5);
+                            self.status(format!(
+                                "Dyntopo relative detail: {:.0}%{}",
+                                self.sculpt.dyntopo_detail * 100.0,
+                                if self.sculpt.dyntopo { "" } else { " – press D to enable" }
+                            ));
+                        } else if self.mods.shift_key() {
+                            self.sculpt.strength = (self.sculpt.strength + y * 0.05).clamp(0.05, 1.0);
+                            self.status(format!("Brush strength: {:.2}", self.sculpt.strength));
+                        } else {
+                            self.sculpt.radius = (self.sculpt.radius * (1.0 + 0.1 * y)).clamp(0.05, 5.0);
+                            self.status(format!("Brush radius: {:.2}", self.sculpt.radius));
+                        }
+                    } else if self.ts.tool == Tool::Circle {
                         self.ts.circle_radius = (self.ts.circle_radius * (1.0 + 0.1 * y)).clamp(6.0, 600.0);
                     } else {
                         self.camera.zoom(y);

@@ -58,6 +58,8 @@ pub struct Document {
     pub edit: Option<EditSession>,
     /// When true, the active armature is in bone Edit Mode (structure).
     pub armature_edit: bool,
+    /// Sculpt Mode on the active mesh.
+    pub sculpt_mode: bool,
     rng: u32,
     undo: Vec<UndoSnap>,
     redo: Vec<UndoSnap>,
@@ -119,6 +121,7 @@ impl Document {
             edit_open: false,
             edit: None,
             armature_edit: false,
+            sculpt_mode: false,
             rng: 0x9E37_79B9,
             undo: Vec::new(),
             redo: Vec::new(),
@@ -1062,6 +1065,78 @@ impl Document {
         self.edit.is_some() || self.armature_edit
     }
 
+    pub fn enter_sculpt_mode(&mut self) -> Result<(), String> {
+        if self.sculpt_mode {
+            return Ok(());
+        }
+        if self.edit.is_some() {
+            self.exit_edit_mode(true);
+        }
+        self.armature_edit = false;
+        let id = self.active.or_else(|| self.selection.iter().copied().next())
+            .ok_or_else(|| "Select a mesh object first".to_string())?;
+        let obj = self.scene.objects.iter().find(|o| o.id == id)
+            .ok_or_else(|| "Object not found".to_string())?;
+        if !matches!(obj.kind, crate::ObjectKind::Mesh) {
+            return Err("Only mesh objects can enter Sculpt Mode".into());
+        }
+        if obj.mesh.vertices.is_empty() {
+            return Err("Mesh has no vertices".into());
+        }
+        self.checkpoint();
+        self.selection.clear();
+        self.selection.insert(id);
+        self.active = Some(id);
+        self.sculpt_mode = true;
+        Ok(())
+    }
+
+    pub fn exit_sculpt_mode(&mut self) {
+        self.sculpt_mode = false;
+    }
+
+    pub fn toggle_sculpt_mode(&mut self) -> Result<(), String> {
+        if self.sculpt_mode {
+            self.exit_sculpt_mode();
+            Ok(())
+        } else {
+            self.enter_sculpt_mode()
+        }
+    }
+
+    /// Apply a sculpt brush sample in world-space ray; mutates active mesh.
+    pub fn sculpt_stroke(
+        &mut self,
+        origin: glam::Vec3,
+        dir: glam::Vec3,
+        settings: &crate::SculptSettings,
+        grab_delta_world: Option<glam::Vec3>,
+    ) -> bool {
+        let Some(id) = self.active else { return false };
+        let Some(idx) = self.scene.objects.iter().position(|o| o.id == id) else { return false };
+        let world = self.scene.world_matrices()[idx];
+        let inv = world.inverse();
+        let local_o = inv.transform_point3(origin);
+        let local_d = inv.transform_vector3(dir).normalize_or_zero();
+        let mesh_ref = self.scene.objects[idx].mesh.clone();
+        let hit = crate::raycast_mesh(&mesh_ref, local_o, local_d);
+        let Some((hit_p, hit_n, _)) = hit else { return false };
+        let local_grab = grab_delta_world.map(|d| inv.transform_vector3(d));
+        // Clone mesh, mutate, write back as new Arc
+        let mut mesh = (*mesh_ref).clone();
+        if settings.dyntopo {
+            let _ = crate::dyntopo_refine(&mut mesh, hit_p, settings.radius, settings.dyntopo_detail);
+        }
+        crate::apply_brush(&mut mesh, settings, hit_p, hit_n, local_grab);
+        if let Some(obj) = self.scene.objects.iter_mut().find(|o| o.id == id) {
+            obj.mesh = std::sync::Arc::new(mesh);
+            obj.primitive = None;
+        }
+        self.version = self.version.wrapping_add(1);
+        self.dirty = true;
+        true
+    }
+
     pub fn enter_edit_mode(&mut self) -> Result<(), String> {
         if self.edit.is_some() {
             return Ok(());
@@ -1225,6 +1300,105 @@ impl Document {
         self.checkpoint();
         if let Some(e) = self.edit.as_mut() {
             e.merge_verts_at_center();
+        }
+        self.sync_edit_mesh();
+    }
+
+    pub fn edit_inset(&mut self, factor: f32) {
+        if self.edit.is_none() { return; }
+        self.checkpoint();
+        if let Some(e) = self.edit.as_mut() {
+            e.inset_faces(factor);
+        }
+        self.sync_edit_mesh();
+    }
+
+    pub fn edit_bevel(&mut self, amount: f32) {
+        if self.edit.is_none() { return; }
+        self.checkpoint();
+        if let Some(e) = self.edit.as_mut() {
+            e.bevel(amount);
+        }
+        self.sync_edit_mesh();
+    }
+
+    pub fn edit_smooth(&mut self, factor: f32) {
+        if self.edit.is_none() { return; }
+        self.checkpoint();
+        if let Some(e) = self.edit.as_mut() {
+            e.smooth_verts(factor);
+        }
+        self.sync_edit_mesh();
+    }
+
+    pub fn edit_shrink_fatten(&mut self, amount: f32) {
+        if self.edit.is_none() { return; }
+        self.checkpoint();
+        if let Some(e) = self.edit.as_mut() {
+            e.shrink_fatten(amount);
+        }
+        self.sync_edit_mesh();
+    }
+
+    pub fn edit_shear(&mut self, axis: usize, amount: f32) {
+        if self.edit.is_none() { return; }
+        self.checkpoint();
+        if let Some(e) = self.edit.as_mut() {
+            e.shear(axis, amount);
+        }
+        self.sync_edit_mesh();
+    }
+
+    pub fn edit_edge_slide(&mut self, amount: f32) {
+        if self.edit.is_none() { return; }
+        self.checkpoint();
+        if let Some(e) = self.edit.as_mut() {
+            e.edge_slide(amount);
+        }
+        self.sync_edit_mesh();
+    }
+
+    pub fn edit_rip(&mut self) {
+        if self.edit.is_none() { return; }
+        self.checkpoint();
+        if let Some(e) = self.edit.as_mut() {
+            e.rip_region();
+        }
+        self.sync_edit_mesh();
+    }
+
+    pub fn edit_loop_cut(&mut self) {
+        if self.edit.is_none() { return; }
+        self.checkpoint();
+        if let Some(e) = self.edit.as_mut() {
+            e.loop_cut();
+        }
+        self.sync_edit_mesh();
+    }
+
+    pub fn edit_spin(&mut self, steps: u32, angle_deg: f32) {
+        if self.edit.is_none() { return; }
+        self.checkpoint();
+        if let Some(e) = self.edit.as_mut() {
+            e.spin(steps, angle_deg);
+        }
+        self.sync_edit_mesh();
+    }
+
+    pub fn edit_knife_bisect(&mut self, plane_point: glam::Vec3, plane_normal: glam::Vec3) {
+        if self.edit.is_none() { return; }
+        self.checkpoint();
+        if let Some(e) = self.edit.as_mut() {
+            e.knife_bisect(plane_point, plane_normal);
+        }
+        self.sync_edit_mesh();
+    }
+
+    pub fn edit_poly_build(&mut self, amount: f32) {
+        if self.edit.is_none() { return; }
+        self.checkpoint();
+        if let Some(e) = self.edit.as_mut() {
+            e.poly_build(amount);
         }
         self.sync_edit_mesh();
     }

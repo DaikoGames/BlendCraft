@@ -106,34 +106,78 @@ pub fn draw(
         doc.edit_open = false;
     }
 
-    egui::TopBottomPanel::top("menu").show(ctx, |ui| menu_bar(ui, doc, settings, ts, st, bindings, recent, &mut actions));
+    // Apply a Blender-Dark inspired theme once
+    ctx.style_mut(|style| {
+        let mut visuals = egui::Visuals::dark();
+        // Blender-ish dark greys
+        visuals.window_fill = egui::Color32::from_rgb(0x30, 0x30, 0x30);
+        visuals.panel_fill = egui::Color32::from_rgb(0x38, 0x38, 0x38);
+        visuals.extreme_bg_color = egui::Color32::from_rgb(0x28, 0x28, 0x28);
+        visuals.faint_bg_color = egui::Color32::from_rgb(0x3e, 0x3e, 0x3e);
+        visuals.widgets.noninteractive.bg_fill = egui::Color32::from_rgb(0x38, 0x38, 0x38);
+        visuals.widgets.inactive.bg_fill = egui::Color32::from_rgb(0x48, 0x48, 0x48);
+        visuals.widgets.hovered.bg_fill = egui::Color32::from_rgb(0x5a, 0x5a, 0x5a);
+        visuals.widgets.active.bg_fill = egui::Color32::from_rgb(0x5c, 0x7a, 0xa0);
+        visuals.selection.bg_fill = egui::Color32::from_rgb(0x4a, 0x70, 0xa0);
+        visuals.selection.stroke.color = egui::Color32::from_rgb(0x6a, 0x9a, 0xd0);
+        visuals.override_text_color = Some(egui::Color32::from_rgb(0xe0, 0xe0, 0xe0));
+        style.visuals = visuals;
+        style.spacing.item_spacing = egui::vec2(4.0, 3.0);
+        style.spacing.window_margin = egui::Margin::same(4.0);
+    });
 
-    egui::TopBottomPanel::top("mode_bar").show(ctx, |ui| {
+    // === Blender-like layout ===
+    // Top: global menu bar
+    egui::TopBottomPanel::top("menu")
+    .exact_height(24.0)
+    .show(ctx, |ui| {
+        ui.set_height(24.0);
+        menu_bar(ui, doc, settings, ts, st, bindings, recent, &mut actions);
+    });
+
+    // Top: 3D Viewport header (mode + select mode) – similar to Blender's header
+    egui::TopBottomPanel::top("mode_bar")
+    .exact_height(28.0)
+    .show(ctx, |ui| {
         ui.horizontal(|ui| {
             let in_edit = doc.in_edit_mode();
             let mesh_ok = doc.active_index().map(|i| doc.scene.objects[i].kind.is_mesh()).unwrap_or(false)
                 || doc.selection.iter().any(|id| {
                     doc.scene.objects.iter().any(|o| o.id == *id && o.kind.is_mesh())
                 });
-            if ui.add_enabled(mesh_ok || in_edit, egui::SelectableLabel::new(!in_edit, "Object Mode")).clicked() {
+
+            // Mode selector (Blender style)
+            let in_sculpt = doc.sculpt_mode;
+            if ui.add_enabled(mesh_ok || in_edit || in_sculpt, egui::SelectableLabel::new(!in_edit && !in_sculpt, "Object Mode")).clicked() {
                 if in_edit {
                     actions.push(Action::ToggleEditMode);
                 }
+                if in_sculpt {
+                    actions.push(Action::ToggleSculptMode);
+                }
             }
-            let edit_label = if doc.armature_edit {
-                "Armature Edit"
-            } else {
-                "Edit Mode"
-            };
+            let edit_label = if doc.armature_edit { "Armature Edit" } else { "Edit Mode" };
             if ui.add_enabled(mesh_ok || in_edit || doc.active_armature().is_some(), egui::SelectableLabel::new(in_edit, edit_label)).clicked() {
+                if in_sculpt {
+                    actions.push(Action::ToggleSculptMode);
+                }
                 if !in_edit {
                     actions.push(Action::ToggleEditMode);
                 }
             }
+            if ui.add_enabled(mesh_ok || in_sculpt, egui::SelectableLabel::new(in_sculpt, "Sculpt Mode")).clicked() {
+                if in_edit {
+                    actions.push(Action::ToggleEditMode);
+                }
+                if !in_sculpt {
+                    actions.push(Action::ToggleSculptMode);
+                }
+            }
+
             ui.separator();
+
             ui.add_enabled_ui(in_edit, |ui| {
                 let domain = doc.edit.as_ref().map(|e| e.selection.domain);
-                // One control per select mode (Vertex = points, Edge = lines, Face = surfaces)
                 if ui.selectable_label(domain == Some(forge_core::EditDomain::Vertex), "Vertex").clicked() {
                     actions.push(Action::EditDomainVertex);
                 }
@@ -143,18 +187,23 @@ pub fn draw(
                 if ui.selectable_label(domain == Some(forge_core::EditDomain::Face), "Face").clicked() {
                     actions.push(Action::EditDomainFace);
                 }
-                if domain == Some(forge_core::EditDomain::Edge) {
-                    ui.weak("click a line to select, drag to move");
-                }
             });
-            if !mesh_ok && !in_edit {
+
+            if !mesh_ok && !in_edit && !in_sculpt {
                 ui.weak("Select a mesh to edit");
             }
         });
     });
-    egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
+
+    // Bottom: status bar (Blender-style info bar)
+    egui::TopBottomPanel::bottom("status")
+    .exact_height(22.0)
+    .show(ctx, |ui| {
         ui.horizontal(|ui| {
-            let tris: usize = (0..doc.scene.objects.len()).filter(|&i| doc.scene.is_visible(i)).map(|i| doc.scene.objects[i].mesh.indices.len() / 3).sum();
+            let tris: usize = (0..doc.scene.objects.len())
+                .filter(|&i| doc.scene.is_visible(i))
+                .map(|i| doc.scene.objects[i].mesh.indices.len() / 3)
+                .sum();
             ui.label(format!("{} objects", doc.scene.objects.len()));
             ui.separator();
             ui.label(format!("{tris} triangles"));
@@ -174,22 +223,496 @@ pub fn draw(
         });
     });
 
-    egui::SidePanel::left("outliner").default_width(250.0).show(ctx, |ui| outliner(ui, doc, st, &mut actions));
-    egui::SidePanel::right("properties").default_width(320.0).show(ctx, |ui| properties(ui, doc, &mut actions));
+    // Left: Toolbar – drawn icons, screen-aware height, scroll if needed
+    let screen_h = ctx.screen_rect().height();
+    let toolbar_w = if screen_h < 700.0 { 36.0 } else { 40.0 };
+    let btn = if screen_h < 700.0 { 26.0 } else { 30.0 };
+    egui::SidePanel::left("toolbar")
+        .exact_width(toolbar_w)
+        .resizable(false)
+        .frame(egui::Frame::none().fill(egui::Color32::from_rgb(0x2b, 0x2b, 0x2b)))
+        .show(ctx, |ui| {
+            ui.spacing_mut().item_spacing = egui::vec2(0.0, 1.0);
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    ui.vertical_centered(|ui| {
+                        ui.add_space(3.0);
+                        let tools = if doc.sculpt_mode {
+                            &Tool::SCULPT_MODE[..]
+                        } else if doc.in_edit_mode() {
+                            &Tool::EDIT_MODE[..]
+                        } else {
+                            &Tool::OBJECT_MODE[..]
+                        };
+                        for &tool in tools {
+                            let selected = ts.tool == tool;
+                            let bg = if selected {
+                                egui::Color32::from_rgb(0x47, 0x72, 0xb3)
+                            } else {
+                                egui::Color32::from_rgb(0x3a, 0x3a, 0x3a)
+                            };
+                            let desired = egui::vec2(toolbar_w - 4.0, btn);
+                            let (rect, resp) = ui.allocate_exact_size(desired, egui::Sense::click());
+                            // background
+                            ui.painter().rect_filled(rect, 3.0, bg);
+                            if selected {
+                                ui.painter().rect_stroke(
+                                    rect,
+                                    3.0,
+                                    egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(0x6a, 0x9a, 0xd0)),
+                                );
+                            }
+                            // icon
+                            let icon_rect = egui::Rect::from_center_size(rect.center(), egui::vec2(btn * 0.72, btn * 0.72));
+                            draw_tool_icon(ui, tool, icon_rect, selected);
+                            if resp.clicked() {
+                                ts.tool = tool;
+                                // Mesh ops are interactive via Ctrl+LMB in Edit Mode.
+                                // Toolbar only selects the tool (except Add Cube / Cursor).
+                                match tool {
+                                    Tool::AddCube if !doc.in_edit_mode() => {
+                                        actions.push(Action::Add(forge_core::Primitive::Cube { size: 1.0 }));
+                                    }
+                                    Tool::Cursor => actions.push(Action::SnapCursorToSel),
+                                    Tool::ExtrudeRegion
+                                    | Tool::InsetFaces
+                                    | Tool::Bevel
+                                    | Tool::LoopCut
+                                    | Tool::Knife
+                                    | Tool::PolyBuild
+                                    | Tool::Spin
+                                    | Tool::Smooth
+                                    | Tool::EdgeSlide
+                                    | Tool::ShrinkFatten
+                                    | Tool::Shear
+                                    | Tool::RipRegion => {
+                                        st.status = format!(
+                                            "{} selected – select geometry, then Ctrl+LMB drag",
+                                            tool.name()
+                                        );
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            resp.on_hover_text(tool.tooltip());
+                        }
+                        ui.add_space(3.0);
+                    });
+                });
+        });
+
+    // Right: Outliner (top) + Properties (bottom) – Blender default arrangement
+    egui::SidePanel::right("right_panel")
+    .default_width(300.0)
+    .width_range(220.0..=480.0)
+    .show(ctx, |ui| {
+        // Outliner takes the upper part and is resizable
+        egui::TopBottomPanel::top("outliner_panel")
+            .resizable(true)
+            .default_height(280.0)
+            .height_range(120.0..=600.0)
+            .show_inside(ui, |ui| {
+                ui.heading("Outliner");
+                ui.separator();
+                outliner(ui, doc, st, &mut actions);
+            });
+
+        // Properties fill the remaining space
+        ui.heading("Properties");
+        ui.separator();
+        properties(ui, doc, &mut actions);
+    });
 
     shortcuts_window(ctx, st, bindings);
     move_popup(ctx, doc, st, &mut actions);
     font_library_window(ctx, st);
     let mut about = st.show_about;
     egui::Window::new("About").open(&mut about).show(ctx, |ui| {
-        ui.heading("BlendCraft");
-        ui.label("A 3D suite for game assets, written in Rust.");
-        ui.label("Press F1 for the keyboard shortcuts.");
+    ui.heading("BlendCraft");
+    ui.label("A 3D suite for game assets, written in Rust.");
+    ui.label("Press F1 for the keyboard shortcuts.");
     });
     st.show_about = about;
 
     (actions, ctx.available_rect())
+    }
+
+// Helper: draw a Blender-ish tool icon into a rect using egui shapes.
+// Kept in ui.rs as a function.
+
+fn draw_tool_icon(ui: &mut egui::Ui, tool: Tool, rect: egui::Rect, selected: bool) {
+    let painter = ui.painter_at(rect);
+    let c = rect.center();
+    let s = rect.width().min(rect.height()) * 0.38;
+    let col = if selected {
+        egui::Color32::from_rgb(0xf0, 0xf0, 0xf0)
+    } else {
+        egui::Color32::from_rgb(0xc0, 0xc0, 0xc0)
+    };
+    let stroke = egui::Stroke::new(1.4_f32, col);
+    let thick = egui::Stroke::new(1.8_f32, col);
+
+    match tool {
+        Tool::Select => {
+            // Arrow pointer (northwest)
+            let tip = c + egui::vec2(-s * 0.55, -s * 0.55);
+            let base_r = c + egui::vec2(s * 0.35, -s * 0.15);
+            let base_b = c + egui::vec2(-s * 0.15, s * 0.35);
+            let notch = c + egui::vec2(s * 0.05, s * 0.05);
+            painter.add(egui::Shape::convex_polygon(
+                vec![tip, base_r, notch, base_b],
+                col,
+                egui::Stroke::NONE,
+            ));
+        }
+        Tool::BoxSelect => {
+            painter.rect_stroke(
+                egui::Rect::from_center_size(c, egui::vec2(s * 1.4, s * 1.1)),
+                1.0,
+                stroke,
+            );
+        }
+        Tool::Lasso => {
+            // Freeform loop
+            let pts: Vec<_> = (0..12)
+                .map(|i| {
+                    let t = i as f32 / 12.0 * std::f32::consts::TAU;
+                    let r = s * (0.7 + 0.25 * (t * 3.0).sin());
+                    c + egui::vec2(r * t.cos(), r * t.sin() * 0.85)
+                })
+                .collect();
+            painter.add(egui::Shape::closed_line(pts, stroke));
+        }
+        Tool::Circle => {
+            painter.circle_stroke(c, s * 0.85, stroke);
+        }
+        Tool::Cursor => {
+            // Crosshair
+            painter.line_segment([c + egui::vec2(-s, 0.0), c + egui::vec2(s, 0.0)], stroke);
+            painter.line_segment([c + egui::vec2(0.0, -s), c + egui::vec2(0.0, s)], stroke);
+            painter.circle_stroke(c, s * 0.35, stroke);
+        }
+        Tool::Move => {
+            // 4-way arrows
+            let arm = s * 0.9;
+            painter.line_segment([c - egui::vec2(arm, 0.0), c + egui::vec2(arm, 0.0)], thick);
+            painter.line_segment([c - egui::vec2(0.0, arm), c + egui::vec2(0.0, arm)], thick);
+            // arrow heads
+            let h = s * 0.28;
+            for (dx, dy) in [(1.0, 0.0), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0)] {
+                let tip = c + egui::vec2(dx * arm, dy * arm);
+                let p1 = tip - egui::vec2(dx * h + dy * h * 0.6, dy * h + dx * h * 0.6);
+                let p2 = tip - egui::vec2(dx * h - dy * h * 0.6, dy * h - dx * h * 0.6);
+                painter.add(egui::Shape::convex_polygon(vec![tip, p1, p2], col, egui::Stroke::NONE));
+            }
+        }
+        Tool::Rotate => {
+            // Arc with arrow
+            let r = s * 0.85;
+            let mut pts = Vec::new();
+            for i in 0..=14 {
+                let t = -0.4 + (i as f32 / 14.0) * (std::f32::consts::TAU * 0.75);
+                pts.push(c + egui::vec2(r * t.cos(), r * t.sin()));
+            }
+            painter.add(egui::Shape::line(pts.clone(), thick));
+            if let (Some(&a), Some(&b)) = (pts.iter().rev().nth(1), pts.last()) {
+                let raw = b - a;
+                let len = (raw.x * raw.x + raw.y * raw.y).sqrt().max(1e-5);
+                let dir = raw / len;
+                let n = egui::vec2(-dir.y, dir.x);
+                let tip = b;
+                painter.add(egui::Shape::convex_polygon(
+                    vec![
+                        tip,
+                        tip - dir * s * 0.35 + n * s * 0.22,
+                        tip - dir * s * 0.35 - n * s * 0.22,
+                    ],
+                    col,
+                    egui::Stroke::NONE,
+                ));
+            }
+        }
+        Tool::Scale => {
+            // Corner brackets expanding
+            let o = s * 0.75;
+            let i = s * 0.3;
+            for (sx, sy) in [(1.0, 1.0), (1.0, -1.0), (-1.0, 1.0), (-1.0, -1.0)] {
+                let corner = c + egui::vec2(sx * o, sy * o);
+                painter.line_segment([corner, corner - egui::vec2(sx * i, 0.0)], stroke);
+                painter.line_segment([corner, corner - egui::vec2(0.0, sy * i)], stroke);
+            }
+        }
+        Tool::Transform => {
+            // Combined: cross + corner marks
+            let arm = s * 0.7;
+            painter.line_segment([c - egui::vec2(arm, 0.0), c + egui::vec2(arm, 0.0)], stroke);
+            painter.line_segment([c - egui::vec2(0.0, arm), c + egui::vec2(0.0, arm)], stroke);
+            painter.rect_stroke(
+                egui::Rect::from_center_size(c, egui::vec2(s * 0.9, s * 0.9)),
+                0.0,
+                egui::Stroke::new(1.0_f32, col),
+            );
+        }
+        Tool::Annotate => {
+            // Pencil
+            let a = c + egui::vec2(-s * 0.6, s * 0.55);
+            let b = c + egui::vec2(s * 0.55, -s * 0.6);
+            painter.line_segment([a, b], thick);
+            painter.add(egui::Shape::convex_polygon(
+                vec![
+                    b,
+                    b + egui::vec2(-s * 0.2, -s * 0.05),
+                    b + egui::vec2(-s * 0.05, -s * 0.2),
+                ],
+                col,
+                egui::Stroke::NONE,
+            ));
+        }
+        Tool::Measure => {
+            // Ruler
+            let a = c + egui::vec2(-s * 0.9, s * 0.35);
+            let b = c + egui::vec2(s * 0.9, -s * 0.35);
+            painter.line_segment([a, b], thick);
+            for i in 1..5 {
+                let t = i as f32 / 5.0;
+                let p = a + (b - a) * t;
+                let raw = b - a; let len = (raw.x*raw.x + raw.y*raw.y).sqrt().max(1e-5); let n = egui::vec2(-raw.y, raw.x) / len * s * 0.2;
+                painter.line_segment([p - n, p + n], stroke);
+            }
+        }
+        Tool::AddCube => {
+            // Isometric cube outline
+            let d = s * 0.55;
+            let top = c + egui::vec2(0.0, -d * 0.7);
+            let fl = c + egui::vec2(-d, d * 0.1);
+            let fr = c + egui::vec2(d, d * 0.1);
+            let bl = c + egui::vec2(-d * 0.55, -d * 0.25);
+            let br = c + egui::vec2(d * 0.55, -d * 0.25);
+            let bot = c + egui::vec2(0.0, d * 0.85);
+            painter.line_segment([top, br], stroke);
+            painter.line_segment([top, bl], stroke);
+            painter.line_segment([br, fr], stroke);
+            painter.line_segment([bl, fl], stroke);
+            painter.line_segment([fr, bot], stroke);
+            painter.line_segment([fl, bot], stroke);
+            painter.line_segment([fl, fr], stroke);
+        }
+        Tool::ExtrudeRegion => {
+            // Face with arrow up
+            painter.rect_stroke(
+                egui::Rect::from_center_size(c + egui::vec2(0.0, s * 0.25), egui::vec2(s * 1.2, s * 0.7)),
+                1.0,
+                stroke,
+            );
+            let tip = c + egui::vec2(0.0, -s * 0.9);
+            painter.line_segment([c + egui::vec2(0.0, -s * 0.1), tip], thick);
+            painter.add(egui::Shape::convex_polygon(
+                vec![
+                    tip,
+                    tip + egui::vec2(-s * 0.28, s * 0.35),
+                    tip + egui::vec2(s * 0.28, s * 0.35),
+                ],
+                col,
+                egui::Stroke::NONE,
+            ));
+        }
+        Tool::InsetFaces => {
+            // Outer rect + inner rect
+            painter.rect_stroke(
+                egui::Rect::from_center_size(c, egui::vec2(s * 1.5, s * 1.5)),
+                1.0,
+                stroke,
+            );
+            painter.rect_stroke(
+                egui::Rect::from_center_size(c, egui::vec2(s * 0.75, s * 0.75)),
+                1.0,
+                stroke,
+            );
+        }
+        Tool::Bevel => {
+            // Square with cut corner
+            let o = s * 0.75;
+            let pts = vec![
+                c + egui::vec2(-o, -o),
+                c + egui::vec2(o * 0.15, -o),
+                c + egui::vec2(o, -o * 0.15),
+                c + egui::vec2(o, o),
+                c + egui::vec2(-o, o),
+            ];
+            painter.add(egui::Shape::closed_line(pts, stroke));
+        }
+        Tool::LoopCut => {
+            // Vertical cut lines on a face
+            painter.rect_stroke(
+                egui::Rect::from_center_size(c, egui::vec2(s * 1.4, s * 1.2)),
+                1.0,
+                stroke,
+            );
+            painter.line_segment(
+                [c + egui::vec2(0.0, -s * 0.6), c + egui::vec2(0.0, s * 0.6)],
+                thick,
+            );
+        }
+        Tool::Knife => {
+            // Blade diagonal
+            let a = c + egui::vec2(-s * 0.7, s * 0.55);
+            let b = c + egui::vec2(s * 0.65, -s * 0.6);
+            painter.line_segment([a, b], thick);
+            painter.add(egui::Shape::convex_polygon(
+                vec![
+                    b,
+                    b + egui::vec2(-s * 0.25, 0.05),
+                    a + (b - a) * 0.3,
+                ],
+                col,
+                egui::Stroke::NONE,
+            ));
+        }
+        Tool::PolyBuild => {
+            // Triangle + plus
+            let pts = vec![
+                c + egui::vec2(0.0, -s * 0.85),
+                c + egui::vec2(s * 0.8, s * 0.55),
+                c + egui::vec2(-s * 0.8, s * 0.55),
+            ];
+            painter.add(egui::Shape::closed_line(pts, stroke));
+        }
+        Tool::Spin => {
+            // Spiral-ish arc stack
+            for k in 0..3 {
+                let r = s * (0.35 + k as f32 * 0.25);
+                let mut pts = Vec::new();
+                for i in 0..=10 {
+                    let t = i as f32 / 10.0 * std::f32::consts::PI * 1.2;
+                    pts.push(c + egui::vec2(r * t.cos(), r * t.sin() * 0.7));
+                }
+                painter.add(egui::Shape::line(pts, stroke));
+            }
+        }
+        Tool::Smooth => {
+            // Wavy line
+            let mut pts = Vec::new();
+            for i in 0..=12 {
+                let t = i as f32 / 12.0;
+                let x = -s + 2.0 * s * t;
+                let y = (t * std::f32::consts::TAU * 1.5).sin() * s * 0.35;
+                pts.push(c + egui::vec2(x, y));
+            }
+            painter.add(egui::Shape::line(pts, thick));
+        }
+        Tool::EdgeSlide => {
+            // Horizontal double arrow on edge
+            painter.line_segment(
+                [c + egui::vec2(-s, 0.0), c + egui::vec2(s, 0.0)],
+                thick,
+            );
+            for dir in [-1.0_f32, 1.0] {
+                let tip = c + egui::vec2(dir * s, 0.0);
+                painter.add(egui::Shape::convex_polygon(
+                    vec![
+                        tip,
+                        tip + egui::vec2(-dir * s * 0.35, -s * 0.25),
+                        tip + egui::vec2(-dir * s * 0.35, s * 0.25),
+                    ],
+                    col,
+                    egui::Stroke::NONE,
+                ));
+            }
+        }
+        Tool::ShrinkFatten => {
+            // Vertical double arrow (normals)
+            painter.line_segment(
+                [c + egui::vec2(0.0, -s), c + egui::vec2(0.0, s)],
+                thick,
+            );
+            for dir in [-1.0_f32, 1.0] {
+                let tip = c + egui::vec2(0.0, dir * s);
+                painter.add(egui::Shape::convex_polygon(
+                    vec![
+                        tip,
+                        tip + egui::vec2(-s * 0.25, -dir * s * 0.35),
+                        tip + egui::vec2(s * 0.25, -dir * s * 0.35),
+                    ],
+                    col,
+                    egui::Stroke::NONE,
+                ));
+            }
+        }
+        Tool::Shear => {
+            // Parallelogram
+            let pts = vec![
+                c + egui::vec2(-s * 0.9, s * 0.55),
+                c + egui::vec2(-s * 0.3, -s * 0.55),
+                c + egui::vec2(s * 0.9, -s * 0.55),
+                c + egui::vec2(s * 0.3, s * 0.55),
+            ];
+            painter.add(egui::Shape::closed_line(pts, stroke));
+        }
+        Tool::RipRegion => {
+            // Split gap
+            painter.line_segment(
+                [c + egui::vec2(-s * 0.7, -s * 0.8), c + egui::vec2(-s * 0.2, s * 0.8)],
+                thick,
+            );
+            painter.line_segment(
+                [c + egui::vec2(s * 0.2, -s * 0.8), c + egui::vec2(s * 0.7, s * 0.8)],
+                thick,
+            );
+        }
+        Tool::SculptDraw | Tool::SculptDrawSharp => {
+            painter.circle_stroke(c, s * 0.7, stroke);
+            painter.circle_filled(c, s * 0.22, col);
+            if tool == Tool::SculptDrawSharp {
+                painter.line_segment([c + egui::vec2(0.0, -s), c + egui::vec2(0.0, s)], stroke);
+            }
+        }
+        Tool::SculptClay | Tool::SculptClayStrips => {
+            painter.rect_filled(
+                egui::Rect::from_center_size(c + egui::vec2(0.0, s * 0.15), egui::vec2(s * 1.3, s * 0.55)),
+                2.0,
+                col,
+            );
+            painter.circle_filled(c + egui::vec2(0.0, -s * 0.25), s * 0.35, col);
+        }
+        Tool::SculptLayer => {
+            painter.rect_stroke(egui::Rect::from_center_size(c, egui::vec2(s * 1.4, s * 0.4)), 1.0, stroke);
+            painter.rect_stroke(egui::Rect::from_center_size(c + egui::vec2(0.0, -s * 0.45), egui::vec2(s * 1.4, s * 0.4)), 1.0, stroke);
+        }
+        Tool::SculptInflate | Tool::SculptBlob => {
+            painter.circle_stroke(c, s * 0.5, stroke);
+            painter.circle_stroke(c, s * 0.85, stroke);
+        }
+        Tool::SculptCrease => {
+            painter.line_segment([c + egui::vec2(-s * 0.8, s * 0.5), c + egui::vec2(0.0, -s * 0.7)], thick);
+            painter.line_segment([c + egui::vec2(s * 0.8, s * 0.5), c + egui::vec2(0.0, -s * 0.7)], thick);
+        }
+        Tool::SculptSmooth => {
+            let mut pts = Vec::new();
+            for i in 0..=10 {
+                let t = i as f32 / 10.0;
+                pts.push(c + egui::vec2(-s + 2.0 * s * t, (t * std::f32::consts::TAU).sin() * s * 0.3));
+            }
+            painter.add(egui::Shape::line(pts, thick));
+        }
+        Tool::SculptFlatten | Tool::SculptFill | Tool::SculptScrape => {
+            painter.line_segment([c + egui::vec2(-s, 0.0), c + egui::vec2(s, 0.0)], thick);
+            painter.line_segment([c + egui::vec2(0.0, -s * 0.6), c + egui::vec2(0.0, s * 0.6)], stroke);
+        }
+        Tool::SculptPinch => {
+            painter.line_segment([c + egui::vec2(-s, -s * 0.5), c], thick);
+            painter.line_segment([c + egui::vec2(s, -s * 0.5), c], thick);
+            painter.line_segment([c + egui::vec2(-s, s * 0.5), c], thick);
+            painter.line_segment([c + egui::vec2(s, s * 0.5), c], thick);
+        }
+        Tool::SculptGrab | Tool::SculptSnakeHook | Tool::SculptNudge | Tool::SculptThumb => {
+            painter.line_segment([c + egui::vec2(-s * 0.5, 0.0), c + egui::vec2(s * 0.5, 0.0)], thick);
+            painter.line_segment([c + egui::vec2(0.0, -s * 0.5), c + egui::vec2(0.0, s * 0.5)], thick);
+            painter.circle_stroke(c, s * 0.75, stroke);
+        }
+    }
 }
+
 
 // ------------------------------------------------------------------ menu bar
 fn menu_bar(ui: &mut egui::Ui, doc: &mut Document, settings: &mut ViewSettings, ts: &mut ToolState, st: &mut UiState, b: &[Binding], recent: &[std::path::PathBuf], actions: &mut Vec<Action>) {
@@ -260,6 +783,7 @@ fn menu_bar(ui: &mut egui::Ui, doc: &mut Document, settings: &mut ViewSettings, 
             ui.menu_button("Mode", |ui| {
             let in_edit = doc.in_edit_mode();
             mi(ui, actions, b, if in_edit { "Object Mode" } else { "Edit Mode" }, Action::ToggleEditMode, true);
+            mi(ui, actions, b, if doc.sculpt_mode { "Exit Sculpt Mode" } else { "Sculpt Mode" }, Action::ToggleSculptMode, true);
             ui.separator();
             ui.add_enabled_ui(in_edit, |ui| {
                 mi(ui, actions, b, "Vertex (points)", Action::EditDomainVertex, true);
@@ -465,7 +989,7 @@ fn menu_bar(ui: &mut egui::Ui, doc: &mut Document, settings: &mut ViewSettings, 
             soon(ui, "Modifiers");
             soon(ui, "UV editor");
             soon(ui, "Texture painting");
-            soon(ui, "Sculpt");
+            if ui.button("Sculpt Mode").clicked() { actions.push(Action::ToggleSculptMode); ui.close_menu(); }
             soon(ui, "Animation / rigging");
         });
         ui.menu_button("Game Dev", |ui| {

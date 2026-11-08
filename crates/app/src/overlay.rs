@@ -10,6 +10,11 @@ pub struct Extra<'a> {
     pub modal: Option<&'a str>,
     /// circle brush: center and radius in physical pixels
     pub circle: Option<(Vec2, f32)>,
+    /// Measure tool endpoints in world space
+    pub measure: Option<(Vec3, Vec3)>,
+    /// Annotation strokes in world space
+    pub annotations: &'a [Vec<Vec3>],
+    pub annotate_stroke: Option<&'a [Vec3]>,
 }
 
 /// Project a world segment to physical pixels, clipping against the near plane.
@@ -90,6 +95,46 @@ pub fn draw(ctx: &egui::Context, cam: &OrbitCamera, rect: egui::Rect, doc: &Docu
     }
     if let Some((c, r)) = extra.circle {
         painter.circle_stroke(pt(c), r / ppp, sel_stroke);
+    }
+
+    // Measure line
+    if let Some((a, b)) = extra.measure {
+        let m = cam.view_proj(vp[2] / vp[3].max(1.0));
+        if let Some((pa, pb)) = clip_project(m, vp, a, b) {
+            let stroke = Stroke::new(2.0_f32, Color32::from_rgb(255, 220, 50));
+            painter.line_segment([pt(pa), pt(pb)], stroke);
+            painter.circle_filled(pt(pa), 4.0, Color32::from_rgb(255, 220, 50));
+            painter.circle_filled(pt(pb), 4.0, Color32::from_rgb(255, 220, 50));
+            let mid = (pa + pb) * 0.5;
+            let dist = (b - a).length();
+            painter.text(
+                pt(mid) + egui::vec2(0.0, -12.0),
+                egui::Align2::CENTER_BOTTOM,
+                format!("{:.3} m", dist),
+                egui::FontId::proportional(13.0),
+                Color32::from_rgb(255, 240, 120),
+            );
+        }
+    }
+
+    // Annotations
+    let ann_stroke = Stroke::new(2.0_f32, Color32::from_rgb(80, 200, 255));
+    let draw_stroke = |stroke: &[Vec3]| {
+        let mut pts = Vec::new();
+        for w in stroke.iter() {
+            if let Some(p) = project_px(cam, vp, *w) {
+                pts.push(pt(p));
+            }
+        }
+        if pts.len() >= 2 {
+            painter.add(egui::Shape::line(pts, ann_stroke));
+        }
+    };
+    for stroke in extra.annotations {
+        draw_stroke(stroke);
+    }
+    if let Some(stroke) = extra.annotate_stroke {
+        draw_stroke(stroke);
     }
 
 
