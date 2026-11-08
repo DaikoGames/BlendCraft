@@ -293,6 +293,8 @@ jobs:
   flatpak:
     name: flatpak-${{ matrix.name }}
     needs: build
+    # Still run if an unrelated build (e.g. Windows) failed; it only needs the Linux binary.
+    if: ${{ !cancelled() }}
     # ARM64 is built natively on GitHub's free Linux ARM runner (public repos).
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
@@ -418,18 +420,21 @@ jobs:
           if-no-files-found: error
 
   # ---------------------------------------------------------------------------
-  # Release: runs when you push a tag like v0.1.0
+  # Release
+  #  - Push a tag like v0.1.0  -> normal release with auto-generated notes.
+  #  - Any other push / manual run (not pull requests) -> the rolling
+  #    pre-release called "latest" is replaced with the newest builds.
+  # Runs even if some other job failed, and publishes whatever was built.
   # ---------------------------------------------------------------------------
   release:
     name: Publish release
-    # Runs on version tags even if some other job failed, and publishes whatever
-    # was built. (Without this, ONE failed job, like a flaky FreeBSD VM download
-    # or a failing test, silently skips the whole release.)
-    if: ${{ !cancelled() && startsWith(github.ref, 'refs/tags/v') }}
+    if: ${{ !cancelled() && github.event_name != 'pull_request' }}
     needs: [test, build, freebsd, freebsd-arm64, flatpak]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
+    env:
+      IS_TAG: ${{ startsWith(github.ref, 'refs/tags/v') }}
     steps:
       - uses: actions/download-artifact@v5
         with:
@@ -455,11 +460,24 @@ jobs:
           ls -lh out
           test -n "$(ls -A out)" || { echo "No build artifacts were produced, nothing to release."; exit 1; }
 
+      - name: Remove the old rolling release
+        if: env.IS_TAG != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release delete latest --cleanup-tag --yes --repo "${{ github.repository }}" || true
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          generate_release_notes: true
+          tag_name: ${{ env.IS_TAG == 'true' && github.ref_name || 'latest' }}
+          target_commitish: ${{ github.sha }}
+          name: ${{ env.IS_TAG == 'true' && github.ref_name || 'Latest build (automatic)' }}
+          prerelease: ${{ env.IS_TAG != 'true' }}
+          make_latest: ${{ env.IS_TAG == 'true' }}
+          generate_release_notes: ${{ env.IS_TAG == 'true' }}
           body: |
+            ${{ env.IS_TAG != 'true' && format('Automatic build of commit {0}. Not a stable release.', github.sha) || '' }}
+
             Experimental, untested builds: Linux x86 / ARM64 / ARMv7 / RISC-V 64 (glibc and musl), Windows x86 / ARM64,
             FreeBSD x86 / ARM64. Flatpaks are built for x86_64 and aarch64. On Linux/macOS/FreeBSD run chmod +x on the downloaded file first. If one is missing from the assets, its build failed.
           files: out/*
