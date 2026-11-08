@@ -422,7 +422,10 @@ jobs:
   # ---------------------------------------------------------------------------
   release:
     name: Publish release
-    if: startsWith(github.ref, 'refs/tags/v')
+    # Runs on version tags even if some other job failed, and publishes whatever
+    # was built. (Without this, ONE failed job, like a flaky FreeBSD VM download
+    # or a failing test, silently skips the whole release.)
+    if: ${{ !cancelled() && startsWith(github.ref, 'refs/tags/v') }}
     needs: [test, build, freebsd, freebsd-arm64, flatpak]
     runs-on: ubuntu-24.04
     permissions:
@@ -437,6 +440,7 @@ jobs:
       # is in the file name (e.g. blendcraft-linux-x64, blendcraft-windows-x64.exe).
       - name: Collect binaries
         run: |
+          shopt -s nullglob
           mkdir -p out
           for d in dist/*/; do
             n=$(basename "$d")
@@ -449,6 +453,7 @@ jobs:
             done
           done
           ls -lh out
+          test -n "$(ls -A out)" || { echo "No build artifacts were produced, nothing to release."; exit 1; }
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
