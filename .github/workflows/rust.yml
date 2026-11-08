@@ -215,7 +215,7 @@ jobs:
     timeout-minutes: 60
     continue-on-error: true
     env:
-      FREEBSD_VERSION: "14.3"
+      FREEBSD_VERSION: "14.4"
       TARGET: aarch64-unknown-freebsd
     steps:
       - uses: actions/checkout@v5
@@ -250,7 +250,13 @@ jobs:
         if: steps.sysroot-cache.outputs.cache-hit != 'true'
         run: |
           mkdir -p "$HOME/sysroot"
-          curl -fsSL "https://download.freebsd.org/releases/arm64/aarch64/${FREEBSD_VERSION}-RELEASE/base.txz" -o base.txz
+          ok=0
+          for host in https://download.freebsd.org https://mirrors.mit.edu/FreeBSD https://ftp5.us.freebsd.org; do
+            url="$host/releases/arm64/aarch64/${FREEBSD_VERSION}-RELEASE/base.txz"
+            echo "Trying $url"
+            if curl -fsSL --retry 3 "$url" -o base.txz; then ok=1; break; fi
+          done
+          test "$ok" = 1 || { echo "Could not download base.txz for FreeBSD ${FREEBSD_VERSION}"; exit 1; }
           tar -xf base.txz -C "$HOME/sysroot" ./lib ./usr/lib ./usr/include
           rm base.txz
 
