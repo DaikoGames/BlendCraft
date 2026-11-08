@@ -7,6 +7,10 @@ on:
   pull_request:
   workflow_dispatch:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
 env:
   CARGO_TERM_COLOR: always
   # Package that contains the app. The binary name is detected automatically
@@ -199,20 +203,30 @@ jobs:
           if-no-files-found: error
 
   # ---------------------------------------------------------------------------
-  # FreeBSD ARM64 (aarch64), built inside an emulated FreeBSD aarch64 VM.
-  # Rust's aarch64-unknown-freebsd is "tier 3" (no official toolchain), so this
-  # uses FreeBSD's own `rust` package and builds natively inside the VM.
-  # Emulation is SLOW (expect 1-3+ hours), so this only runs on version tags and
-  # manual runs, not on every push/PR. It is allowed to fail.
+  # FreeBSD ARM64 (aarch64): cross-compiled on a normal Linux runner using
+  # clang + lld and the sysroot from FreeBSD's base.txz. This replaces the old
+  # emulated VM (hours) with a native-speed build (minutes).
+  # aarch64-unknown-freebsd is Rust "tier 3", so std is built from source on
+  # nightly (-Zbuild-std). Allowed to fail without breaking the rest.
   # ---------------------------------------------------------------------------
   freebsd-arm64:
     name: freebsd-arm64
-    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
-    timeout-minutes: 340
+    timeout-minutes: 60
     continue-on-error: true
+    env:
+      FREEBSD_VERSION: "14.3"
+      TARGET: aarch64-unknown-freebsd
     steps:
       - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: freebsd-arm64
 
       - name: Detect binary name
         shell: bash
@@ -224,29 +238,45 @@ jobs:
           echo "Binary name: $BIN"
           echo "BIN=$BIN" >> "$GITHUB_ENV"
 
-      - name: Build in FreeBSD aarch64 VM
-        uses: vmactions/freebsd-vm@v1
-        env:
-          BIN: ${{ env.BIN }}
-          APP_PACKAGE: ${{ env.APP_PACKAGE }}
+      # The sysroot (FreeBSD libc + headers) is cached, so it is only downloaded once.
+      - name: Cache FreeBSD sysroot
+        id: sysroot-cache
+        uses: actions/cache@v4
         with:
-          arch: aarch64
-          envs: "BIN APP_PACKAGE"
-          usesh: true
-          prepare: |
-            pkg install -y rust pkgconf
-          run: |
-            set -e
-            cargo build --release -p "$APP_PACKAGE"
-            mkdir -p dist
-            cp "target/release/$BIN" dist/
-            rm -rf target
+          path: ~/sysroot
+          key: freebsd-sysroot-arm64-${{ env.FREEBSD_VERSION }}
+
+      - name: Download FreeBSD sysroot
+        if: steps.sysroot-cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p "$HOME/sysroot"
+          curl -fsSL "https://download.freebsd.org/releases/arm64/aarch64/${FREEBSD_VERSION}-RELEASE/base.txz" -o base.txz
+          tar -xf base.txz -C "$HOME/sysroot" ./lib ./usr/lib ./usr/include
+          rm base.txz
+
+      - name: Install clang + lld
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang lld
+
+      - name: Create cross compiler wrapper
+        run: |
+          printf '#!/bin/sh\nexec clang --target=aarch64-unknown-freebsd%s --sysroot=%s -fuse-ld=lld "$@"\n' \
+            "${FREEBSD_VERSION%%.*}" "$HOME/sysroot" > "$HOME/freebsd-cc"
+          chmod +x "$HOME/freebsd-cc"
+
+      - name: Build
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_FREEBSD_LINKER: /home/runner/freebsd-cc
+          CC_aarch64_unknown_freebsd: /home/runner/freebsd-cc
+          AR_aarch64_unknown_freebsd: ar
+        run: cargo build --release -p "$APP_PACKAGE" --target "$TARGET" -Zbuild-std=std,panic_abort
 
       - name: Upload artifact
         uses: actions/upload-artifact@v5
         with:
           name: blendcraft-freebsd-arm64
-          path: dist/${{ env.BIN }}
+          path: target/${{ env.TARGET }}/release/${{ env.BIN }}
           if-no-files-found: error
 
   # ---------------------------------------------------------------------------
@@ -280,6 +310,12 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y flatpak flatpak-builder
           flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+
+      - name: Cache Flatpak runtimes
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/share/flatpak
+          key: flatpak-runtime-${{ matrix.arch }}-25.08
 
       - name: Generate Flatpak files
         run: |
