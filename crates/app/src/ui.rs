@@ -45,6 +45,11 @@ pub struct UiState {
     pub shader_socket_pick: Option<(u64, bool)>,
     pub shader_rgb_color: [u8; 4],
     pub shader_image_index: Option<usize>,
+    pub shading_nodes_collapsed: bool,
+    pub shader_node_sizes: HashMap<u64, [f32; 2]>,
+    pub shader_drag_from: Option<(u64, bool)>,
+    pub shader_socket_positions: HashMap<(u64, bool), [f32; 2]>,
+    pub shader_resize_start: HashMap<u64, [f32; 2]>,
 }
 
 
@@ -64,7 +69,7 @@ impl ShaderNodeKind {
 }
 
 #[derive(Clone, Debug)]
-pub struct ShaderNode { pub id: u64, pub kind: ShaderNodeKind }
+pub struct ShaderNode { pub id: u64, pub kind: ShaderNodeKind, pub pos: [f32; 2] }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ShaderLink { pub from: u64, pub to: u64 }
 
@@ -420,12 +425,12 @@ pub fn draw(
 
     // Shading workspace: a docked node editor alongside the live 3D viewport.
     if st.shading_mode {
-        egui::SidePanel::left("shading_node_editor")
-            .resizable(true)
-            .default_width(520.0)
-            .width_range(340.0..=900.0)
-            .frame(egui::Frame::none().fill(egui::Color32::from_rgb(0x25, 0x25, 0x25)))
-            .show(ctx, |ui| { draw_shading_editor(ui, doc, st); });
+        egui::TopBottomPanel::bottom("shading_node_editor")
+            .resizable(!st.shading_nodes_collapsed)
+            .default_height(if st.shading_nodes_collapsed { 34.0 } else { 390.0 })
+            .height_range(if st.shading_nodes_collapsed { 34.0..=34.0 } else { 180.0..=680.0 })
+            .frame(egui::Frame::none().fill(egui::Color32::from_rgb(0x20, 0x20, 0x20)))
+            .show(ctx, |ui| { draw_shading_editor(ui, ctx, doc, st); });
     }
 
     // Outliner + Properties only in the regular Object/Edit/Shading workspaces.
@@ -474,217 +479,380 @@ fn ensure_shader_nodes(st: &mut UiState) {
     if st.shader_rgb_color == [0; 4] { st.shader_rgb_color = [180, 180, 190, 255]; }
     if st.shader_nodes.is_empty() {
         st.shader_nodes = vec![
-            ShaderNode { id: 1, kind: ShaderNodeKind::Principled },
-            ShaderNode { id: 2, kind: ShaderNodeKind::Output },
+            ShaderNode { id: 1, kind: ShaderNodeKind::Principled, pos: [330.0, 70.0] },
+            ShaderNode { id: 2, kind: ShaderNodeKind::Output, pos: [700.0, 105.0] },
         ];
         st.shader_links = vec![ShaderLink { from: 1, to: 2 }];
         st.shader_next_id = 3;
     }
 }
 
-fn draw_shading_editor(ui: &mut egui::Ui, doc: &mut Document, st: &mut UiState) {
-    ensure_shader_nodes(st);
-    ui.horizontal(|ui| {
-        ui.heading("Shader Editor");
-        ui.separator();
-        ui.weak("Object Material");
-    });
-    ui.label("Build a material by connecting node outputs to inputs. Changes update the selected object's material live.");
-    ui.separator();
+fn shader_node_color(kind: ShaderNodeKind) -> egui::Color32 {
+    match kind {
+        ShaderNodeKind::Output => egui::Color32::from_rgb(0x72, 0x91, 0x62),
+        ShaderNodeKind::Principled => egui::Color32::from_rgb(0x9a, 0x6b, 0x3c),
+        ShaderNodeKind::ImageTexture => egui::Color32::from_rgb(0x3e, 0x78, 0x91),
+        ShaderNodeKind::Rgb => egui::Color32::from_rgb(0x7d, 0x55, 0x86),
+        ShaderNodeKind::TexCoord => egui::Color32::from_rgb(0x3e, 0x7b, 0x65),
+    }
+}
 
+fn draw_shading_editor(ui: &mut egui::Ui, ctx: &egui::Context, doc: &mut Document, st: &mut UiState) {
+    ensure_shader_nodes(st);
     let Some(object_index) = doc.active_index() else {
-        ui.weak("Select a mesh object to edit its material.");
+        ui.centered_and_justified(|ui| ui.weak("Select an object to edit its material."));
         return;
     };
     let mut current = doc.scene.objects[object_index].material.filter(|m| *m < doc.scene.materials.len());
-    ui.horizontal(|ui| {
-        let selected = current.map(|m| doc.scene.materials[m].name.clone()).unwrap_or_else(|| "No material".into());
-        egui::ComboBox::from_id_source("shading_material_slot").selected_text(selected).show_ui(ui, |ui| {
-            for (idx, mat) in doc.scene.materials.iter().enumerate() {
-                if ui.selectable_label(current == Some(idx), &mat.name).clicked() { current = Some(idx); }
+
+    // Blender-like editor header: material datablock, node tools and graph controls.
+    egui::TopBottomPanel::top("shader_editor_header").show_inside(ui, |ui| {
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("◈ Shader Editor").strong());
+            if ui.small_button(if st.shading_nodes_collapsed { "▴ Expand" } else { "▾ Collapse" }).clicked() {
+                st.shading_nodes_collapsed = !st.shading_nodes_collapsed;
             }
+            ui.separator();
+            let selected = current.map(|m| doc.scene.materials[m].name.clone()).unwrap_or_else(|| "No Material".into());
+            egui::ComboBox::from_id_source("shading_material_slot")
+                .selected_text(selected).width(180.0).show_ui(ui, |ui| {
+                    for (idx, mat) in doc.scene.materials.iter().enumerate() {
+                        if ui.selectable_label(current == Some(idx), &mat.name).clicked() { current = Some(idx); }
+                    }
+                });
+            if ui.button("＋ New").clicked() {
+                doc.checkpoint();
+                let mut mat = Material::default();
+                mat.name = format!("Material.{:03}", doc.scene.materials.len() + 1);
+                doc.scene.materials.push(mat);
+                current = Some(doc.scene.materials.len() - 1);
+                doc.scene.objects[object_index].material = current;
+            }
+            ui.separator();
+            ui.menu_button("Add ▾", |ui| {
+                for (label, kind) in [("Principled BSDF", ShaderNodeKind::Principled), ("Material Output", ShaderNodeKind::Output), ("Image Texture", ShaderNodeKind::ImageTexture), ("RGB", ShaderNodeKind::Rgb), ("Texture Coordinate", ShaderNodeKind::TexCoord)] {
+                    if ui.button(label).clicked() {
+                        let id = st.shader_next_id.max(1);
+                        st.shader_next_id = id + 1;
+                        let col = 80.0 + (st.shader_nodes.len() as f32 % 4.0) * 245.0;
+                        let row = 70.0 + (st.shader_nodes.len() as f32 / 4.0).floor() * 210.0;
+                        st.shader_nodes.push(ShaderNode { id, kind, pos: [col, row] });
+                        ui.close_menu();
+                    }
+                }
+            });
+            if ui.button("Fit View").on_hover_text("Reset node layout positions").clicked() {
+                for node in &mut st.shader_nodes {
+                    node.pos = match node.kind {
+                        ShaderNodeKind::Principled => [330.0, 70.0],
+                        ShaderNodeKind::Output => [700.0, 105.0],
+                        ShaderNodeKind::Rgb => [55.0, 90.0],
+                        ShaderNodeKind::ImageTexture => [55.0, 300.0],
+                        ShaderNodeKind::TexCoord => [55.0, 510.0],
+                    };
+                }
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.weak("Drag nodes · Click sockets to connect · Use × to remove a node");
+            });
         });
-        if ui.button("+ New").clicked() {
-            doc.checkpoint();
-            let mut mat = Material::default();
-            mat.name = format!("Material.{:03}", doc.scene.materials.len() + 1);
-            doc.scene.materials.push(mat);
-            current = Some(doc.scene.materials.len() - 1);
-            doc.scene.objects[object_index].material = current;
-        }
     });
+    if st.shading_nodes_collapsed {
+        return;
+    }
     if doc.scene.objects[object_index].material != current {
         doc.checkpoint();
         doc.scene.objects[object_index].material = current;
     }
     let Some(mi) = current else {
-        ui.weak("Create a material to start building the shader graph.");
+        ui.centered_and_justified(|ui| ui.weak("Create or select a material to start building its shader graph."));
         return;
     };
 
-    ui.horizontal(|ui| {
-        ui.label("Add node:");
-        for (label, kind) in [("Principled", ShaderNodeKind::Principled), ("Output", ShaderNodeKind::Output), ("Image", ShaderNodeKind::ImageTexture), ("RGB", ShaderNodeKind::Rgb), ("UV", ShaderNodeKind::TexCoord)] {
-            if ui.small_button(label).clicked() {
-                let id = st.shader_next_id.max(1);
-                st.shader_next_id = id + 1;
-                st.shader_nodes.push(ShaderNode { id, kind });
-            }
-        }
-    });
-    ui.separator();
-    ui.horizontal_wrapped(|ui| {
-        ui.label("Connect:");
-        if let Some((node_id, is_output)) = st.shader_socket_pick {
-            let label = st.shader_nodes.iter().find(|n| n.id == node_id).map(|n| n.kind.title()).unwrap_or("Node");
-            ui.weak(format!("{} {} selected", label, if is_output { "output" } else { "input" }));
-            if ui.small_button("Cancel").clicked() { st.shader_socket_pick = None; }
-        } else {
-            ui.weak("Click an output, then a compatible input.");
-        }
-    });
-
-    egui::ScrollArea::both().auto_shrink([false, false]).show(ui, |ui| {
-        let mut node_rects: Vec<(u64, egui::Rect)> = Vec::new();
-        ui.horizontal_top(|ui| {
-            for node in st.shader_nodes.clone() {
-                let node_response = egui::Frame::group(ui.style()).fill(egui::Color32::from_rgb(0x3b, 0x3b, 0x3b)).show(ui, |ui| {
-                    ui.set_min_width(205.0);
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new(node.kind.title()).strong().color(match node.kind {
-                            ShaderNodeKind::Output => egui::Color32::from_rgb(0x8e,0xb8,0x75),
-                            ShaderNodeKind::Principled => egui::Color32::from_rgb(0xd0,0x9a,0x55),
-                            ShaderNodeKind::ImageTexture => egui::Color32::from_rgb(0x68,0xa8,0xc8),
-                            ShaderNodeKind::Rgb => egui::Color32::from_rgb(0xb8,0x78,0xb8),
-                            ShaderNodeKind::TexCoord => egui::Color32::from_rgb(0x78,0xb8,0x9a),
-                        }));
-                        if ui.small_button("×").clicked() {
-                            st.shader_nodes.retain(|n| n.id != node.id);
-                            st.shader_links.retain(|l| l.from != node.id && l.to != node.id);
-                        }
-                    });
-                    ui.separator();
-                    if !node.kind.input_name().is_empty() {
-                        let label = format!("◉ {}", node.kind.input_name());
-                        if ui.small_button(label).clicked() {
-                            if let Some((from, true)) = st.shader_socket_pick {
-                                if from != node.id {
-                                    st.shader_links.retain(|l| l.to != node.id);
-                                    st.shader_links.push(ShaderLink { from, to: node.id });
-                                    if let Some(source) = st.shader_nodes.iter().find(|n| n.id == from) {
-                                        if source.kind == ShaderNodeKind::Rgb && node.kind == ShaderNodeKind::Principled {
-                                            doc.scene.materials[mi].base_color = [srgb8_to_lin(st.shader_rgb_color[0]), srgb8_to_lin(st.shader_rgb_color[1]), srgb8_to_lin(st.shader_rgb_color[2]), st.shader_rgb_color[3] as f32 / 255.0];
-                                            doc.scene.materials[mi].base_color_tex = None;
-                                            doc.touch();
-                                        } else if source.kind == ShaderNodeKind::ImageTexture && node.kind == ShaderNodeKind::Principled {
-                                            if let Some(tex) = st.shader_image_index.filter(|i| *i < doc.scene.textures.len()) { doc.scene.materials[mi].base_color_tex = Some(tex); doc.touch(); }
-                                        }
-                                    }
-                                }
-                                st.shader_socket_pick = None;
-                            } else { st.shader_socket_pick = Some((node.id, false)); }
-                        }
-                    }
-                    match node.kind {
-                        ShaderNodeKind::Principled => {
-                            let mat = &doc.scene.materials[mi];
-                            let mut color = [lin_to_srgb8(mat.base_color[0]), lin_to_srgb8(mat.base_color[1]), lin_to_srgb8(mat.base_color[2]), (mat.base_color[3].clamp(0.0,1.0)*255.0) as u8];
-                            if ui.color_edit_button_srgba_unmultiplied(&mut color).changed() {
-                                doc.checkpoint();
-                                doc.scene.materials[mi].base_color = [srgb8_to_lin(color[0]), srgb8_to_lin(color[1]), srgb8_to_lin(color[2]), color[3] as f32/255.0];
-                            }
-                            let mut metallic = doc.scene.materials[mi].metallic;
-                            if ui.add(egui::Slider::new(&mut metallic, 0.0..=1.0).text("Metallic")).changed() { doc.scene.materials[mi].metallic = metallic; doc.touch(); }
-                            let mut roughness = doc.scene.materials[mi].roughness;
-                            if ui.add(egui::Slider::new(&mut roughness, 0.045..=1.0).text("Roughness")).changed() { doc.scene.materials[mi].roughness = roughness; doc.touch(); }
-                            let mut emission = doc.scene.materials[mi].emissive;
-                            let mut ec = [lin_to_srgb8(emission[0]),lin_to_srgb8(emission[1]),lin_to_srgb8(emission[2])];
-                            if ui.color_edit_button_srgb(&mut ec).changed() { emission = [srgb8_to_lin(ec[0]),srgb8_to_lin(ec[1]),srgb8_to_lin(ec[2])]; doc.scene.materials[mi].emissive = emission; doc.touch(); }
-                            ui.label("Emission");
-                        }
-                        ShaderNodeKind::ImageTexture => {
-                            ui.label("Texture source");
-                            let texture_count = doc.scene.textures.len();
-                            if texture_count == 0 { ui.weak("No images loaded in this project"); }
-                            else {
-                                let current_tex = st.shader_image_index.filter(|i| *i < texture_count).unwrap_or(0);
-                                egui::ComboBox::from_id_source(("shader_image", node.id)).selected_text(doc.scene.textures[current_tex].name.clone()).show_ui(ui, |ui| {
-                                    for (idx, tex) in doc.scene.textures.iter().enumerate() {
-                                        if ui.selectable_label(current_tex == idx, &tex.name).clicked() { st.shader_image_index = Some(idx); }
-                                    }
-                                });
-                                let image_linked = st.shader_links.iter().any(|l| l.from == node.id && st.shader_nodes.iter().any(|n| n.id == l.to && n.kind == ShaderNodeKind::Principled));
-                                if image_linked {
-                                    let tex = st.shader_image_index.unwrap_or(current_tex);
-                                    if doc.scene.materials[mi].base_color_tex != Some(tex) { doc.scene.materials[mi].base_color_tex = Some(tex); doc.touch(); }
-                                }
-                            }
-                            ui.weak("Connect Color to Principled Base Color");
-                        }
-                        ShaderNodeKind::Rgb => {
-                            ui.label("Constant color source");
-                            if ui.color_edit_button_srgba_unmultiplied(&mut st.shader_rgb_color).changed() {
-                                let rgb_linked = st.shader_links.iter().any(|l| l.from == node.id && st.shader_nodes.iter().any(|n| n.id == l.to && n.kind == ShaderNodeKind::Principled));
-                                if rgb_linked {
-                                    doc.scene.materials[mi].base_color = [srgb8_to_lin(st.shader_rgb_color[0]), srgb8_to_lin(st.shader_rgb_color[1]), srgb8_to_lin(st.shader_rgb_color[2]), st.shader_rgb_color[3] as f32 / 255.0];
-                                    doc.scene.materials[mi].base_color_tex = None;
-                                    doc.touch();
-                                }
-                            }
-                            ui.weak("Connect Color to Principled Base Color");
-                        }
-                        ShaderNodeKind::TexCoord => {
-                            ui.label("UV coordinates");
-                            ui.weak("Uses the active UV map");
-                        }
-                        ShaderNodeKind::Output => { ui.label("Final surface output"); }
-                    }
-                    if !node.kind.output_name().is_empty() {
-                        if ui.small_button(format!("{} ◉", node.kind.output_name())).clicked() {
-                            if let Some((to, false)) = st.shader_socket_pick {
-                                if to != node.id {
-                                    st.shader_links.retain(|l| l.to != to);
-                                    st.shader_links.push(ShaderLink { from: node.id, to });
-                                    if let Some(target) = st.shader_nodes.iter().find(|n| n.id == to) {
-                                        if node.kind == ShaderNodeKind::Rgb && target.kind == ShaderNodeKind::Principled {
-                                            doc.scene.materials[mi].base_color = [srgb8_to_lin(st.shader_rgb_color[0]), srgb8_to_lin(st.shader_rgb_color[1]), srgb8_to_lin(st.shader_rgb_color[2]), st.shader_rgb_color[3] as f32 / 255.0];
-                                            doc.scene.materials[mi].base_color_tex = None;
-                                            doc.touch();
-                                        } else if node.kind == ShaderNodeKind::ImageTexture && target.kind == ShaderNodeKind::Principled {
-                                            if let Some(tex) = st.shader_image_index.filter(|i| *i < doc.scene.textures.len()) { doc.scene.materials[mi].base_color_tex = Some(tex); doc.touch(); }
-                                        }
-                                    }
-                                }
-                                st.shader_socket_pick = None;
-                            } else { st.shader_socket_pick = Some((node.id, true)); }
-                        }
-                    }
-                });
-                node_rects.push((node.id, node_response.response.rect));
-            }
-        });
-        // Draw node links over the canvas, from the source node's right edge to the target's left edge.
-        for link in &st.shader_links {
-            if let (Some((_, from)), Some((_, to))) = (node_rects.iter().find(|(id, _)| *id == link.from), node_rects.iter().find(|(id, _)| *id == link.to)) {
-                let a = egui::pos2(from.right(), from.center().y);
-                let b = egui::pos2(to.left(), to.center().y);
-                ui.painter().line_segment([a, b], egui::Stroke::new(2.0, egui::Color32::from_rgb(0xe0, 0xb0, 0x55)));
-            }
-        }
-    });
-    ui.separator();
-    ui.label(RichText::new("Connections").strong());
-    if st.shader_links.is_empty() { ui.weak("No connections yet."); }
-    let labels: Vec<(u64,String)> = st.shader_nodes.iter().map(|n| (n.id, n.kind.title().to_string())).collect();
-    let mut remove_link = None;
-    for (idx, link) in st.shader_links.iter().enumerate() {
-        let from = labels.iter().find(|n| n.0 == link.from).map(|n| n.1.as_str()).unwrap_or("Missing node");
-        let to = labels.iter().find(|n| n.0 == link.to).map(|n| n.1.as_str()).unwrap_or("Missing node");
-        ui.horizontal(|ui| { ui.label(format!("{from}  ─────▶  {to}")); if ui.small_button("×").clicked() { remove_link = Some(idx); } });
+    // The graph is a genuine free-position canvas rather than a row of cards.
+    let canvas_size = egui::vec2(ui.available_width().max(600.0), ui.available_height().max(260.0));
+    let (canvas_rect, _) = ui.allocate_exact_size(canvas_size, egui::Sense::hover());
+    let painter = ui.painter_at(canvas_rect);
+    let bg = egui::Color32::from_rgb(0x22, 0x22, 0x22);
+    painter.rect_filled(canvas_rect, 0.0, bg);
+    let grid_minor = egui::Color32::from_gray(43);
+    let grid_major = egui::Color32::from_gray(54);
+    let spacing = 22.0;
+    let mut x = canvas_rect.left();
+    let mut xi = 0;
+    while x <= canvas_rect.right() {
+        painter.line_segment([egui::pos2(x, canvas_rect.top()), egui::pos2(x, canvas_rect.bottom())], egui::Stroke::new(if xi % 5 == 0 { 1.0 } else { 0.5 }, if xi % 5 == 0 { grid_major } else { grid_minor }));
+        x += spacing; xi += 1;
     }
-    if let Some(idx) = remove_link { st.shader_links.remove(idx); }
-    ui.add_space(8.0);
-    ui.weak("Material parameters are stored in the project. Node layout and connections are currently editor-session data; graph evaluation and texture-node wiring are not implemented yet.");
+    let mut y = canvas_rect.top();
+    let mut yi = 0;
+    while y <= canvas_rect.bottom() {
+        painter.line_segment([egui::pos2(canvas_rect.left(), y), egui::pos2(canvas_rect.right(), y)], egui::Stroke::new(if yi % 5 == 0 { 1.0 } else { 0.5 }, if yi % 5 == 0 { grid_major } else { grid_minor }));
+        y += spacing; yi += 1;
+    }
+
+    let nodes = st.shader_nodes.clone();
+    let mut node_rects: Vec<(u64, egui::Rect)> = Vec::new();
+    let mut delete_node = None;
+    for node in nodes {
+        let pos = canvas_rect.min + egui::vec2(node.pos[0], node.pos[1]);
+        // Keep every node inside the actual node-canvas, not merely inside the
+        // application window. Area::constrain(true) only knows the screen bounds.
+        let area = egui::Area::new(egui::Id::new(("shader_node", node.id)))
+            .order(egui::Order::Foreground)
+            .current_pos(pos)
+            // Keep node dragging separate from the resize grip. The previous
+            // movable Area competed with the tiny resize label for pointer input.
+            .movable(true)
+            .constrain_to(canvas_rect.shrink(2.0))
+            .show(ctx, |ui| {
+                egui::Frame::none()
+                    .fill(egui::Color32::from_rgb(0x32, 0x32, 0x32))
+                    .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(0x12, 0x12, 0x12)))
+                    .rounding(egui::Rounding::same(7.0))
+                    .inner_margin(egui::Margin::same(8.0))
+                    .show(ui, |ui| {
+                        let default_width = if node.kind == ShaderNodeKind::Principled { 270.0 } else { 225.0 };
+                        let node_size = st.shader_node_sizes.get(&node.id).copied().unwrap_or([default_width, 290.0]);
+                        let bounded_width = node_size[0].min((canvas_rect.width() - 20.0).max(140.0));
+                        let bounded_height = node_size[1].min((canvas_rect.height() - 20.0).max(110.0));
+                        ui.set_min_width(bounded_width);
+                        ui.set_max_width(bounded_width);
+                        // Apply the stored height to the node itself, not only
+                        // to its scroll area. Otherwise the frame keeps its
+                        // content's natural height and vertical resizing appears
+                        // to do nothing.
+                        ui.set_min_height(bounded_height);
+                        ui.set_max_height(bounded_height);
+                        ui.horizontal(|ui| {
+                            let title_rect = ui.available_rect_before_wrap();
+                            ui.label(RichText::new(node.kind.title()).strong().color(egui::Color32::WHITE));
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if ui.small_button("×").on_hover_text("Remove node").clicked() { delete_node = Some(node.id); }
+                            });
+                            let _ = title_rect;
+                        });
+                        ui.add_space(3.0);
+                        ui.separator();
+                        egui::ScrollArea::vertical()
+                            .max_height((bounded_height - 70.0).max(35.0))
+                            .show(ui, |ui| {
+                        match node.kind {
+                            ShaderNodeKind::Principled => {
+                                let mat = &doc.scene.materials[mi];
+                                let mut color = [lin_to_srgb8(mat.base_color[0]), lin_to_srgb8(mat.base_color[1]), lin_to_srgb8(mat.base_color[2]), (mat.base_color[3].clamp(0.0,1.0)*255.0) as u8];
+                                ui.horizontal(|ui| {
+                                    if shader_socket_control(ui, st, node.id, false, "● Base Color").clicked() { }
+                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                        if ui.color_edit_button_srgba_unmultiplied(&mut color).changed() {
+                                            doc.checkpoint();
+                                            doc.scene.materials[mi].base_color = [srgb8_to_lin(color[0]), srgb8_to_lin(color[1]), srgb8_to_lin(color[2]), color[3] as f32/255.0]; doc.touch();
+                                        }
+                                    });
+                                });
+                                let mut metallic = doc.scene.materials[mi].metallic;
+                                ui.horizontal(|ui| { ui.label("Metallic"); if ui.add(egui::Slider::new(&mut metallic, 0.0..=1.0).show_value(true)).changed() { doc.scene.materials[mi].metallic = metallic; doc.touch(); } });
+                                let mut roughness = doc.scene.materials[mi].roughness;
+                                ui.horizontal(|ui| { ui.label("Roughness"); if ui.add(egui::Slider::new(&mut roughness, 0.045..=1.0).show_value(true)).changed() { doc.scene.materials[mi].roughness = roughness; doc.touch(); } });
+                                let mut emission = doc.scene.materials[mi].emissive;
+                                let mut ec = [lin_to_srgb8(emission[0]), lin_to_srgb8(emission[1]), lin_to_srgb8(emission[2])];
+                                ui.horizontal(|ui| { ui.label("Emission"); if ui.color_edit_button_srgb(&mut ec).changed() { emission = [srgb8_to_lin(ec[0]), srgb8_to_lin(ec[1]), srgb8_to_lin(ec[2])]; doc.scene.materials[mi].emissive = emission; doc.touch(); } });
+                                ui.horizontal(|ui| { ui.label("● Metallic"); ui.label("● Roughness"); });
+                                ui.horizontal(|ui| { ui.label("● Emission"); ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| { shader_socket_control(ui, st, node.id, true, "BSDF ◉"); }); });
+                            }
+                            ShaderNodeKind::ImageTexture => {
+                                ui.horizontal(|ui| { if shader_socket_control(ui, st, node.id, false, "● Vector").clicked() { } ui.label("UV"); });
+                                ui.horizontal(|ui| {
+                                    if ui.button("Open Image…").clicked() {
+                                        #[cfg(not(target_arch = "wasm32"))]
+                                        if let Some(path) = rfd::FileDialog::new()
+                                            .add_filter("Images", &["png", "jpg", "jpeg", "bmp", "tga", "webp"])
+                                            .pick_file()
+                                        {
+                                            match forge_io::load_image(&path) {
+                                                Ok(texture) => {
+                                                    let mut textures = (*doc.scene.textures).clone();
+                                                    textures.push(texture);
+                                                    doc.scene.textures = Arc::new(textures);
+                                                    st.shader_image_index = Some(doc.scene.textures.len() - 1);
+                                                    doc.touch();
+                                                }
+                                                Err(error) => log::error!("Could not load shader image: {error:#}"),
+                                            }
+                                        }
+                                    }
+                                    ui.weak("Load from disk");
+                                });
+                                let count = doc.scene.textures.len();
+                                if count == 0 { ui.weak("No images loaded"); }
+                                else {
+                                    let idx = st.shader_image_index.filter(|i| *i < count).unwrap_or(0);
+                                    egui::ComboBox::from_id_source(("shader_image", node.id)).selected_text(&doc.scene.textures[idx].name).show_ui(ui, |ui| {
+                                        for (i, tex) in doc.scene.textures.iter().enumerate() { if ui.selectable_label(idx == i, &tex.name).clicked() { st.shader_image_index = Some(i); } }
+                                    });
+                                }
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| { if shader_socket_control(ui, st, node.id, true, "Color ◉").clicked() { } });
+                                if st.shader_links.iter().any(|l| l.from == node.id && st.shader_nodes.iter().any(|n| n.id == l.to && n.kind == ShaderNodeKind::Principled)) {
+                                    if let Some(tex) = st.shader_image_index.filter(|i| *i < count) { if doc.scene.materials[mi].base_color_tex != Some(tex) { doc.scene.materials[mi].base_color_tex = Some(tex); doc.touch(); } }
+                                }
+                            }
+                            ShaderNodeKind::Rgb => {
+                                ui.label("Color");
+                                if ui.color_edit_button_srgba_unmultiplied(&mut st.shader_rgb_color).changed() && st.shader_links.iter().any(|l| l.from == node.id && st.shader_nodes.iter().any(|n| n.id == l.to && n.kind == ShaderNodeKind::Principled)) {
+                                    doc.scene.materials[mi].base_color = [srgb8_to_lin(st.shader_rgb_color[0]), srgb8_to_lin(st.shader_rgb_color[1]), srgb8_to_lin(st.shader_rgb_color[2]), st.shader_rgb_color[3] as f32/255.0];
+                                    doc.scene.materials[mi].base_color_tex = None; doc.touch();
+                                }
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| { if shader_socket_control(ui, st, node.id, true, "Color ◉").clicked() { } });
+                            }
+                            ShaderNodeKind::TexCoord => {
+                                for label in ["Generated", "Normal", "UV", "Object", "Camera"] {
+                                    ui.horizontal(|ui| { ui.label("○"); ui.label(label); });
+                                }
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| { if shader_socket_control(ui, st, node.id, true, "UV ◉").clicked() { } });
+                            }
+                            ShaderNodeKind::Output => {
+                                ui.horizontal(|ui| { if shader_socket_control(ui, st, node.id, false, "● Surface").clicked() { } ui.label("Material surface"); });
+                                ui.horizontal(|ui| { ui.label("● Volume"); ui.label("Volume output"); });
+                            }
+                        }
+                            });
+                        ui.add_space(4.0);
+                        // Standard edge resizing: drag the right edge for width,
+                        // or the bottom edge for height. No corner-grip widget.
+                        let node_rect = ui.min_rect();
+                        let edge = 7.0;
+                        let right_rect = egui::Rect::from_min_max(
+                            egui::pos2(node_rect.right() - edge * 0.5, node_rect.top() + 10.0),
+                            egui::pos2(node_rect.right() + edge * 0.5, node_rect.bottom() - 10.0),
+                        );
+                        let bottom_rect = egui::Rect::from_min_max(
+                            egui::pos2(node_rect.left() + 10.0, node_rect.bottom() - edge * 0.5),
+                            egui::pos2(node_rect.right() - 10.0, node_rect.bottom() + edge * 0.5),
+                        );
+                        let width_handle = ui.interact(
+                            right_rect,
+                            egui::Id::new(("shader_node_resize_width", node.id)),
+                            egui::Sense::click_and_drag(),
+                        );
+                        let height_handle = ui.interact(
+                            bottom_rect,
+                            egui::Id::new(("shader_node_resize_height", node.id)),
+                            egui::Sense::click_and_drag(),
+                        );
+                        if width_handle.hovered() || width_handle.dragged() {
+                            ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+                        }
+                        if height_handle.hovered() || height_handle.dragged() {
+                            ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
+                        }
+                        if width_handle.drag_started() || height_handle.drag_started() {
+                            let initial = st.shader_node_sizes.get(&node.id).copied().unwrap_or([default_width, 290.0]);
+                            st.shader_resize_start.insert(node.id, initial);
+                        }
+                        if width_handle.dragged() || height_handle.dragged() {
+                            let initial = st.shader_resize_start.get(&node.id).copied().unwrap_or([default_width, 290.0]);
+                            let delta = if width_handle.dragged() { width_handle.drag_delta() } else { height_handle.drag_delta() };
+                            let max_width = (canvas_rect.width() - 24.0).clamp(160.0, 1200.0);
+                            let max_height = (canvas_rect.height() - 24.0).clamp(110.0, 1600.0);
+                            let mut next = initial;
+                            if width_handle.dragged() { next[0] = (initial[0] + delta.x).clamp(160.0, max_width); }
+                            if height_handle.dragged() { next[1] = (initial[1] + delta.y).clamp(110.0, max_height); }
+                            st.shader_node_sizes.insert(node.id, next);
+                        }
+                        if width_handle.drag_stopped() || height_handle.drag_stopped() {
+                            st.shader_resize_start.remove(&node.id);
+                        }
+                        width_handle.on_hover_text("Drag edge to change node width");
+                        height_handle.on_hover_text("Drag edge to change node height");
+                    });
+            });
+        let rect = area.response.rect;
+        if let Some(n) = st.shader_nodes.iter_mut().find(|n| n.id == node.id) {
+            n.pos = [rect.min.x - canvas_rect.min.x, rect.min.y - canvas_rect.min.y];
+        }
+        node_rects.push((node.id, rect));
+    }
+    if ctx.input(|i| i.pointer.any_released()) {
+        // Dropping a wire on empty canvas cancels the connection cleanly.
+        st.shader_drag_from = None;
+    }
+    if let Some(id) = delete_node {
+        st.shader_nodes.retain(|n| n.id != id);
+        st.shader_links.retain(|l| l.from != id && l.to != id);
+        if st.shader_socket_pick.map(|p| p.0) == Some(id) { st.shader_socket_pick = None; }
+    }
+
+    // Draw Blender-style Bezier wires beneath the nodes.
+    let wire_painter = ctx
+        .layer_painter(egui::LayerId::new(egui::Order::Middle, egui::Id::new("shader_wires")))
+        .with_clip_rect(canvas_rect);
+    for link in &st.shader_links {
+        if let (Some((_, from)), Some((_, to))) = (
+            node_rects.iter().find(|(id, _)| *id == link.from),
+            node_rects.iter().find(|(id, _)| *id == link.to),
+        ) {
+            // Use the measured centre of the actual socket controls.
+            let a = st.shader_socket_positions.get(&(link.from, true)).map(|p| egui::pos2(p[0], p[1])).unwrap_or_else(|| egui::pos2(from.right(), from.center().y));
+            let b = st.shader_socket_positions.get(&(link.to, false)).map(|p| egui::pos2(p[0], p[1])).unwrap_or_else(|| egui::pos2(to.left(), to.center().y));
+            let bend = ((b.x - a.x).abs() * 0.5).max(55.0);
+            let points = [a, egui::pos2(a.x + bend, a.y), egui::pos2(b.x - bend, b.y), b];
+            wire_painter.add(egui::epaint::CubicBezierShape::from_points_stroke(
+                points, false, egui::Color32::TRANSPARENT,
+                egui::Stroke::new(3.0, egui::Color32::from_rgb(0xd5, 0xa0, 0x55)),
+            ));
+        }
+    }
+    if let Some((id, is_output)) = st.shader_drag_from {
+        if let Some(start) = st.shader_socket_positions.get(&(id, is_output)).copied() {
+            if let Some(pointer) = ctx.pointer_interact_pos() {
+                let a = egui::pos2(start[0], start[1]);
+                let b = pointer;
+                let bend = ((b.x - a.x).abs() * 0.5).max(55.0);
+                let points = [a, egui::pos2(a.x + bend, a.y), egui::pos2(b.x - bend, b.y), b];
+                wire_painter.add(egui::epaint::CubicBezierShape::from_points_stroke(points, false, egui::Color32::TRANSPARENT, egui::Stroke::new(2.5, egui::Color32::LIGHT_BLUE)));
+            }
+        }
+    }
+    if let Some((id, is_output)) = st.shader_socket_pick {
+        let name = st.shader_nodes.iter().find(|n| n.id == id).map(|n| n.kind.title()).unwrap_or("Node");
+        painter.text(canvas_rect.left_top() + egui::vec2(12.0, 12.0), egui::Align2::LEFT_TOP, format!("Connecting: {name} {} — click the other socket", if is_output { "output" } else { "input" }), egui::FontId::proportional(12.0), egui::Color32::from_rgb(0xf0, 0xc0, 0x75));
+    }
+}
+
+fn socket_click(st: &mut UiState, node_id: u64, is_output: bool) {
+    if let Some((other, other_is_output)) = st.shader_socket_pick {
+        if other != node_id && other_is_output != is_output {
+            let (from, to) = if is_output { (node_id, other) } else { (other, node_id) };
+            st.shader_links.retain(|l| l.to != to);
+            st.shader_links.push(ShaderLink { from, to });
+        }
+        st.shader_socket_pick = None;
+    } else {
+        st.shader_socket_pick = Some((node_id, is_output));
+    }
+}
+
+fn shader_socket_control(ui: &mut egui::Ui, st: &mut UiState, node_id: u64, is_output: bool, label: &str) -> egui::Response {
+    let response = ui.add(egui::Button::new(label).sense(egui::Sense::click_and_drag()));
+    let center = response.rect.center();
+    st.shader_socket_positions.insert((node_id, is_output), [center.x, center.y]);
+    if response.drag_started() {
+        st.shader_drag_from = Some((node_id, is_output));
+        st.shader_socket_pick = None;
+    }
+    if response.clicked() {
+        socket_click(st, node_id, is_output);
+    }
+    if response.hovered() && ui.input(|i| i.pointer.any_released()) {
+        if let Some((from_id, from_output)) = st.shader_drag_from.take() {
+            if from_id != node_id && from_output != is_output {
+                let (from, to) = if from_output { (from_id, node_id) } else { (node_id, from_id) };
+                st.shader_links.retain(|link| link.to != to);
+                st.shader_links.push(ShaderLink { from, to });
+            }
+        }
+    }
+    response
 }
 
 fn draw_texture_paint_editor(
