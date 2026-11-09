@@ -151,6 +151,7 @@ struct App {
     /// 3D viewport in physical pixels: x, y, w, h
     viewport: [f32; 4],
     uploaded: u64,
+    last_anim_tick: std::time::Instant,
     title: String,
     initial: Option<PathBuf>,
 }
@@ -278,7 +279,16 @@ impl App {
             sculpt_last_sample: None,
             paint_stroke: false,
             paint_last_cursor: None,
-            ui: UiState::default(),
+            ui: {
+                let mut ui = UiState::default();
+                ui.render_width = 1920;
+                ui.render_height = 1080;
+                ui.render_percent = 100;
+                ui.render_use_viewport = false;
+                ui.render_anim_frames = 36;
+                ui.render_fps = 24;
+                ui
+            },
             bindings: keymap::bindings(),
             recent: recent::Recent::load(),
             camera_view: None,
@@ -293,6 +303,7 @@ impl App {
             mods: ModifiersState::empty(),
             viewport: [0.0, 0.0, 1280.0, 720.0],
             uploaded: u64::MAX,
+            last_anim_tick: std::time::Instant::now(),
             title: String::new(),
             initial,
         }
@@ -1364,6 +1375,10 @@ impl App {
                 m.cancel(&mut self.doc);
             } else {
                 m.confirm(&mut self.doc);
+                // Auto Key: record Loc/Rot/Scale for the selection after a transform.
+                if self.doc.scene.animation.auto_key && !self.doc.in_edit_mode() {
+                    self.insert_keyframe(true, true, true);
+                }
             }
         }
     }
@@ -2028,6 +2043,29 @@ impl App {
             A::EnvRotate(d) => self.settings.env_rotation += 0.1 * d as f32,
             A::RenderImage => self.render_image(),
             A::RenderAnimation => self.render_animation(),
+            A::InsertKeyframeLocRotScale => self.insert_keyframe(true, true, true),
+            A::InsertKeyframeLocation => self.insert_keyframe(true, false, false),
+            A::InsertKeyframeRotation => self.insert_keyframe(false, true, false),
+            A::InsertKeyframeScale => self.insert_keyframe(false, false, true),
+            A::DeleteKeyframe => self.delete_keyframe(),
+            A::ToggleAnimationPlay => {
+                self.doc.scene.animation.playing = !self.doc.scene.animation.playing;
+                if self.doc.scene.animation.playing {
+                    self.last_anim_tick = std::time::Instant::now();
+                    self.status("Animation playing");
+                } else {
+                    self.status("Animation paused");
+                }
+            }
+            A::ToggleAutoKey => {
+                self.doc.scene.animation.auto_key = !self.doc.scene.animation.auto_key;
+                self.status(if self.doc.scene.animation.auto_key {
+                    "Auto Key ON"
+                } else {
+                    "Auto Key OFF"
+                });
+            }
+            A::AnimScrub => self.apply_animation_frame(),
 
             A::ToggleShortcuts => self.ui.show_shortcuts = !self.ui.show_shortcuts,
             A::ShowAbout => self.ui.show_about = true,
@@ -2345,6 +2383,108 @@ impl App {
     }
 
     /// Capture the current 3D viewport (no UI) to a PNG the user chooses.
+
+    /// Resolution for offline renders (image / animation).
+    fn render_resolution(&self) -> (u32, u32) {
+        if self.ui.render_use_viewport || self.ui.render_width < 64 || self.ui.render_height < 64 {
+            (
+                (self.viewport[2].max(64.0) as u32).clamp(64, 7680),
+                (self.viewport[3].max(64.0) as u32).clamp(64, 4320),
+            )
+        } else {
+            let pct = self.ui.render_percent.clamp(1, 200) as f32 / 100.0;
+            let w = ((self.ui.render_width.max(64) as f32) * pct).round() as u32;
+            let h = ((self.ui.render_height.max(64) as f32) * pct).round() as u32;
+            (w.clamp(64, 7680), h.clamp(64, 4320))
+        }
+    }
+
+
+    fn insert_keyframe(&mut self, loc: bool, rot: bool, scl: bool) {
+        if self.doc.in_edit_mode() || self.doc.sculpt_mode || self.doc.uv_mode {
+            self.status("Keyframes: switch to Object Mode");
+            return;
+        }
+        let frame = self.doc.scene.animation.frame_current;
+        let ids: Vec<u64> = if self.doc.selection.is_empty() {
+            self.doc.active.into_iter().collect()
+        } else {
+            self.doc.selection.iter().copied().collect()
+        };
+        if ids.is_empty() {
+            self.status("Select an object to keyframe");
+            return;
+        }
+        self.doc.checkpoint();
+        let mut n = 0;
+        for id in ids {
+            let Some(idx) = self.doc.scene.index_of(id) else { continue };
+            let o = &self.doc.scene.objects[idx];
+            let loc_v = loc.then_some(o.translation);
+            let rot_v = rot.then_some(o.rotation);
+            let scl_v = scl.then_some(o.scale);
+            self.doc
+                .scene
+                .animation
+                .objects
+                .entry(id)
+                .or_default()
+                .insert_or_merge(frame, loc_v, rot_v, scl_v);
+            n += 1;
+        }
+        self.doc.touch();
+        self.status(format!("Inserted keyframe at frame {frame} on {n} object(s)"));
+    }
+
+    fn delete_keyframe(&mut self) {
+        let frame = self.doc.scene.animation.frame_current;
+        let ids: Vec<u64> = if self.doc.selection.is_empty() {
+            self.doc.active.into_iter().collect()
+        } else {
+            self.doc.selection.iter().copied().collect()
+        };
+        self.doc.checkpoint();
+        let mut n = 0;
+        for id in ids {
+            if let Some(oa) = self.doc.scene.animation.objects.get_mut(&id) {
+                if oa.has_any_at(frame) {
+                    oa.delete_at(frame);
+                    n += 1;
+                }
+            }
+        }
+        self.doc.touch();
+        self.apply_animation_frame();
+        self.status(format!("Deleted keys at frame {frame} ({n} object(s))"));
+    }
+
+    /// Write evaluated animation onto object transforms for the current frame.
+    fn apply_animation_frame(&mut self) {
+        let frame = self.doc.scene.animation.frame_current as f32;
+        let keys: Vec<(u64, (Option<glam::Vec3>, Option<glam::Quat>, Option<glam::Vec3>))> = self
+            .doc
+            .scene
+            .animation
+            .objects
+            .iter()
+            .map(|(id, oa)| (*id, oa.eval(frame)))
+            .collect();
+        for (id, (loc, rot, scl)) in keys {
+            let Some(idx) = self.doc.scene.index_of(id) else { continue };
+            let o = &mut self.doc.scene.objects[idx];
+            if let Some(v) = loc {
+                o.translation = v;
+            }
+            if let Some(v) = rot {
+                o.rotation = v;
+            }
+            if let Some(v) = scl {
+                o.scale = v;
+            }
+        }
+        self.doc.touch();
+    }
+
     fn render_image(&mut self) {
         #[cfg(target_arch = "wasm32")]
         {
@@ -2367,18 +2507,18 @@ impl App {
             if path.extension().is_none() {
                 path.set_extension("png");
             }
-            // Clamp to a sane offscreen resolution. Using the raw viewport size
-            // (which can be huge on HiDPI) previously exhausted GPU memory / stalled
-            // map_async and made the app appear to freeze randomly.
-            let (w, h) = (
-                (self.viewport[2].max(64.0) as u32).clamp(64, 3840),
-                (self.viewport[3].max(64.0) as u32).clamp(64, 2160),
-            );
+            let (w, h) = self.render_resolution();
+            // Ensure objects sit on the current timeline frame.
+            self.apply_animation_frame();
+            if let Some(g) = self.gfx.as_mut() {
+                g.renderer.set_scene(&self.doc.scene, &highlights(&self.doc));
+            }
+            self.uploaded = self.doc.version;
             let cam = self.camera.clone();
             let settings = self.settings.clone();
             let result = {
                 let g = self.gfx.as_mut().unwrap();
-                g.renderer.capture(&cam, &settings, w, h)
+                g.renderer.capture_with(&cam, &settings, w, h, false)
             };
             match result {
                 Ok(rgba) => {
@@ -2404,51 +2544,160 @@ impl App {
         }
         #[cfg(not(target_arch = "wasm32"))]
         {
-            let Some(dir) = rfd::FileDialog::new().set_title("Choose folder for frame sequence").pick_folder() else {
+            let Some(dir) = rfd::FileDialog::new()
+                .set_title("Choose folder for animation frames")
+                .pick_folder()
+            else {
                 return;
             };
             if self.gfx.is_none() {
                 self.status("Renderer not ready");
                 return;
             }
-            // Simple turntable: 36 frames, full 360° orbit around the current target.
-            let frames = 36u32;
-            let (w, h) = (
-                (self.viewport[2].max(64.0) as u32).clamp(64, 1920),
-                (self.viewport[3].max(64.0) as u32).clamp(64, 1080),
-            );
-            let original_yaw = self.camera.yaw;
+            // Scene animation frames (object keyframes). Fast GPU path: transform-only
+            // updates + reused capture targets + no shadow pass while baking video.
+            let start = self.doc.scene.animation.frame_start;
+            let end = self.doc.scene.animation.frame_end.max(start);
+            let restore = self.doc.scene.animation.frame_current;
+            let fps = self.doc.scene.animation.fps.max(1);
+            let (w, h) = self.render_resolution();
             let mut ok = 0u32;
             let mut err_msg: Option<String> = None;
-            for i in 0..frames {
-                let t = i as f32 / frames as f32;
-                self.camera.yaw = original_yaw + t * std::f32::consts::TAU;
+            let total = (end - start + 1) as u32;
+            let t0 = std::time::Instant::now();
+
+            // Ensure GPU scene is fully built once, then only update matrices.
+            {
+                let highlight = highlights(&self.doc);
+                if let Some(g) = self.gfx.as_mut() {
+                    g.renderer.set_scene(&self.doc.scene, &highlight);
+                }
+                self.uploaded = self.doc.version;
+            }
+
+            let frames_dir = dir.join("frames");
+            let _ = std::fs::create_dir_all(&frames_dir);
+
+            // Pure-Rust friendly H.264 path: OpenH264 (Cisco, BSD) + minimp4 muxer.
+            // No system ffmpeg binary required. Builds & runs on Windows, Linux, macOS, FreeBSD.
+            // OpenH264 is designed for real-time encoding and is competitive with ffmpeg for this use-case.
+            let mut h264_buf: Vec<u8> = Vec::new();
+            // Ensure even dimensions for OpenH264 / YUV420.
+            let enc_w = (w & !1).max(2);
+            let enc_h = (h & !1).max(2);
+            let config = openh264::encoder::EncoderConfig::new()
+                .max_frame_rate(fps as f32)
+                .set_bitrate_bps(
+                    (enc_w as u64 * enc_h as u64 * fps as u64 / 4).max(500_000) as u32,
+                );
+            let mut encoder = match openh264::encoder::Encoder::with_api_config(
+                openh264::OpenH264API::from_source(),
+                config,
+            ) {
+                Ok(e) => Some(e),
+                Err(e) => {
+                    log::warn!("OpenH264 encoder init failed: {e} (PNG sequence still written)");
+                    None
+                }
+            };
+            // YUV converter is created once and reused.
+            let mut yuv = openh264::formats::YUVBuffer::new(enc_w as usize, enc_h as usize);
+
+            for frame in start..=end {
+                self.doc.scene.animation.frame_current = frame;
+                self.doc.scene.animation.playing = false;
+                self.apply_animation_frame();
+
+                let highlight = highlights(&self.doc);
                 let cam = self.camera.clone();
                 let settings = self.settings.clone();
                 let result = {
                     let g = self.gfx.as_mut().unwrap();
-                    g.renderer.capture(&cam, &settings, w, h)
+                    // Transform-only upload (avoids rebuilding materials/meshes every frame).
+                    g.renderer.update_transforms(&self.doc.scene, &highlight);
+                    // Fast capture: skip shadows, reuse offscreen targets.
+                    g.renderer.capture_with(&cam, &settings, w, h, true)
                 };
                 match result {
                     Ok(rgba) => {
-                        let path = dir.join(format!("frame_{:04}.png", i));
+                        let path = frames_dir.join(format!("frame_{:04}.png", frame));
                         if image::save_buffer(&path, &rgba, w, h, image::ColorType::Rgba8).is_ok() {
                             ok += 1;
                         }
+                        // Encode on the fly: RGBA → RGB → YUV420 → H.264 Annex-B
+                        if let Some(enc) = encoder.as_mut() {
+                            // Build RGB of even size (crop if necessary).
+                            let mut rgb = Vec::with_capacity((enc_w * enc_h * 3) as usize);
+                            for y in 0..enc_h {
+                                let src_row = (y as usize) * (w as usize) * 4;
+                                for x in 0..enc_w {
+                                    let i = src_row + (x as usize) * 4;
+                                    if i + 2 < rgba.len() {
+                                        rgb.extend_from_slice(&rgba[i..i + 3]);
+                                    } else {
+                                        rgb.extend_from_slice(&[0, 0, 0]);
+                                    }
+                                }
+                            }
+                            let rgb_src = openh264::formats::RgbSliceU8::new(&rgb, (enc_w as usize, enc_h as usize));
+                            yuv.read_rgb(rgb_src);
+                            if let Ok(bitstream) = enc.encode(&yuv) {
+                                bitstream.write_vec(&mut h264_buf);
+                            }
+                        }
                     }
                     Err(e) => {
-                        err_msg = Some(format!("Animation render failed at frame {i}: {e}"));
+                        err_msg = Some(format!("Animation render failed at frame {frame}: {e}"));
                         break;
                     }
                 }
             }
-            self.camera.yaw = original_yaw;
+
+            // Restore timeline position and transforms.
+            self.doc.scene.animation.frame_current = restore;
+            self.apply_animation_frame();
+            if let Some(g) = self.gfx.as_mut() {
+                g.renderer.update_transforms(&self.doc.scene, &highlights(&self.doc));
+            }
+            self.uploaded = self.doc.version;
+
+            let elapsed = t0.elapsed().as_secs_f32();
+            let fps_render = if elapsed > 0.0 { ok as f32 / elapsed } else { 0.0 };
+
+            // Mux Annex-B H.264 into a standards-compliant MP4 with pure-Rust minimp4.
+            let mut video_note = String::new();
+            if err_msg.is_none() && ok > 0 && !h264_buf.is_empty() {
+                let mp4_path = dir.join("animation.mp4");
+                let mut video_buffer = std::io::Cursor::new(Vec::new());
+                {
+                    let mut mp4muxer = minimp4::Mp4Muxer::new(&mut video_buffer);
+                    mp4muxer.init_video(w as i32, h as i32, false, "BlendCraft animation");
+                    mp4muxer.write_video(&h264_buf);
+                    mp4muxer.close();
+                }
+                use std::io::{Read, Seek, SeekFrom, Write};
+                if video_buffer.seek(SeekFrom::Start(0)).is_ok() {
+                    let mut out = Vec::new();
+                    if video_buffer.read_to_end(&mut out).is_ok() {
+                        if let Ok(mut f) = std::fs::File::create(&mp4_path) {
+                            if f.write_all(&out).is_ok() {
+                                video_note = format!(" · video {}", mp4_path.display());
+                            }
+                        }
+                    }
+                }
+                if video_note.is_empty() {
+                    video_note = " · MP4 mux failed (PNG sequence kept in frames/)".into();
+                }
+            } else if err_msg.is_none() && ok > 0 {
+                video_note = " · OpenH264 unavailable (PNG sequence kept in frames/)".into();
+            }
+
             if let Some(msg) = err_msg {
                 self.status(msg);
             } else {
                 self.status(format!(
-                    "Rendered {ok}/{frames} frames ({w}×{h}) to {}",
-                    dir.display()
+                    "Rendered {ok}/{total} frames ({w}×{h}) in {elapsed:.1}s ({fps_render:.1} fps) · {start}–{end}{video_note}"
                 ));
             }
         }
@@ -2869,6 +3118,16 @@ impl App {
     // ------------------------------------------------------------------ frame
     fn redraw(&mut self, el: &ActiveEventLoop) {
         self.sync_camera_view();
+
+        // Advance timeline when playing (Blender-style playback).
+        if self.doc.scene.animation.playing {
+            let fps = self.doc.scene.animation.fps.max(1) as f32;
+            if self.last_anim_tick.elapsed().as_secs_f32() >= 1.0 / fps {
+                self.last_anim_tick = std::time::Instant::now();
+                self.doc.scene.animation.step();
+                self.apply_animation_frame();
+            }
+        }
 
         // 1) build the UI
         let raw = match self.gfx.as_mut() {

@@ -27,6 +27,8 @@ serde_json.workspace = true
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 rfd.workspace = true
 egui-winit = { version = "0.29", default-features = false, features = ["clipboard", "links", "wayland", "x11"] }
+openh264 = { version = "0.6", features = ["source"] }
+minimp4 = "0.1"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 console_error_panic_hook.workspace = true

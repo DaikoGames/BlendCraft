@@ -113,6 +113,14 @@ pub enum Action {
     EnvRotate(i8),
     RenderImage,
     RenderAnimation,
+    InsertKeyframeLocRotScale,
+    InsertKeyframeLocation,
+    InsertKeyframeRotation,
+    InsertKeyframeScale,
+    DeleteKeyframe,
+    ToggleAnimationPlay,
+    ToggleAutoKey,
+    AnimScrub,
     // help
     ToggleShortcuts,
     ShowAbout,
@@ -218,6 +226,8 @@ pub fn bindings() -> Vec<Binding> {
     b("Tools", "Lasso select tool", "", K::KeyL, A::SetTool(Tool::Lasso));
     b("Tools", "Cycle gizmo tool (Move / Rotate / Scale)", "", K::KeyT, A::CycleTool);
     b("Tools", "Toggle snapping", "s", K::Tab, A::ToggleSnap);
+    b("Animation", "Insert Keyframe (Loc/Rot/Scale)", "", K::KeyK, A::InsertKeyframeLocRotScale);
+    b("Animation", "Delete Keyframe", "a", K::KeyI, A::DeleteKeyframe);
     b("Mode", "Toggle Edit Mode", "", K::Tab, A::ToggleEditMode);
     b("Mode", "Toggle Sculpt Mode", "c", K::Tab, A::ToggleSculptMode);
     b("Mode", "Toggle UV Editing", "a", K::KeyU, A::ToggleUvMode);

@@ -1,6 +1,7 @@
 use crate::constraints::Constraint;
 use crate::armature::SkinBinding;
 use crate::kinds::{helper_radius, ObjectKind};
+use crate::animation::AnimationData;
 use crate::material::{Material, TextureData};
 use crate::mesh::{Aabb, MeshData};
 use crate::primitives::Primitive;
@@ -88,6 +89,9 @@ pub struct Scene {
     /// The 3D cursor: new objects appear here, can be used as a pivot / snap target.
     pub cursor: Vec3,
     pub next_id: u64,
+    /// Timeline + object transform keyframes (Object Mode animation).
+    #[serde(default)]
+    pub animation: AnimationData,
 }
 
 struct Eval<'a> {

@@ -4,6 +4,7 @@ pub mod command;
 pub mod constraints;
 pub mod document;
 pub mod environment;
+pub mod animation;
 pub mod armature;
 pub mod kinds;
 pub mod material;
@@ -18,6 +19,7 @@ pub mod project;
 pub mod scene;
 
 pub use camera::{FixedView, OrbitCamera};
+pub use animation::{AnimationData, ObjectAnimation, TransformKey};
 pub use armature::{ArmatureData, Bone, SkinBinding};
 pub use kinds::{helper_lines, helper_radius, CameraData, EmptyShape, ForceFieldData, ForceFieldType, GreasePencilData, LightData, LightProbeData, LightProbeType, LightType, ObjectKind, SpeakerData, SurfaceData, VolumeData};
 pub use command::{Command, History};

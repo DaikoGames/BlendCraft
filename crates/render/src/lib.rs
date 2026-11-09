@@ -75,6 +75,7 @@ struct Draw {
 
 struct GpuObject {
     buffers: Arc<MeshBuffers>,
+    model_buf: wgpu::Buffer,
     model_bg: wgpu::BindGroup,
     draws: Vec<Draw>,
     highlight: Highlight,
@@ -140,6 +141,18 @@ pub struct Renderer {
     mesh_cache: HashMap<usize, (Arc<MeshData>, Arc<MeshBuffers>)>,
     tex_cache: TexCache,
     tex_owner: Option<Arc<Vec<TextureData>>>,
+    /// Reused offscreen targets for capture (avoid alloc per frame).
+    capture_cache: Option<CaptureCache>,
+}
+
+struct CaptureCache {
+    width: u32,
+    height: u32,
+    color_tex: wgpu::Texture,
+    color_view: wgpu::TextureView,
+    depth_view: wgpu::TextureView,
+    staging: wgpu::Buffer,
+    padded_bpr: u32,
 }
 
 impl Renderer {
@@ -481,6 +494,7 @@ fn vs_main(@location(0) pos: vec3<f32>) -> @builtin(position) vec4<f32> {
             sky_pipeline, grid_pipeline, mesh_opaque, mesh_blend, wire_pipeline,
             grid_vb, grid_count: grid.len() as u32, materials: Vec::new(), objects: Vec::new(),
             mesh_cache: HashMap::new(), tex_cache: HashMap::new(), tex_owner: None,
+            capture_cache: None,
         })
     }
 
@@ -569,17 +583,17 @@ fn vs_main(@location(0) pos: vec3<f32>) -> @builtin(position) vec4<f32> {
             }
             let hl = highlight.get(i).copied().unwrap_or(Highlight::None);
             let mu = model_uniform(&worlds[i], hl);
-            let ubuf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            let model_buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("model uniform"),
                 contents: bytemuck::bytes_of(&mu),
-                usage: wgpu::BufferUsages::UNIFORM,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             });
             let model_bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("model bg"),
                 layout: &self.model_bgl,
-                entries: &[wgpu::BindGroupEntry { binding: 0, resource: ubuf.as_entire_binding() }],
+                entries: &[wgpu::BindGroupEntry { binding: 0, resource: model_buf.as_entire_binding() }],
             });
-            objects.push(GpuObject { buffers, model_bg, draws, highlight: hl });
+            objects.push(GpuObject { buffers, model_buf, model_bg, draws, highlight: hl });
         }
         self.mesh_cache = fresh;
         self.materials = mats;
@@ -988,6 +1002,20 @@ fn vs_main(@location(0) pos: vec3<f32>) -> @builtin(position) vec4<f32> {
 
     /// Render the scene off-screen at the given resolution and return RGBA8 pixels.
     /// Does not draw UI overlays or selection highlights.
+
+    /// Fast path: only rewrite model matrices (animation scrub / playback).
+    /// Call this instead of `set_scene` when meshes/materials did not change.
+    pub fn update_transforms(&mut self, scene: &Scene, highlight: &[Highlight]) {
+        let worlds = scene.world_matrices();
+        let n = self.objects.len().min(scene.objects.len()).min(worlds.len());
+        for i in 0..n {
+            let hl = highlight.get(i).copied().unwrap_or(Highlight::None);
+            let mu = model_uniform(&worlds[i], hl);
+            self.queue.write_buffer(&self.objects[i].model_buf, 0, bytemuck::bytes_of(&mu));
+            self.objects[i].highlight = hl;
+        }
+    }
+
     pub fn capture(
         &mut self,
         camera: &OrbitCamera,
@@ -995,26 +1023,69 @@ fn vs_main(@location(0) pos: vec3<f32>) -> @builtin(position) vec4<f32> {
         width: u32,
         height: u32,
     ) -> Result<Vec<u8>> {
+        self.capture_with(camera, s, width, height, false)
+    }
+
+    /// Offline capture. `fast` skips the shadow pass (much quicker for animation).
+    pub fn capture_with(
+        &mut self,
+        camera: &OrbitCamera,
+        s: &ViewSettings,
+        width: u32,
+        height: u32,
+        fast: bool,
+    ) -> Result<Vec<u8>> {
         let width = width.max(64);
         let height = height.max(64);
         let format = self.config.format;
 
-        let color_tex = self.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("capture color"),
-            size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-            view_formats: &[],
-        });
-        let color_view = color_tex.create_view(&wgpu::TextureViewDescriptor::default());
-        let depth_view = create_depth(&self.device, width, height);
+        // Reuse offscreen targets across frames when size matches.
+        let bytes_per_pixel = 4u32;
+        let unpadded_bpr = width * bytes_per_pixel;
+        let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+        let padded_bpr = (unpadded_bpr + align - 1) / align * align;
+        let need_new = match &self.capture_cache {
+            Some(c) => c.width != width || c.height != height || c.padded_bpr != padded_bpr,
+            None => true,
+        };
+        if need_new {
+            let color_tex = self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("capture color"),
+                size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+                view_formats: &[],
+            });
+            let color_view = color_tex.create_view(&wgpu::TextureViewDescriptor::default());
+            let depth_view = create_depth(&self.device, width, height);
+            let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("capture staging"),
+                size: (padded_bpr * height) as u64,
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            });
+            self.capture_cache = Some(CaptureCache {
+                width,
+                height,
+                color_tex,
+                color_view,
+                depth_view,
+                staging,
+                padded_bpr,
+            });
+        }
+        let cache = self.capture_cache.as_ref().unwrap();
+        let color_view = &cache.color_view;
+        let depth_view = &cache.depth_view;
+        let color_tex = &cache.color_tex;
+        let padded_bpr = cache.padded_bpr;
 
         let vp = camera.view_proj(width as f32 / height as f32);
         let eye = camera.eye();
-        let shadow_on = s.shadows && self.shadow_light >= 0;
+        let shadow_on = !fast && s.shadows && self.shadow_light >= 0;
         let g = Globals {
             view_proj: vp.to_cols_array_2d(),
             inv_view_proj: vp.inverse().to_cols_array_2d(),
@@ -1110,50 +1181,49 @@ fn vs_main(@location(0) pos: vec3<f32>) -> @builtin(position) vec4<f32> {
             }
         }
 
-        // Copy to a staging buffer (aligned row pitch)
-        let bytes_per_pixel = 4u32;
-        let unpadded_bpr = width * bytes_per_pixel;
-        let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
-        let padded_bpr = (unpadded_bpr + align - 1) / align * align;
-        let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("capture staging"),
-            size: (padded_bpr * height) as u64,
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
-        enc.copy_texture_to_buffer(
-            wgpu::ImageCopyTexture {
-                texture: &color_tex,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            wgpu::ImageCopyBuffer {
-                buffer: &staging,
-                layout: wgpu::ImageDataLayout {
-                    offset: 0,
-                    bytes_per_row: Some(padded_bpr),
-                    rows_per_image: Some(height),
+        // Copy to reused staging buffer
+        let unpadded_bpr = width * 4;
+        {
+            let cache = self.capture_cache.as_ref().unwrap();
+            enc.copy_texture_to_buffer(
+                wgpu::ImageCopyTexture {
+                    texture: &cache.color_tex,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
                 },
-            },
-            wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
-        );
+                wgpu::ImageCopyBuffer {
+                    buffer: &cache.staging,
+                    layout: wgpu::ImageDataLayout {
+                        offset: 0,
+                        bytes_per_row: Some(cache.padded_bpr),
+                        rows_per_image: Some(height),
+                    },
+                },
+                wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            );
+        }
         self.queue.submit(std::iter::once(enc.finish()));
 
-        let slice = staging.slice(..);
-        let (tx, rx) = std::sync::mpsc::channel();
-        slice.map_async(wgpu::MapMode::Read, move |r| { let _ = tx.send(r); });
-        self.device.poll(wgpu::Maintain::Wait);
-        rx.recv().map_err(|e| anyhow!("map channel: {e}"))??;
-
-        let data = slice.get_mapped_range();
         let mut rgba = Vec::with_capacity((width * height * 4) as usize);
-        for row in 0..height {
-            let start = (row * padded_bpr) as usize;
-            rgba.extend_from_slice(&data[start..start + unpadded_bpr as usize]);
+        {
+            let cache = self.capture_cache.as_ref().unwrap();
+            let slice = cache.staging.slice(..);
+            let (tx, rx) = std::sync::mpsc::channel();
+            slice.map_async(wgpu::MapMode::Read, move |r| {
+                let _ = tx.send(r);
+            });
+            self.device.poll(wgpu::Maintain::Wait);
+            rx.recv().map_err(|e| anyhow!("map channel: {e}"))??;
+            {
+                let data = slice.get_mapped_range();
+                for row in 0..height {
+                    let start = (row * padded_bpr) as usize;
+                    rgba.extend_from_slice(&data[start..start + unpadded_bpr as usize]);
+                }
+            } // mapped range dropped
+            cache.staging.unmap();
         }
-        drop(data);
-        staging.unmap();
 
         // Surface format may be Bgra8UnormSrgb — convert to RGBA if needed
         if format == wgpu::TextureFormat::Bgra8Unorm || format == wgpu::TextureFormat::Bgra8UnormSrgb {

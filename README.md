@@ -83,8 +83,10 @@ File > Export has glTF Binary and Wavefront OBJ, each also as "selected only".
 
 ## Rendering
 - Viewport is real-time with optional shadows.
-- **View > Render Image…** saves a PNG of the current 3D view (resolution = viewport size).
-- Video / animation export is not yet implemented.
+- **View > Render Image…** saves a PNG of the current 3D view (resolution configurable in the Render panel).
+- **View > Render Animation…** renders the current timeline range as a PNG sequence plus an H.264 MP4.
+  The MP4 is produced with the OpenH264 encoder (Cisco, real-time capable) and the pure-Rust minimp4 muxer —
+  no system `ffmpeg` binary is required. This works out of the box on Windows, Linux, macOS and FreeBSD.
 
 ## Recent files
 File > Open Recent lists the last 10 projects you opened or saved. The list is stored in `recent.txt` in your config folder (APPDATA\BlendCraft on Windows, ~/Library/Application Support/BlendCraft on macOS, ~/.config/BlendCraft on Linux).
