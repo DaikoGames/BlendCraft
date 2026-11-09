@@ -1,3 +1,4 @@
+use crate::shader_graph::ShaderGraph;
 use serde::{Deserialize, Serialize};
 
 /// glTF-style metallic-roughness PBR material. Texture fields index `Scene::textures`.
@@ -25,6 +26,15 @@ pub struct Material {
     pub normal_tex: Option<usize>,
     pub occlusion_tex: Option<usize>,
     pub emissive_tex: Option<usize>,
+    /// Optional node graph for this material (persisted in the project).
+    #[serde(default)]
+    pub shader_graph: Option<ShaderGraph>,
+    /// Displacement scale from graph output (0 = off).
+    #[serde(default)]
+    pub displacement_scale: f32,
+    /// Volume density placeholder from graph (renderer may ignore).
+    #[serde(default)]
+    pub volume_density: f32,
 }
 
 impl Material {
@@ -62,6 +72,9 @@ impl Default for Material {
             normal_tex: None,
             occlusion_tex: None,
             emissive_tex: None,
+            shader_graph: None,
+            displacement_scale: 0.0,
+            volume_density: 0.0,
         }
     }
 }

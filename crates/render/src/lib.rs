@@ -1050,7 +1050,7 @@ fn vs_main(@location(0) pos: vec3<f32>) -> @builtin(position) vec4<f32> {
                 occlusion_query_set: None,
             });
             spass.set_pipeline(&self.shadow_pipeline);
-            spass.set_bind_group(0, &self.global_bg, &[]);
+            spass.set_bind_group(0, &self.shadow_global_bg, &[]);
             for o in &self.objects {
                 spass.set_bind_group(1, &o.model_bg, &[]);
                 spass.set_vertex_buffer(0, o.buffers.vb.slice(..));
@@ -1088,9 +1088,7 @@ fn vs_main(@location(0) pos: vec3<f32>) -> @builtin(position) vec4<f32> {
                 pass.set_pipeline(&self.sky_pipeline);
                 pass.draw(0..3, 0..1);
             }
-            pass.set_pipeline(&self.grid_pipeline);
-            pass.set_vertex_buffer(0, self.grid_vb.slice(..));
-            pass.draw(0..self.grid_count, 0..1);
+            // No ground grid in offline renders.
 
             if s.wireframe != WireMode::Only {
                 for blend in [false, true] {

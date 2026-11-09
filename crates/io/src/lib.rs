@@ -79,6 +79,9 @@ fn convert_material(m: &gltf::Material) -> Material {
         normal_tex: m.normal_texture().map(|t| t.texture().source().index()),
         occlusion_tex: m.occlusion_texture().map(|t| t.texture().source().index()),
         emissive_tex: tex(m.emissive_texture()),
+        shader_graph: None,
+        displacement_scale: 0.0,
+        volume_density: 0.0,
     }
 }
 

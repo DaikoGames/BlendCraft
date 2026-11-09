@@ -2027,6 +2027,7 @@ impl App {
             A::ExposureUp => self.settings.exposure = (self.settings.exposure * 1.15).min(20.0),
             A::EnvRotate(d) => self.settings.env_rotation += 0.1 * d as f32,
             A::RenderImage => self.render_image(),
+            A::RenderAnimation => self.render_animation(),
 
             A::ToggleShortcuts => self.ui.show_shortcuts = !self.ui.show_shortcuts,
             A::ShowAbout => self.ui.show_about = true,
@@ -2352,10 +2353,10 @@ impl App {
         }
         #[cfg(not(target_arch = "wasm32"))]
         {
-            let Some(g) = self.gfx.as_mut() else {
+            if self.gfx.is_none() {
                 self.status("Renderer not ready");
                 return;
-            };
+            }
             let Some(mut path) = rfd::FileDialog::new()
                 .add_filter("PNG image", &["png"])
                 .set_file_name("render.png")
@@ -2366,19 +2367,89 @@ impl App {
             if path.extension().is_none() {
                 path.set_extension("png");
             }
+            // Clamp to a sane offscreen resolution. Using the raw viewport size
+            // (which can be huge on HiDPI) previously exhausted GPU memory / stalled
+            // map_async and made the app appear to freeze randomly.
             let (w, h) = (
-                self.viewport[2].max(64.0) as u32,
-                self.viewport[3].max(64.0) as u32,
+                (self.viewport[2].max(64.0) as u32).clamp(64, 3840),
+                (self.viewport[3].max(64.0) as u32).clamp(64, 2160),
             );
-            match g.renderer.capture(&self.camera, &self.settings, w, h) {
+            let cam = self.camera.clone();
+            let settings = self.settings.clone();
+            let result = {
+                let g = self.gfx.as_mut().unwrap();
+                g.renderer.capture(&cam, &settings, w, h)
+            };
+            match result {
                 Ok(rgba) => {
-                    if let Err(e) = image::save_buffer(&path, &rgba, w, h, image::ColorType::Rgba8) {
-                        self.status(&format!("Render failed: {e}"));
-                    } else {
-                        self.status(&format!("Saved render to {}", path.display()));
+                    if rgba.len() < (w as usize).saturating_mul(h as usize).saturating_mul(4) {
+                        self.status("Render failed: incomplete pixel buffer");
+                        return;
+                    }
+                    match image::save_buffer(&path, &rgba, w, h, image::ColorType::Rgba8) {
+                        Ok(()) => self.status(&format!("Saved render to {}", path.display())),
+                        Err(e) => self.status(&format!("Render failed: {e}")),
                     }
                 }
                 Err(e) => self.status(&format!("Render failed: {e}")),
+            }
+        }
+    }
+
+    fn render_animation(&mut self) {
+        #[cfg(target_arch = "wasm32")]
+        {
+            self.status("Render Animation is not available on WebAssembly yet".to_string());
+            return;
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let Some(dir) = rfd::FileDialog::new().set_title("Choose folder for frame sequence").pick_folder() else {
+                return;
+            };
+            if self.gfx.is_none() {
+                self.status("Renderer not ready");
+                return;
+            }
+            // Simple turntable: 36 frames, full 360° orbit around the current target.
+            let frames = 36u32;
+            let (w, h) = (
+                (self.viewport[2].max(64.0) as u32).clamp(64, 1920),
+                (self.viewport[3].max(64.0) as u32).clamp(64, 1080),
+            );
+            let original_yaw = self.camera.yaw;
+            let mut ok = 0u32;
+            let mut err_msg: Option<String> = None;
+            for i in 0..frames {
+                let t = i as f32 / frames as f32;
+                self.camera.yaw = original_yaw + t * std::f32::consts::TAU;
+                let cam = self.camera.clone();
+                let settings = self.settings.clone();
+                let result = {
+                    let g = self.gfx.as_mut().unwrap();
+                    g.renderer.capture(&cam, &settings, w, h)
+                };
+                match result {
+                    Ok(rgba) => {
+                        let path = dir.join(format!("frame_{:04}.png", i));
+                        if image::save_buffer(&path, &rgba, w, h, image::ColorType::Rgba8).is_ok() {
+                            ok += 1;
+                        }
+                    }
+                    Err(e) => {
+                        err_msg = Some(format!("Animation render failed at frame {i}: {e}"));
+                        break;
+                    }
+                }
+            }
+            self.camera.yaw = original_yaw;
+            if let Some(msg) = err_msg {
+                self.status(msg);
+            } else {
+                self.status(format!(
+                    "Rendered {ok}/{frames} frames ({w}×{h}) to {}",
+                    dir.display()
+                ));
             }
         }
     }
