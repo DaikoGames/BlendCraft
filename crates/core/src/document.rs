@@ -60,6 +60,12 @@ pub struct Document {
     pub armature_edit: bool,
     /// Sculpt Mode on the active mesh.
     pub sculpt_mode: bool,
+    /// UV Editing Mode.
+    pub uv_mode: bool,
+    /// Texture Paint Mode.
+    pub paint_mode: bool,
+    /// Selected vertex indices for UV editing.
+    pub uv_selection: std::collections::BTreeSet<u32>,
     rng: u32,
     undo: Vec<UndoSnap>,
     redo: Vec<UndoSnap>,
@@ -122,6 +128,9 @@ impl Document {
             edit: None,
             armature_edit: false,
             sculpt_mode: false,
+            uv_mode: false,
+            paint_mode: false,
+            uv_selection: std::collections::BTreeSet::new(),
             rng: 0x9E37_79B9,
             undo: Vec::new(),
             redo: Vec::new(),
@@ -1063,6 +1072,413 @@ impl Document {
     // ------------------------------------------------------------------ Edit Mode
     pub fn in_edit_mode(&self) -> bool {
         self.edit.is_some() || self.armature_edit
+    }
+
+
+
+    pub fn enter_paint_mode(&mut self) -> Result<(), String> {
+        if self.paint_mode {
+            return Ok(());
+        }
+        if self.edit.is_some() {
+            self.exit_edit_mode(true);
+        }
+        if self.sculpt_mode {
+            self.exit_sculpt_mode();
+        }
+        if self.uv_mode {
+            self.exit_uv_mode();
+        }
+        self.armature_edit = false;
+        let id = self.active.or_else(|| self.selection.iter().copied().next())
+            .ok_or_else(|| "Select a mesh object first".to_string())?;
+        let obj = self.scene.objects.iter().find(|o| o.id == id)
+            .ok_or_else(|| "Object not found".to_string())?;
+        if !matches!(obj.kind, crate::ObjectKind::Mesh) {
+            return Err("Only mesh objects support Texture Paint".into());
+        }
+        let has_usable_uvs = !obj.mesh.vertices.is_empty() && obj.mesh.vertices.iter().all(|v| {
+            v.uv.iter().all(|c| c.is_finite())
+        }) && obj.mesh.indices.len() >= 3 && {
+            let mut min = glam::Vec2::splat(f32::INFINITY);
+            let mut max = glam::Vec2::splat(f32::NEG_INFINITY);
+            for vertex in &obj.mesh.vertices {
+                let uv = glam::Vec2::from(vertex.uv);
+                if uv.is_finite() { min = min.min(uv); max = max.max(uv); }
+            }
+            (max - min).length_squared() > 1.0e-10
+        };
+        if !has_usable_uvs {
+            return Err("This mesh has no usable UV map. Unwrap it in UV Editing before painting.".into());
+        }
+        self.checkpoint();
+        self.selection.clear();
+        self.selection.insert(id);
+        self.active = Some(id);
+        self.ensure_paint_texture()?;
+        self.paint_mode = true;
+        Ok(())
+    }
+
+    pub fn exit_paint_mode(&mut self) {
+        self.paint_mode = false;
+    }
+
+    pub fn toggle_paint_mode(&mut self) -> Result<(), String> {
+        if self.paint_mode {
+            self.exit_paint_mode();
+            Ok(())
+        } else {
+            self.enter_paint_mode()
+        }
+    }
+
+    /// Ensure active object material has a base color texture to paint into.
+    pub fn ensure_paint_texture(&mut self) -> Result<(), String> {
+        let id = self.active.ok_or_else(|| "No active object".to_string())?;
+        let obj = self.scene.objects.iter().find(|o| o.id == id)
+            .ok_or_else(|| "Object not found".to_string())?;
+        let mat_idx = obj.material.unwrap_or(0);
+        // Need mutable scene textures + materials
+        let has_tex = self.scene.materials.get(mat_idx)
+            .and_then(|m| m.base_color_tex)
+            .and_then(|texture_index| self.scene.textures.get(texture_index))
+            .is_some();
+        if has_tex {
+            return Ok(());
+        }
+        // Create a new paintable texture
+        let w = 512u32;
+        let h = 512u32;
+        let mut rgba = vec![0u8; (w * h * 4) as usize];
+        // Light gray fill with subtle checker so paint is visible
+        for y in 0..h {
+            for x in 0..w {
+                let i = ((y * w + x) * 4) as usize;
+                let c = if ((x / 32) + (y / 32)) % 2 == 0 { 200 } else { 180 };
+                rgba[i] = c;
+                rgba[i + 1] = c;
+                rgba[i + 2] = c;
+                rgba[i + 3] = 255;
+            }
+        }
+        let tex = crate::TextureData {
+            name: "Paint Atlas".into(),
+            width: w,
+            height: h,
+            rgba8: rgba,
+        };
+        let mut textures = (*self.scene.textures).clone();
+        let tex_idx = textures.len();
+        textures.push(tex);
+        self.scene.textures = std::sync::Arc::new(textures);
+        // Assign to material
+        if self.scene.materials.is_empty() {
+            self.scene.materials.push(crate::Material::default());
+        }
+        let mi = mat_idx.min(self.scene.materials.len() - 1);
+        self.scene.materials[mi].base_color_tex = Some(tex_idx);
+        // Point object at that material
+        if let Some(obj) = self.scene.objects.iter_mut().find(|o| o.id == id) {
+            obj.material = Some(mi);
+        }
+        self.version = self.version.wrapping_add(1);
+        self.dirty = true;
+        Ok(())
+    }
+
+    /// Paint one soft brush stamp at UV (0..1).
+    pub fn paint_at_uv(&mut self, uv: glam::Vec2, color: [f32; 4], radius_uv: f32, strength: f32) -> bool {
+        self.paint_stroke_uv(&[uv], color, radius_uv, strength)
+    }
+
+    /// Paint a sequence of UV samples as one image update. Keeping the texture clone
+    /// outside the sample loop avoids a full image copy and GPU re-upload per dab.
+    pub fn paint_stroke_uv(&mut self, uvs: &[glam::Vec2], color: [f32; 4], radius_uv: f32, strength: f32) -> bool {
+        if uvs.is_empty() { return false; }
+        let id = match self.active { Some(i) => i, None => return false };
+        let mat_idx = self.scene.objects.iter().find(|o| o.id == id)
+            .and_then(|o| o.material).unwrap_or(0);
+        let tex_idx = match self.scene.materials.get(mat_idx).and_then(|m| m.base_color_tex) {
+            Some(t) => t,
+            None => return false,
+        };
+        let mut textures = (*self.scene.textures).clone();
+        let Some(tex) = textures.get_mut(tex_idx) else { return false };
+        let (w, h) = (tex.width as i32, tex.height as i32);
+        if w < 1 || h < 1 || tex.rgba8.len() != (w as usize * h as usize * 4) { return false; }
+
+        let radius_uv = radius_uv.clamp(0.0001, 1.0);
+        let radius_px = (radius_uv * w.min(h) as f32).max(1.0);
+        let radius_i = radius_px.ceil() as i32;
+        let strength = strength.clamp(0.0, 1.0);
+        let src = [
+            (color[0].clamp(0.0, 1.0) * 255.0).round() as u8,
+            (color[1].clamp(0.0, 1.0) * 255.0).round() as u8,
+            (color[2].clamp(0.0, 1.0) * 255.0).round() as u8,
+            (color[3].clamp(0.0, 1.0) * 255.0).round() as u8,
+        ];
+        let mut changed = false;
+        for uv in uvs {
+            // UVs outside the active image are not painted (no accidental edge smearing).
+            if !uv.is_finite() || uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0 { continue; }
+            let cx = uv.x * (w - 1) as f32;
+            let cy = uv.y * (h - 1) as f32;
+            let x0 = (cx.floor() as i32 - radius_i).max(0);
+            let y0 = (cy.floor() as i32 - radius_i).max(0);
+            let x1 = (cx.ceil() as i32 + radius_i).min(w - 1);
+            let y1 = (cy.ceil() as i32 + radius_i).min(h - 1);
+            for y in y0..=y1 {
+                for x in x0..=x1 {
+                    let dx = x as f32 - cx;
+                    let dy = y as f32 - cy;
+                    let d = (dx * dx + dy * dy).sqrt();
+                    if d > radius_px { continue; }
+                    let t = (1.0 - d / radius_px).clamp(0.0, 1.0);
+                    let falloff = t * t * (3.0 - 2.0 * t);
+                    let alpha = (falloff * strength * (src[3] as f32 / 255.0)).clamp(0.0, 1.0);
+                    if alpha <= 0.0 { continue; }
+                    let i = ((y * w + x) * 4) as usize;
+                    for channel in 0..3 {
+                        let dst = tex.rgba8[i + channel] as f32;
+                        tex.rgba8[i + channel] = (dst * (1.0 - alpha) + src[channel] as f32 * alpha)
+                            .round().clamp(0.0, 255.0) as u8;
+                    }
+                    tex.rgba8[i + 3] = (tex.rgba8[i + 3] as f32 * (1.0 - alpha) + 255.0 * alpha)
+                        .round().clamp(0.0, 255.0) as u8;
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            self.scene.textures = std::sync::Arc::new(textures);
+            self.version = self.version.wrapping_add(1);
+            self.dirty = true;
+        }
+        changed
+    }
+
+    pub fn enter_uv_mode(&mut self) -> Result<(), String> {
+        if self.uv_mode {
+            return Ok(());
+        }
+        if self.sculpt_mode {
+            self.exit_sculpt_mode();
+        }
+        self.armature_edit = false;
+        let id = self.active.or_else(|| self.selection.iter().copied().next())
+            .ok_or_else(|| "Select a mesh object first".to_string())?;
+        let obj = self.scene.objects.iter().find(|o| o.id == id)
+            .ok_or_else(|| "Object not found".to_string())?;
+        if !matches!(obj.kind, crate::ObjectKind::Mesh) {
+            return Err("Only mesh objects can enter UV Editing".into());
+        }
+        self.checkpoint();
+        self.selection.clear();
+        self.selection.insert(id);
+        self.active = Some(id);
+        // UV workspace uses Edit Mode on the 3D side (like Blender)
+        if self.edit.is_none() {
+            if let Err(e) = self.enter_edit_mode() {
+                return Err(e);
+            }
+        }
+        self.uv_selection.clear();
+        self.uv_mode = true;
+        Ok(())
+    }
+
+    pub fn exit_uv_mode(&mut self) {
+        self.uv_mode = false;
+        self.uv_selection.clear();
+        // Leave Edit Mode when leaving UV workspace
+        if self.edit.is_some() {
+            self.exit_edit_mode(true);
+        }
+    }
+
+    pub fn toggle_uv_mode(&mut self) -> Result<(), String> {
+        if self.uv_mode {
+            self.exit_uv_mode();
+            Ok(())
+        } else {
+            self.enter_uv_mode()
+        }
+    }
+
+    fn active_mesh_mut(&mut self) -> Option<&mut crate::MeshData> {
+        // Prefer live Edit Mode mesh so UV ops stay in sync with the 3D edit view
+        if self.edit.is_some() {
+            return self.edit.as_mut().map(|e| &mut e.mesh);
+        }
+        let id = self.active?;
+        let obj = self.scene.objects.iter_mut().find(|o| o.id == id)?;
+        let mesh = std::sync::Arc::make_mut(&mut obj.mesh);
+        obj.primitive = None;
+        Some(mesh)
+    }
+
+    fn after_uv_mesh_edit(&mut self) {
+        // Push edit-session mesh back to the scene object and rebuild selection indices
+        if let Some(session) = self.edit.as_mut() {
+            let id = session.object_id;
+            // Topology may have changed (split faces) — clear stale selection
+            session.selection.clear();
+            let mesh = session.mesh.clone();
+            if let Some(obj) = self.scene.objects.iter_mut().find(|o| o.id == id) {
+                obj.mesh = std::sync::Arc::new(mesh);
+                obj.primitive = None;
+            }
+        } else if let Some(id) = self.active {
+            // Already wrote through active_mesh_mut to object
+            let _ = id;
+        }
+        self.uv_selection.clear();
+        self.version = self.version.wrapping_add(1);
+        self.dirty = true;
+    }
+
+    pub fn uv_unwrap_smart(&mut self) {
+        self.checkpoint();
+        if let Some(m) = self.active_mesh_mut() {
+            crate::unwrap_smart(m);
+        }
+        self.after_uv_mesh_edit();
+    }
+    pub fn uv_unwrap_cube(&mut self) {
+        self.checkpoint();
+        if let Some(m) = self.active_mesh_mut() {
+            crate::unwrap_cube(m);
+        }
+        self.after_uv_mesh_edit();
+    }
+    pub fn uv_unwrap_planar(&mut self) {
+        self.checkpoint();
+        if let Some(m) = self.active_mesh_mut() {
+            crate::unwrap_planar(m);
+        }
+        self.after_uv_mesh_edit();
+    }
+    pub fn uv_unwrap_reset(&mut self) {
+        self.checkpoint();
+        if let Some(m) = self.active_mesh_mut() {
+            crate::unwrap_reset(m);
+        }
+        self.after_uv_mesh_edit();
+    }
+    pub fn uv_pack(&mut self) {
+        self.checkpoint();
+        if let Some(m) = self.active_mesh_mut() {
+            crate::pack_islands(m, 0.02);
+        }
+        self.after_uv_mesh_edit();
+    }
+    /// Apply a UV transform during an active pointer drag without creating one
+    /// undo entry per frame. The live edit mesh and scene copy stay synchronized.
+    fn sync_uv_drag_mesh(&mut self) {
+        if let Some(session) = self.edit.as_ref() {
+            let id = session.object_id;
+            let mesh = session.mesh.clone();
+            if let Some(obj) = self.scene.objects.iter_mut().find(|o| o.id == id) {
+                obj.mesh = std::sync::Arc::new(mesh);
+                obj.primitive = None;
+            }
+        }
+        self.version = self.version.wrapping_add(1);
+        self.dirty = true;
+    }
+
+    pub fn uv_translate_live(&mut self, dx: f32, dy: f32) {
+        let selected = self.uv_selection.clone();
+        if selected.is_empty() { return; }
+        if let Some(mesh) = self.active_mesh_mut() {
+            crate::uv_translate(mesh, &selected, glam::Vec2::new(dx, dy));
+        }
+        self.sync_uv_drag_mesh();
+    }
+
+    pub fn uv_scale_live(&mut self, factor: f32) {
+        let selected = self.uv_selection.clone();
+        if selected.is_empty() { return; }
+        let pivot = if let Some(session) = self.edit.as_ref() {
+            crate::uv_selection_center(&session.mesh, &selected)
+        } else if let Some(id) = self.active {
+            self.scene.objects.iter().find(|o| o.id == id)
+                .map(|o| crate::uv_selection_center(&o.mesh, &selected))
+                .unwrap_or(glam::Vec2::splat(0.5))
+        } else { glam::Vec2::splat(0.5) };
+        if let Some(mesh) = self.active_mesh_mut() {
+            crate::uv_scale(mesh, &selected, pivot, factor);
+        }
+        self.sync_uv_drag_mesh();
+    }
+
+    pub fn uv_rotate_live(&mut self, angle: f32) {
+        let selected = self.uv_selection.clone();
+        if selected.is_empty() { return; }
+        let pivot = if let Some(session) = self.edit.as_ref() {
+            crate::uv_selection_center(&session.mesh, &selected)
+        } else if let Some(id) = self.active {
+            self.scene.objects.iter().find(|o| o.id == id)
+                .map(|o| crate::uv_selection_center(&o.mesh, &selected))
+                .unwrap_or(glam::Vec2::splat(0.5))
+        } else { glam::Vec2::splat(0.5) };
+        if let Some(mesh) = self.active_mesh_mut() {
+            crate::uv_rotate(mesh, &selected, pivot, angle);
+        }
+        self.sync_uv_drag_mesh();
+    }
+
+    pub fn uv_translate(&mut self, dx: f32, dy: f32) {
+        if self.uv_selection.is_empty() {
+            return;
+        }
+        let sel = self.uv_selection.clone();
+        if let Some(m) = self.active_mesh_mut() {
+            crate::uv_translate(m, &sel, glam::Vec2::new(dx, dy));
+        }
+        self.after_uv_mesh_edit();
+    }
+    pub fn uv_scale_sel(&mut self, factor: f32) {
+        if self.uv_selection.is_empty() {
+            return;
+        }
+        let sel = self.uv_selection.clone();
+        let pivot = {
+            let id = self.active;
+            let obj = self.scene.objects.iter().find(|o| Some(o.id) == id);
+            obj.map(|o| crate::uv_selection_center(&o.mesh, &sel))
+                .unwrap_or(glam::Vec2::splat(0.5))
+        };
+        if let Some(m) = self.active_mesh_mut() {
+            crate::uv_scale(m, &sel, pivot, factor);
+        }
+        self.after_uv_mesh_edit();
+    }
+    pub fn uv_rotate_sel(&mut self, angle: f32) {
+        if self.uv_selection.is_empty() {
+            return;
+        }
+        let sel = self.uv_selection.clone();
+        let pivot = {
+            let id = self.active;
+            let obj = self.scene.objects.iter().find(|o| Some(o.id) == id);
+            obj.map(|o| crate::uv_selection_center(&o.mesh, &sel))
+                .unwrap_or(glam::Vec2::splat(0.5))
+        };
+        if let Some(m) = self.active_mesh_mut() {
+            crate::uv_rotate(m, &sel, pivot, angle);
+        }
+        self.after_uv_mesh_edit();
+    }
+    pub fn uv_select_all(&mut self) {
+        let id = self.active;
+        if let Some(obj) = self.scene.objects.iter().find(|o| Some(o.id) == id) {
+            self.uv_selection = (0..obj.mesh.vertices.len() as u32).collect();
+        }
+    }
+    pub fn uv_select_none(&mut self) {
+        self.uv_selection.clear();
     }
 
     pub fn enter_sculpt_mode(&mut self) -> Result<(), String> {

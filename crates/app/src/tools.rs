@@ -50,6 +50,19 @@ pub enum Tool {
     SculptSnakeHook,
     SculptNudge,
     SculptThumb,
+    // UV Editing
+    UvSelect,
+    UvMove,
+    UvRotate,
+    UvScale,
+    UvUnwrapSmart,
+    UvUnwrapCube,
+    UvUnwrapPlanar,
+    UvReset,
+    UvPack,
+    // Texture Paint
+    PaintBrush,
+    PaintErase,
 }
 
 impl Tool {
@@ -69,6 +82,23 @@ impl Tool {
     ];
 
     /// Tools shown in Edit Mode (left toolbar) – matches the Blender list you provided
+    pub const PAINT_MODE: [Tool; 2] = [
+        Tool::PaintBrush,
+        Tool::PaintErase,
+    ];
+
+    pub const UV_MODE: [Tool; 9] = [
+        Tool::UvSelect,
+        Tool::UvMove,
+        Tool::UvRotate,
+        Tool::UvScale,
+        Tool::UvUnwrapSmart,
+        Tool::UvUnwrapCube,
+        Tool::UvUnwrapPlanar,
+        Tool::UvReset,
+        Tool::UvPack,
+    ];
+
     pub const SCULPT_MODE: [Tool; 17] = [
         Tool::SculptDraw,
         Tool::SculptDrawSharp,
@@ -183,6 +213,17 @@ impl Tool {
             Tool::SculptSnakeHook => "Snake Hook",
             Tool::SculptNudge => "Nudge",
             Tool::SculptThumb => "Thumb",
+            Tool::UvSelect => "Select",
+            Tool::UvMove => "Move",
+            Tool::UvRotate => "Rotate",
+            Tool::UvScale => "Scale",
+            Tool::UvUnwrapSmart => "Smart UV Project",
+            Tool::UvUnwrapCube => "Cube Projection",
+            Tool::UvUnwrapPlanar => "Project from View",
+            Tool::UvReset => "Reset",
+            Tool::UvPack => "Pack Islands",
+            Tool::PaintBrush => "Draw",
+            Tool::PaintErase => "Erase",
         }
     }
 
@@ -230,6 +271,17 @@ impl Tool {
             Tool::SculptSnakeHook => "Snk",
             Tool::SculptNudge => "Ndg",
             Tool::SculptThumb => "Thm",
+            Tool::UvSelect => "Sel",
+            Tool::UvMove => "Mov",
+            Tool::UvRotate => "Rot",
+            Tool::UvScale => "Scl",
+            Tool::UvUnwrapSmart => "Smrt",
+            Tool::UvUnwrapCube => "Cube",
+            Tool::UvUnwrapPlanar => "View",
+            Tool::UvReset => "Rst",
+            Tool::UvPack => "Pack",
+            Tool::PaintBrush => "Brsh",
+            Tool::PaintErase => "Eras",
         }
     }
 
@@ -277,6 +329,17 @@ impl Tool {
             Tool::SculptSnakeHook => "Snake Hook – pull along stroke",
             Tool::SculptNudge => "Nudge – slide along stroke",
             Tool::SculptThumb => "Thumb – flatten + slide",
+            Tool::UvSelect => "Select UVs",
+            Tool::UvMove => "Move UVs (G)",
+            Tool::UvRotate => "Rotate UVs (R)",
+            Tool::UvScale => "Scale UVs (S)",
+            Tool::UvUnwrapSmart => "Smart UV Project",
+            Tool::UvUnwrapCube => "Cube Projection",
+            Tool::UvUnwrapPlanar => "Planar Project",
+            Tool::UvReset => "Reset UVs per face",
+            Tool::UvPack => "Pack Islands",
+            Tool::PaintBrush => "Draw",
+            Tool::PaintErase => "Erase",
         }
     }
 
@@ -362,6 +425,10 @@ pub struct ToolState {
     pub orient: Orientation,
     pub snap: SnapSettings,
     pub circle_radius: f32,
+    /// Texture Paint brush settings shared with the properties panel.
+    pub paint_color: [f32; 4],
+    pub paint_radius: f32,
+    pub paint_strength: f32,
 }
 
 impl Default for ToolState {
@@ -372,6 +439,9 @@ impl Default for ToolState {
             orient: Orientation::Global,
             snap: SnapSettings::default(),
             circle_radius: 40.0,
+            paint_color: [0.2, 0.45, 0.9, 1.0],
+            paint_radius: 0.04,
+            paint_strength: 0.85,
         }
     }
 }

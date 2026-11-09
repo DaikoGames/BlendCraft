@@ -68,6 +68,39 @@ impl MeshData {
         MeshData { name: self.name.clone(), vertices, indices, groups: self.groups.clone() }
     }
 
+    /// Reconstruct quad faces from pairs of consistently wound, coplanar
+    /// render triangles. The GPU/index buffer remains triangulated, while
+    /// modeling and UV tools can reason about the original four-sided face.
+    /// Triangles with a boundary edge, a non-manifold edge, or a sharp fold
+    /// are deliberately left as triangles.
+    pub fn quad_faces(&self) -> Vec<[u32; 4]> {
+        let mut edge_owners: HashMap<(u32, u32), Vec<(usize, u32, u32, u32)>> = HashMap::new();
+        for (face, tri) in self.indices.chunks_exact(3).enumerate() {
+            let [a, b, c] = [tri[0], tri[1], tri[2]];
+            for (from, to, other) in [(a, b, c), (b, c, a), (c, a, b)] {
+                let edge = if from < to { (from, to) } else { (to, from) };
+                edge_owners.entry(edge).or_default().push((face, from, to, other));
+            }
+        }
+        let mut paired = std::collections::HashSet::new();
+        let mut quads = Vec::new();
+        for owners in edge_owners.values() {
+            if owners.len() != 2 { continue; }
+            let (f0, a0, b0, x) = owners[0];
+            let (f1, a1, b1, y) = owners[1];
+            if f0 == f1 || a0 != b1 || b0 != a1 { continue; }
+            if !paired.insert((f0.min(f1), f0.max(f1))) { continue; }
+            let p = |i: u32| Vec3::from(self.vertices[i as usize].position);
+            let n0 = (p(b0) - p(a0)).cross(p(x) - p(a0)).normalize_or_zero();
+            let n1 = (p(a1) - p(b1)).cross(p(y) - p(b1)).normalize_or_zero();
+            if n0.dot(n1) < 0.999 { continue; }
+            // Boundary order: first triangle's outer corner, shared edge,
+            // second triangle's outer corner, then the other shared corner.
+            quads.push([x, a0, y, b0]);
+        }
+        quads
+    }
+
     pub fn bounds(&self) -> Option<Aabb> {
         let mut it = self.vertices.iter().map(|v| Vec3::from(v.position));
         let first = it.next()?;
@@ -343,5 +376,19 @@ impl MeshData {
                 (mat, self.subset(&tris, &None, name))
             })
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod quad_tests {
+    use super::*;
+
+    #[test]
+    fn plane_render_triangles_reconstruct_one_quad() {
+        let mesh = crate::primitives::plane(2.0);
+        let quads = mesh.quad_faces();
+        assert_eq!(quads.len(), 1);
+        let unique: std::collections::HashSet<u32> = quads[0].into_iter().collect();
+        assert_eq!(unique.len(), 4);
     }
 }

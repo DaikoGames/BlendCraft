@@ -10,6 +10,7 @@ use forge_core::{font_registry, free_font_catalog, TextFont,
 use forge_render::{ShadingMode, ViewSettings, WireMode};
 use glam::{EulerRot, Quat, Vec3};
 use std::sync::Arc;
+use std::collections::HashMap;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Rename {
@@ -31,7 +32,41 @@ pub struct UiState {
     pub renaming: Option<Rename>,
     pub rename_buf: String,
     pub rename_focus: bool,
+    /// Persistent egui handles for the 2D Texture Paint canvas. Keep handles alive
+    /// across workspace switches so wgpu never submits a frame with a freed texture.
+    pub paint_previews: HashMap<(usize, u32, u32), egui::TextureHandle>,
+    pub paint_preview_versions: HashMap<(usize, u32, u32), u64>,
+    pub paint_canvas_last_uv: Option<glam::Vec2>,
+    /// Shading workspace visibility and editable node-graph session state.
+    pub shading_mode: bool,
+    pub shader_nodes: Vec<ShaderNode>,
+    pub shader_links: Vec<ShaderLink>,
+    pub shader_next_id: u64,
+    pub shader_socket_pick: Option<(u64, bool)>,
+    pub shader_rgb_color: [u8; 4],
+    pub shader_image_index: Option<usize>,
 }
+
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ShaderNodeKind { Output, Principled, ImageTexture, Rgb, TexCoord }
+
+impl ShaderNodeKind {
+    fn title(self) -> &'static str {
+        match self { Self::Output => "Material Output", Self::Principled => "Principled BSDF", Self::ImageTexture => "Image Texture", Self::Rgb => "RGB", Self::TexCoord => "Texture Coordinate" }
+    }
+    fn output_name(self) -> &'static str {
+        match self { Self::Output => "", Self::Principled => "BSDF", Self::ImageTexture => "Color", Self::Rgb => "Color", Self::TexCoord => "UV" }
+    }
+    fn input_name(self) -> &'static str {
+        match self { Self::Output => "Surface", Self::Principled => "Base Color", Self::ImageTexture => "Vector", Self::Rgb => "", Self::TexCoord => "" }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct ShaderNode { pub id: u64, pub kind: ShaderNodeKind }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ShaderLink { pub from: u64, pub to: u64 }
 
 // ------------------------------------------------------------------ helpers
 /// Records one undo step per continuous edit (drag / typing / click), then applies it.
@@ -148,16 +183,24 @@ pub fn draw(
 
             // Mode selector (Blender style)
             let in_sculpt = doc.sculpt_mode;
-            if ui.add_enabled(mesh_ok || in_edit || in_sculpt, egui::SelectableLabel::new(!in_edit && !in_sculpt, "Object Mode")).clicked() {
+            if ui.add_enabled(mesh_ok || in_edit || in_sculpt || doc.uv_mode || doc.paint_mode, egui::SelectableLabel::new(!in_edit && !in_sculpt && !doc.uv_mode && !doc.paint_mode && !st.shading_mode, "Object Mode")).clicked() {
+                st.shading_mode = false;
                 if in_edit {
                     actions.push(Action::ToggleEditMode);
                 }
                 if in_sculpt {
                     actions.push(Action::ToggleSculptMode);
                 }
+                if doc.uv_mode {
+                    actions.push(Action::ToggleUvMode);
+                }
+                if doc.paint_mode {
+                    actions.push(Action::TogglePaintMode);
+                }
             }
             let edit_label = if doc.armature_edit { "Armature Edit" } else { "Edit Mode" };
             if ui.add_enabled(mesh_ok || in_edit || doc.active_armature().is_some(), egui::SelectableLabel::new(in_edit, edit_label)).clicked() {
+                st.shading_mode = false;
                 if in_sculpt {
                     actions.push(Action::ToggleSculptMode);
                 }
@@ -166,11 +209,49 @@ pub fn draw(
                 }
             }
             if ui.add_enabled(mesh_ok || in_sculpt, egui::SelectableLabel::new(in_sculpt, "Sculpt Mode")).clicked() {
+                st.shading_mode = false;
                 if in_edit {
                     actions.push(Action::ToggleEditMode);
                 }
+                if doc.uv_mode {
+                    actions.push(Action::ToggleUvMode);
+                }
                 if !in_sculpt {
                     actions.push(Action::ToggleSculptMode);
+                }
+            }
+            let in_uv = doc.uv_mode;
+            if ui.add_enabled(mesh_ok || in_uv, egui::SelectableLabel::new(in_uv, "UV Editing")).clicked() {
+                st.shading_mode = false;
+                if in_edit {
+                    actions.push(Action::ToggleEditMode);
+                }
+                if in_sculpt {
+                    actions.push(Action::ToggleSculptMode);
+                }
+                if doc.paint_mode {
+                    actions.push(Action::TogglePaintMode);
+                }
+                if !in_uv {
+                    actions.push(Action::ToggleUvMode);
+                }
+            }
+            let in_paint = doc.paint_mode;
+            if ui.add_enabled(mesh_ok || in_paint, egui::SelectableLabel::new(in_paint, "Texture Paint")).clicked() {
+                if in_edit { actions.push(Action::ToggleEditMode); }
+                if in_sculpt { actions.push(Action::ToggleSculptMode); }
+                if in_uv { actions.push(Action::ToggleUvMode); }
+                if !in_paint { actions.push(Action::TogglePaintMode); }
+                st.shading_mode = false;
+            }
+            if ui.selectable_label(st.shading_mode, "Shading").clicked() {
+                st.shading_mode = !st.shading_mode;
+                if st.shading_mode {
+                    if in_edit { actions.push(Action::ToggleEditMode); }
+                    if in_sculpt { actions.push(Action::ToggleSculptMode); }
+                    if in_uv { actions.push(Action::ToggleUvMode); }
+                    if in_paint { actions.push(Action::TogglePaintMode); }
+                    ensure_shader_nodes(st);
                 }
             }
 
@@ -223,7 +304,7 @@ pub fn draw(
         });
     });
 
-    // Left: Toolbar – drawn icons, screen-aware height, scroll if needed
+        // Left: Toolbar – drawn icons, screen-aware height, scroll if needed
     let screen_h = ctx.screen_rect().height();
     let toolbar_w = if screen_h < 700.0 { 36.0 } else { 40.0 };
     let btn = if screen_h < 700.0 { 26.0 } else { 30.0 };
@@ -238,7 +319,11 @@ pub fn draw(
                 .show(ui, |ui| {
                     ui.vertical_centered(|ui| {
                         ui.add_space(3.0);
-                        let tools = if doc.sculpt_mode {
+                        let tools = if doc.paint_mode {
+                            &Tool::PAINT_MODE[..]
+                        } else if doc.uv_mode {
+                            &Tool::UV_MODE[..]
+                        } else if doc.sculpt_mode {
                             &Tool::SCULPT_MODE[..]
                         } else if doc.in_edit_mode() {
                             &Tool::EDIT_MODE[..]
@@ -275,6 +360,11 @@ pub fn draw(
                                         actions.push(Action::Add(forge_core::Primitive::Cube { size: 1.0 }));
                                     }
                                     Tool::Cursor => actions.push(Action::SnapCursorToSel),
+                                    Tool::UvUnwrapSmart => actions.push(Action::UvUnwrapSmart),
+                                    Tool::UvUnwrapCube => actions.push(Action::UvUnwrapCube),
+                                    Tool::UvUnwrapPlanar => actions.push(Action::UvUnwrapPlanar),
+                                    Tool::UvReset => actions.push(Action::UvReset),
+                                    Tool::UvPack => actions.push(Action::UvPack),
                                     Tool::ExtrudeRegion
                                     | Tool::InsetFaces
                                     | Tool::Bevel
@@ -302,27 +392,65 @@ pub fn draw(
                 });
         });
 
-    // Right: Outliner (top) + Properties (bottom) – Blender default arrangement
-    egui::SidePanel::right("right_panel")
-    .default_width(300.0)
-    .width_range(220.0..=480.0)
-    .show(ctx, |ui| {
-        // Outliner takes the upper part and is resizable
-        egui::TopBottomPanel::top("outliner_panel")
+    // UV Editing workspace (Blender-style):
+    // LEFT = UV Editor · RIGHT/CENTER = 3D Edit view (Outliner/Properties hidden)
+    if doc.uv_mode {
+        egui::SidePanel::left("uv_editor")
             .resizable(true)
-            .default_height(280.0)
-            .height_range(120.0..=600.0)
-            .show_inside(ui, |ui| {
-                ui.heading("Outliner");
-                ui.separator();
-                outliner(ui, doc, st, &mut actions);
+            .default_width(460.0)
+            .width_range(280.0..=900.0)
+            .frame(egui::Frame::none().fill(egui::Color32::from_rgb(0x2a, 0x2a, 0x2a)))
+            .show(ctx, |ui| {
+                draw_uv_editor(ui, doc, ts, &mut actions);
             });
+    }
 
-        // Properties fill the remaining space
-        ui.heading("Properties");
-        ui.separator();
-        properties(ui, doc, &mut actions);
-    });
+    // Texture Paint workspace: Blender-style split editor.
+    // LEFT = the actual 2D image canvas (with UV overlay); RIGHT = the 3D viewport.
+    if doc.paint_mode {
+        egui::SidePanel::left("texture_paint_image_editor")
+            .resizable(true)
+            .default_width(480.0)
+            .width_range(300.0..=900.0)
+            .frame(egui::Frame::none().fill(egui::Color32::from_rgb(0x2a, 0x2a, 0x2a)))
+            .show(ctx, |ui| {
+                draw_texture_paint_editor(ui, ctx, doc, ts, st, &mut actions);
+            });
+    }
+
+    // Shading workspace: a docked node editor alongside the live 3D viewport.
+    if st.shading_mode {
+        egui::SidePanel::left("shading_node_editor")
+            .resizable(true)
+            .default_width(520.0)
+            .width_range(340.0..=900.0)
+            .frame(egui::Frame::none().fill(egui::Color32::from_rgb(0x25, 0x25, 0x25)))
+            .show(ctx, |ui| { draw_shading_editor(ui, doc, st); });
+    }
+
+    // Outliner + Properties only in the regular Object/Edit/Shading workspaces.
+    if !doc.uv_mode && !doc.paint_mode {
+        egui::SidePanel::right("right_panel")
+            .default_width(300.0)
+            .width_range(220.0..=480.0)
+            .show(ctx, |ui| {
+                egui::TopBottomPanel::top("outliner_panel")
+                    .resizable(true)
+                    .default_height(280.0)
+                    .height_range(120.0..=600.0)
+                    .show_inside(ui, |ui| {
+                        ui.heading("Outliner");
+                        ui.separator();
+                        outliner(ui, doc, st, &mut actions);
+                    });
+
+                ui.heading("Properties");
+                ui.separator();
+                properties(ui, doc, &mut actions);
+            });
+    }
+
+    // Texture Paint uses the 3D viewport as its canvas; no detached editor window.
 
     shortcuts_window(ctx, st, bindings);
     move_popup(ctx, doc, st, &mut actions);
@@ -340,6 +468,552 @@ pub fn draw(
 
 // Helper: draw a Blender-ish tool icon into a rect using egui shapes.
 // Kept in ui.rs as a function.
+
+
+fn ensure_shader_nodes(st: &mut UiState) {
+    if st.shader_rgb_color == [0; 4] { st.shader_rgb_color = [180, 180, 190, 255]; }
+    if st.shader_nodes.is_empty() {
+        st.shader_nodes = vec![
+            ShaderNode { id: 1, kind: ShaderNodeKind::Principled },
+            ShaderNode { id: 2, kind: ShaderNodeKind::Output },
+        ];
+        st.shader_links = vec![ShaderLink { from: 1, to: 2 }];
+        st.shader_next_id = 3;
+    }
+}
+
+fn draw_shading_editor(ui: &mut egui::Ui, doc: &mut Document, st: &mut UiState) {
+    ensure_shader_nodes(st);
+    ui.horizontal(|ui| {
+        ui.heading("Shader Editor");
+        ui.separator();
+        ui.weak("Object Material");
+    });
+    ui.label("Build a material by connecting node outputs to inputs. Changes update the selected object's material live.");
+    ui.separator();
+
+    let Some(object_index) = doc.active_index() else {
+        ui.weak("Select a mesh object to edit its material.");
+        return;
+    };
+    let mut current = doc.scene.objects[object_index].material.filter(|m| *m < doc.scene.materials.len());
+    ui.horizontal(|ui| {
+        let selected = current.map(|m| doc.scene.materials[m].name.clone()).unwrap_or_else(|| "No material".into());
+        egui::ComboBox::from_id_source("shading_material_slot").selected_text(selected).show_ui(ui, |ui| {
+            for (idx, mat) in doc.scene.materials.iter().enumerate() {
+                if ui.selectable_label(current == Some(idx), &mat.name).clicked() { current = Some(idx); }
+            }
+        });
+        if ui.button("+ New").clicked() {
+            doc.checkpoint();
+            let mut mat = Material::default();
+            mat.name = format!("Material.{:03}", doc.scene.materials.len() + 1);
+            doc.scene.materials.push(mat);
+            current = Some(doc.scene.materials.len() - 1);
+            doc.scene.objects[object_index].material = current;
+        }
+    });
+    if doc.scene.objects[object_index].material != current {
+        doc.checkpoint();
+        doc.scene.objects[object_index].material = current;
+    }
+    let Some(mi) = current else {
+        ui.weak("Create a material to start building the shader graph.");
+        return;
+    };
+
+    ui.horizontal(|ui| {
+        ui.label("Add node:");
+        for (label, kind) in [("Principled", ShaderNodeKind::Principled), ("Output", ShaderNodeKind::Output), ("Image", ShaderNodeKind::ImageTexture), ("RGB", ShaderNodeKind::Rgb), ("UV", ShaderNodeKind::TexCoord)] {
+            if ui.small_button(label).clicked() {
+                let id = st.shader_next_id.max(1);
+                st.shader_next_id = id + 1;
+                st.shader_nodes.push(ShaderNode { id, kind });
+            }
+        }
+    });
+    ui.separator();
+    ui.horizontal_wrapped(|ui| {
+        ui.label("Connect:");
+        if let Some((node_id, is_output)) = st.shader_socket_pick {
+            let label = st.shader_nodes.iter().find(|n| n.id == node_id).map(|n| n.kind.title()).unwrap_or("Node");
+            ui.weak(format!("{} {} selected", label, if is_output { "output" } else { "input" }));
+            if ui.small_button("Cancel").clicked() { st.shader_socket_pick = None; }
+        } else {
+            ui.weak("Click an output, then a compatible input.");
+        }
+    });
+
+    egui::ScrollArea::both().auto_shrink([false, false]).show(ui, |ui| {
+        let mut node_rects: Vec<(u64, egui::Rect)> = Vec::new();
+        ui.horizontal_top(|ui| {
+            for node in st.shader_nodes.clone() {
+                let node_response = egui::Frame::group(ui.style()).fill(egui::Color32::from_rgb(0x3b, 0x3b, 0x3b)).show(ui, |ui| {
+                    ui.set_min_width(205.0);
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(node.kind.title()).strong().color(match node.kind {
+                            ShaderNodeKind::Output => egui::Color32::from_rgb(0x8e,0xb8,0x75),
+                            ShaderNodeKind::Principled => egui::Color32::from_rgb(0xd0,0x9a,0x55),
+                            ShaderNodeKind::ImageTexture => egui::Color32::from_rgb(0x68,0xa8,0xc8),
+                            ShaderNodeKind::Rgb => egui::Color32::from_rgb(0xb8,0x78,0xb8),
+                            ShaderNodeKind::TexCoord => egui::Color32::from_rgb(0x78,0xb8,0x9a),
+                        }));
+                        if ui.small_button("×").clicked() {
+                            st.shader_nodes.retain(|n| n.id != node.id);
+                            st.shader_links.retain(|l| l.from != node.id && l.to != node.id);
+                        }
+                    });
+                    ui.separator();
+                    if !node.kind.input_name().is_empty() {
+                        let label = format!("◉ {}", node.kind.input_name());
+                        if ui.small_button(label).clicked() {
+                            if let Some((from, true)) = st.shader_socket_pick {
+                                if from != node.id {
+                                    st.shader_links.retain(|l| l.to != node.id);
+                                    st.shader_links.push(ShaderLink { from, to: node.id });
+                                    if let Some(source) = st.shader_nodes.iter().find(|n| n.id == from) {
+                                        if source.kind == ShaderNodeKind::Rgb && node.kind == ShaderNodeKind::Principled {
+                                            doc.scene.materials[mi].base_color = [srgb8_to_lin(st.shader_rgb_color[0]), srgb8_to_lin(st.shader_rgb_color[1]), srgb8_to_lin(st.shader_rgb_color[2]), st.shader_rgb_color[3] as f32 / 255.0];
+                                            doc.scene.materials[mi].base_color_tex = None;
+                                            doc.touch();
+                                        } else if source.kind == ShaderNodeKind::ImageTexture && node.kind == ShaderNodeKind::Principled {
+                                            if let Some(tex) = st.shader_image_index.filter(|i| *i < doc.scene.textures.len()) { doc.scene.materials[mi].base_color_tex = Some(tex); doc.touch(); }
+                                        }
+                                    }
+                                }
+                                st.shader_socket_pick = None;
+                            } else { st.shader_socket_pick = Some((node.id, false)); }
+                        }
+                    }
+                    match node.kind {
+                        ShaderNodeKind::Principled => {
+                            let mat = &doc.scene.materials[mi];
+                            let mut color = [lin_to_srgb8(mat.base_color[0]), lin_to_srgb8(mat.base_color[1]), lin_to_srgb8(mat.base_color[2]), (mat.base_color[3].clamp(0.0,1.0)*255.0) as u8];
+                            if ui.color_edit_button_srgba_unmultiplied(&mut color).changed() {
+                                doc.checkpoint();
+                                doc.scene.materials[mi].base_color = [srgb8_to_lin(color[0]), srgb8_to_lin(color[1]), srgb8_to_lin(color[2]), color[3] as f32/255.0];
+                            }
+                            let mut metallic = doc.scene.materials[mi].metallic;
+                            if ui.add(egui::Slider::new(&mut metallic, 0.0..=1.0).text("Metallic")).changed() { doc.scene.materials[mi].metallic = metallic; doc.touch(); }
+                            let mut roughness = doc.scene.materials[mi].roughness;
+                            if ui.add(egui::Slider::new(&mut roughness, 0.045..=1.0).text("Roughness")).changed() { doc.scene.materials[mi].roughness = roughness; doc.touch(); }
+                            let mut emission = doc.scene.materials[mi].emissive;
+                            let mut ec = [lin_to_srgb8(emission[0]),lin_to_srgb8(emission[1]),lin_to_srgb8(emission[2])];
+                            if ui.color_edit_button_srgb(&mut ec).changed() { emission = [srgb8_to_lin(ec[0]),srgb8_to_lin(ec[1]),srgb8_to_lin(ec[2])]; doc.scene.materials[mi].emissive = emission; doc.touch(); }
+                            ui.label("Emission");
+                        }
+                        ShaderNodeKind::ImageTexture => {
+                            ui.label("Texture source");
+                            let texture_count = doc.scene.textures.len();
+                            if texture_count == 0 { ui.weak("No images loaded in this project"); }
+                            else {
+                                let current_tex = st.shader_image_index.filter(|i| *i < texture_count).unwrap_or(0);
+                                egui::ComboBox::from_id_source(("shader_image", node.id)).selected_text(doc.scene.textures[current_tex].name.clone()).show_ui(ui, |ui| {
+                                    for (idx, tex) in doc.scene.textures.iter().enumerate() {
+                                        if ui.selectable_label(current_tex == idx, &tex.name).clicked() { st.shader_image_index = Some(idx); }
+                                    }
+                                });
+                                let image_linked = st.shader_links.iter().any(|l| l.from == node.id && st.shader_nodes.iter().any(|n| n.id == l.to && n.kind == ShaderNodeKind::Principled));
+                                if image_linked {
+                                    let tex = st.shader_image_index.unwrap_or(current_tex);
+                                    if doc.scene.materials[mi].base_color_tex != Some(tex) { doc.scene.materials[mi].base_color_tex = Some(tex); doc.touch(); }
+                                }
+                            }
+                            ui.weak("Connect Color to Principled Base Color");
+                        }
+                        ShaderNodeKind::Rgb => {
+                            ui.label("Constant color source");
+                            if ui.color_edit_button_srgba_unmultiplied(&mut st.shader_rgb_color).changed() {
+                                let rgb_linked = st.shader_links.iter().any(|l| l.from == node.id && st.shader_nodes.iter().any(|n| n.id == l.to && n.kind == ShaderNodeKind::Principled));
+                                if rgb_linked {
+                                    doc.scene.materials[mi].base_color = [srgb8_to_lin(st.shader_rgb_color[0]), srgb8_to_lin(st.shader_rgb_color[1]), srgb8_to_lin(st.shader_rgb_color[2]), st.shader_rgb_color[3] as f32 / 255.0];
+                                    doc.scene.materials[mi].base_color_tex = None;
+                                    doc.touch();
+                                }
+                            }
+                            ui.weak("Connect Color to Principled Base Color");
+                        }
+                        ShaderNodeKind::TexCoord => {
+                            ui.label("UV coordinates");
+                            ui.weak("Uses the active UV map");
+                        }
+                        ShaderNodeKind::Output => { ui.label("Final surface output"); }
+                    }
+                    if !node.kind.output_name().is_empty() {
+                        if ui.small_button(format!("{} ◉", node.kind.output_name())).clicked() {
+                            if let Some((to, false)) = st.shader_socket_pick {
+                                if to != node.id {
+                                    st.shader_links.retain(|l| l.to != to);
+                                    st.shader_links.push(ShaderLink { from: node.id, to });
+                                    if let Some(target) = st.shader_nodes.iter().find(|n| n.id == to) {
+                                        if node.kind == ShaderNodeKind::Rgb && target.kind == ShaderNodeKind::Principled {
+                                            doc.scene.materials[mi].base_color = [srgb8_to_lin(st.shader_rgb_color[0]), srgb8_to_lin(st.shader_rgb_color[1]), srgb8_to_lin(st.shader_rgb_color[2]), st.shader_rgb_color[3] as f32 / 255.0];
+                                            doc.scene.materials[mi].base_color_tex = None;
+                                            doc.touch();
+                                        } else if node.kind == ShaderNodeKind::ImageTexture && target.kind == ShaderNodeKind::Principled {
+                                            if let Some(tex) = st.shader_image_index.filter(|i| *i < doc.scene.textures.len()) { doc.scene.materials[mi].base_color_tex = Some(tex); doc.touch(); }
+                                        }
+                                    }
+                                }
+                                st.shader_socket_pick = None;
+                            } else { st.shader_socket_pick = Some((node.id, true)); }
+                        }
+                    }
+                });
+                node_rects.push((node.id, node_response.response.rect));
+            }
+        });
+        // Draw node links over the canvas, from the source node's right edge to the target's left edge.
+        for link in &st.shader_links {
+            if let (Some((_, from)), Some((_, to))) = (node_rects.iter().find(|(id, _)| *id == link.from), node_rects.iter().find(|(id, _)| *id == link.to)) {
+                let a = egui::pos2(from.right(), from.center().y);
+                let b = egui::pos2(to.left(), to.center().y);
+                ui.painter().line_segment([a, b], egui::Stroke::new(2.0, egui::Color32::from_rgb(0xe0, 0xb0, 0x55)));
+            }
+        }
+    });
+    ui.separator();
+    ui.label(RichText::new("Connections").strong());
+    if st.shader_links.is_empty() { ui.weak("No connections yet."); }
+    let labels: Vec<(u64,String)> = st.shader_nodes.iter().map(|n| (n.id, n.kind.title().to_string())).collect();
+    let mut remove_link = None;
+    for (idx, link) in st.shader_links.iter().enumerate() {
+        let from = labels.iter().find(|n| n.0 == link.from).map(|n| n.1.as_str()).unwrap_or("Missing node");
+        let to = labels.iter().find(|n| n.0 == link.to).map(|n| n.1.as_str()).unwrap_or("Missing node");
+        ui.horizontal(|ui| { ui.label(format!("{from}  ─────▶  {to}")); if ui.small_button("×").clicked() { remove_link = Some(idx); } });
+    }
+    if let Some(idx) = remove_link { st.shader_links.remove(idx); }
+    ui.add_space(8.0);
+    ui.weak("Material parameters are stored in the project. Node layout and connections are currently editor-session data; graph evaluation and texture-node wiring are not implemented yet.");
+}
+
+fn draw_texture_paint_editor(
+    ui: &mut egui::Ui,
+    ctx: &egui::Context,
+    doc: &mut Document,
+    ts: &mut ToolState,
+    st: &mut UiState,
+    actions: &mut Vec<Action>,
+) {
+    ui.heading("Texture Paint · Image Editor");
+    ui.horizontal(|ui| {
+        if ui.selectable_label(ts.tool == Tool::PaintBrush, "Draw").clicked() {
+            ts.tool = Tool::PaintBrush;
+        }
+        if ui.selectable_label(ts.tool == Tool::PaintErase, "Erase").clicked() {
+            ts.tool = Tool::PaintErase;
+        }
+        ui.separator();
+        ui.label("Color");
+        ui.color_edit_button_rgba_unmultiplied(&mut ts.paint_color);
+    });
+    ui.horizontal(|ui| {
+        ui.add(egui::Slider::new(&mut ts.paint_radius, 0.002..=0.25).text("Radius"));
+        ui.add(egui::Slider::new(&mut ts.paint_strength, 0.01..=1.0).text("Strength"));
+    });
+    ui.horizontal(|ui| {
+        if ui.button("Save Image As…").clicked() {
+            actions.push(Action::SavePaintImage);
+        }
+        if ui.button("Save Project").clicked() {
+            actions.push(Action::Save);
+        }
+    });
+    ui.separator();
+
+    let active_texture = doc.active
+        .and_then(|id| doc.scene.objects.iter().find(|o| o.id == id))
+        .and_then(|o| o.material.or(Some(0)))
+        .and_then(|mi| doc.scene.materials.get(mi))
+        .and_then(|m| m.base_color_tex);
+
+    let Some(tex_idx) = active_texture else {
+        st.paint_canvas_last_uv = None;
+        ui.colored_label(egui::Color32::YELLOW, "No paintable base-color image is assigned.");
+        ui.label("Assign or create a base-color texture for the active mesh. The 3D viewport remains on the right.");
+        return;
+    };
+    let Some(tex) = doc.scene.textures.get(tex_idx) else {
+        st.paint_canvas_last_uv = None;
+        ui.colored_label(egui::Color32::YELLOW, "The active material references a missing image.");
+        return;
+    };
+    if tex.width == 0 || tex.height == 0 || tex.rgba8.len() != tex.width as usize * tex.height as usize * 4 {
+        st.paint_canvas_last_uv = None;
+        ui.colored_label(egui::Color32::YELLOW, "The active image has invalid pixel data.");
+        return;
+    }
+
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new(&tex.name).strong());
+        ui.weak(format!("{} × {} px", tex.width, tex.height));
+        ui.weak("LMB: paint · Wheel: radius");
+    });
+
+    let key = (tex_idx, tex.width, tex.height);
+    let image = egui::ColorImage::from_rgba_unmultiplied(
+        [tex.width as usize, tex.height as usize],
+        &tex.rgba8,
+    );
+    if let Some(handle) = st.paint_previews.get_mut(&key) {
+        if st.paint_preview_versions.get(&key).copied() != Some(doc.version) {
+            handle.set(image, egui::TextureOptions::LINEAR);
+            st.paint_preview_versions.insert(key, doc.version);
+        }
+    } else {
+        let handle = ctx.load_texture("blendcraft_texture_paint_canvas", image, egui::TextureOptions::LINEAR);
+        st.paint_previews.insert(key, handle);
+        st.paint_preview_versions.insert(key, doc.version);
+    }
+
+    // Fit the image into the left editor while preserving its true aspect ratio.
+    let avail = ui.available_size().max(egui::vec2(64.0, 64.0));
+    let scale = (avail.x / tex.width as f32).min(avail.y / tex.height as f32).max(0.01);
+    let image_size = egui::vec2(tex.width as f32 * scale, tex.height as f32 * scale);
+    let (canvas, response) = ui.allocate_exact_size(image_size, egui::Sense::click_and_drag());
+    let painter = ui.painter_at(canvas);
+    painter.rect_filled(canvas, 0.0, egui::Color32::from_rgb(0x18, 0x18, 0x18));
+    if let Some(handle) = st.paint_previews.get(&key) {
+        painter.image(
+            handle.id(),
+            canvas,
+            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+            egui::Color32::WHITE,
+        );
+    }
+
+    // Overlay the active mesh's UV edges, just like Blender's Image Editor.
+    let mesh = doc.active
+        .and_then(|id| doc.edit.as_ref().filter(|e| e.object_id == id).map(|e| &e.mesh)
+            .or_else(|| doc.scene.objects.iter().find(|o| o.id == id).map(|o| o.mesh.as_ref())));
+    if let Some(mesh) = mesh {
+        // Match the renderer's texture coordinate convention: UV (0, 0) is
+        // the top-left texel, so the overlay must not invert V here.
+        let uv_to_screen = |uv: [f32; 2]| egui::pos2(
+            canvas.min.x + uv[0] * canvas.width(),
+            canvas.min.y + uv[1] * canvas.height(),
+        );
+        let edge = egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(235, 190, 80, 190));
+        for tri in mesh.indices.chunks_exact(3) {
+            let a = uv_to_screen(mesh.vertices[tri[0] as usize].uv);
+            let b = uv_to_screen(mesh.vertices[tri[1] as usize].uv);
+            let c = uv_to_screen(mesh.vertices[tri[2] as usize].uv);
+            painter.line_segment([a, b], edge);
+            painter.line_segment([b, c], edge);
+            painter.line_segment([c, a], edge);
+        }
+    }
+
+    let to_uv = |pos: egui::Pos2| glam::Vec2::new(
+        ((pos.x - canvas.min.x) / canvas.width()).clamp(0.0, 1.0),
+        ((pos.y - canvas.min.y) / canvas.height()).clamp(0.0, 1.0),
+    );
+    if response.drag_started() {
+        doc.checkpoint();
+        st.paint_canvas_last_uv = response.interact_pointer_pos().map(to_uv);
+    }
+    if response.clicked() && !response.dragged() {
+        if let Some(pos) = response.interact_pointer_pos() {
+            doc.checkpoint();
+            let uv = to_uv(pos);
+            let color = if ts.tool == Tool::PaintErase { [0.78, 0.78, 0.78, 1.0] } else { ts.paint_color };
+            doc.paint_at_uv(uv, color, ts.paint_radius, ts.paint_strength);
+        }
+    }
+    if response.dragged() {
+        if let Some(pos) = response.interact_pointer_pos() {
+            let current = to_uv(pos);
+            let previous = st.paint_canvas_last_uv.unwrap_or(current);
+            let distance = (current - previous).length();
+            let steps = ((distance / (ts.paint_radius * 0.35).max(0.002)).ceil() as usize).clamp(1, 256);
+            let samples: Vec<glam::Vec2> = (1..=steps)
+                .map(|i| previous.lerp(current, i as f32 / steps as f32))
+                .collect();
+            let color = if ts.tool == Tool::PaintErase { [0.78, 0.78, 0.78, 1.0] } else { ts.paint_color };
+            doc.paint_stroke_uv(&samples, color, ts.paint_radius, ts.paint_strength);
+            st.paint_canvas_last_uv = Some(current);
+        }
+    }
+    if !ui.input(|i| i.pointer.primary_down()) {
+        st.paint_canvas_last_uv = None;
+    }
+}
+
+fn draw_uv_editor(ui: &mut egui::Ui, doc: &mut Document, ts: &mut ToolState, actions: &mut Vec<Action>) {
+    ui.heading("UV Editor");
+    ui.separator();
+    ui.horizontal(|ui| {
+        if ui.button("Smart Project").clicked() {
+            actions.push(Action::UvUnwrapSmart);
+        }
+        if ui.button("Cube").clicked() {
+            actions.push(Action::UvUnwrapCube);
+        }
+        if ui.button("Planar").clicked() {
+            actions.push(Action::UvUnwrapPlanar);
+        }
+        if ui.button("Pack").clicked() {
+            actions.push(Action::UvPack);
+        }
+        if ui.button("Reset").clicked() {
+            actions.push(Action::UvReset);
+        }
+        if ui.button("Save UV Map…").clicked() {
+            actions.push(Action::UvSaveMap);
+        }
+        if ui.button("Load UV Map…").clicked() {
+            actions.push(Action::UvLoadMap);
+        }
+        if ui.button("Export Layout…").clicked() {
+            actions.push(Action::UvExportLayout);
+        }
+    });
+    ui.horizontal(|ui| {
+        if ui.button("Select All").clicked() {
+            actions.push(Action::SelectAll);
+        }
+        if ui.button("Select None").clicked() {
+            actions.push(Action::SelectNone);
+        }
+        ui.label(format!("sel {}", doc.uv_selection.len()));
+    });
+    ui.separator();
+
+    let Some(id) = doc.active else {
+        ui.weak("No active mesh");
+        return;
+    };
+    // Prefer Edit Mode session mesh (live UVs)
+    let mesh = if let Some(session) = doc.edit.as_ref().filter(|s| s.object_id == id) {
+        &session.mesh
+    } else if let Some(obj) = doc.scene.objects.iter().find(|o| o.id == id) {
+        &obj.mesh
+    } else {
+        ui.weak("Mesh not found");
+        return;
+    };
+
+    let quad_count = mesh.quad_faces().len();
+    let tri_count = mesh.indices.len() / 3;
+    ui.label(format!("Topology: {quad_count} quad faces detected · {} remaining triangles", tri_count.saturating_sub(quad_count * 2)));
+
+    // 2D UV canvas — always SQUARE (UV space is 1:1 even if the panel is wide/tall)
+    let avail = ui.available_size();
+    let side = avail.x.min((avail.y - 4.0).max(0.0)).max(180.0);
+    let size = egui::vec2(side, side);
+    ui.allocate_ui_with_layout(egui::vec2(avail.x, side), egui::Layout::top_down(egui::Align::Center), |ui| {
+        let _ = ui; // layout centers children
+    });
+    // Center by adding side space then allocating the square
+    let full = ui.available_width();
+    let pad = ((full - side) * 0.5).max(0.0);
+    let (rect, resp) = ui.horizontal(|ui| {
+        ui.add_space(pad);
+        ui.allocate_exact_size(size, egui::Sense::click_and_drag())
+    }).inner;
+    let painter = ui.painter_at(rect);
+
+    painter.rect_filled(rect, 0.0, egui::Color32::from_rgb(0x1e, 0x1e, 0x1e));
+    let margin = 12.0;
+    let inner_side = (rect.width().min(rect.height()) - margin * 2.0).max(32.0);
+    let inner = egui::Rect::from_center_size(rect.center(), egui::vec2(inner_side, inner_side));
+    // Checkerboard (square cells)
+    let cells = 8;
+    for y in 0..cells {
+        for x in 0..cells {
+            if (x + y) % 2 == 0 {
+                let x0 = inner.min.x + inner_side * x as f32 / cells as f32;
+                let y0 = inner.min.y + inner_side * (cells - 1 - y) as f32 / cells as f32;
+                let x1 = inner.min.x + inner_side * (x + 1) as f32 / cells as f32;
+                let y1 = inner.min.y + inner_side * (cells - y) as f32 / cells as f32;
+                painter.rect_filled(
+                    egui::Rect::from_min_max(egui::pos2(x0, y0), egui::pos2(x1, y1)),
+                    0.0,
+                    egui::Color32::from_rgb(0x28, 0x28, 0x28),
+                );
+            }
+        }
+    }
+    painter.rect_stroke(inner, 0.0, egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(0x66, 0x66, 0x66)));
+
+    let to_screen = |uv: [f32; 2]| {
+        egui::pos2(
+            inner.min.x + uv[0].clamp(-0.5, 1.5) * inner_side,
+            inner.max.y - uv[1].clamp(-0.5, 1.5) * inner_side,
+        )
+    };
+
+    // Draw UV edges
+    let edge_stroke = egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(0x88, 0xaa, 0xcc));
+    for tri in mesh.indices.chunks_exact(3) {
+        let pts = [
+            to_screen(mesh.vertices[tri[0] as usize].uv),
+            to_screen(mesh.vertices[tri[1] as usize].uv),
+            to_screen(mesh.vertices[tri[2] as usize].uv),
+        ];
+        painter.line_segment([pts[0], pts[1]], edge_stroke);
+        painter.line_segment([pts[1], pts[2]], edge_stroke);
+        painter.line_segment([pts[2], pts[0]], edge_stroke);
+    }
+
+    // Draw UV verts
+    for (i, v) in mesh.vertices.iter().enumerate() {
+        let p = to_screen(v.uv);
+        let selected = doc.uv_selection.contains(&(i as u32));
+        let col = if selected {
+            egui::Color32::from_rgb(0xff, 0xaa, 0x33)
+        } else {
+            egui::Color32::from_rgb(0xdd, 0xdd, 0xdd)
+        };
+        painter.circle_filled(p, if selected { 3.5 } else { 2.0 }, col);
+    }
+
+    // Click to select UV verts
+    if resp.clicked() {
+        if let Some(pos) = resp.interact_pointer_pos() {
+            let u = ((pos.x - inner.min.x) / inner.width()).clamp(-0.5, 1.5);
+            let v = ((inner.max.y - pos.y) / inner.height()).clamp(-0.5, 1.5);
+            let max_d = 12.0 / inner.width().max(1.0);
+            if let Some(idx) = forge_core::pick_uv(mesh, glam::Vec2::new(u, v), max_d) {
+                let shift = ui.input(|i| i.modifiers.shift);
+                if !shift {
+                    doc.uv_selection.clear();
+                }
+                if doc.uv_selection.contains(&idx) && shift {
+                    doc.uv_selection.remove(&idx);
+                } else {
+                    doc.uv_selection.insert(idx);
+                }
+            } else if !ui.input(|i| i.modifiers.shift) {
+                doc.uv_selection.clear();
+            }
+        }
+    }
+
+    // Drag the live Edit Mode mesh, not only the scene copy. This keeps the
+    // UV canvas, 3D viewport and saved project in sync while the pointer moves.
+    if resp.drag_started() && !doc.uv_selection.is_empty() {
+        doc.checkpoint();
+    }
+    if resp.dragged() && !doc.uv_selection.is_empty() {
+        let delta = ui.input(|i| i.pointer.delta());
+        let du = delta.x / inner.width().max(1.0);
+        let dv = -delta.y / inner.height().max(1.0);
+        if matches!(ts.tool, Tool::UvMove | Tool::UvSelect) || ui.input(|i| i.modifiers.command) {
+            doc.uv_translate_live(du, dv);
+        } else if ts.tool == Tool::UvScale {
+            doc.uv_scale_live((1.0 + du * 2.0).max(0.01));
+        } else if ts.tool == Tool::UvRotate {
+            doc.uv_rotate_live(du * 3.0);
+        }
+    }
+
+    ui.label(
+        egui::RichText::new("Click select · Shift multi · Drag move · Tools: Scale/Rotate")
+            .weak()
+            .size(11.0),
+    );
+}
 
 fn draw_tool_icon(ui: &mut egui::Ui, tool: Tool, rect: egui::Rect, selected: bool) {
     let painter = ui.painter_at(rect);
@@ -710,6 +1384,99 @@ fn draw_tool_icon(ui: &mut egui::Ui, tool: Tool, rect: egui::Rect, selected: boo
             painter.line_segment([c + egui::vec2(0.0, -s * 0.5), c + egui::vec2(0.0, s * 0.5)], thick);
             painter.circle_stroke(c, s * 0.75, stroke);
         }
+        Tool::UvSelect => {
+            // Cursor arrow
+            let tip = c + egui::vec2(-s * 0.55, -s * 0.75);
+            let mid = c + egui::vec2(-s * 0.1, -s * 0.1);
+            let wing = c + egui::vec2(-s * 0.45, s * 0.15);
+            painter.line_segment([tip, mid], thick);
+            painter.line_segment([tip, wing], thick);
+            painter.line_segment([mid, wing], stroke);
+            painter.circle_stroke(c + egui::vec2(s * 0.35, s * 0.35), s * 0.35, stroke);
+        }
+        Tool::UvMove => {
+            // 4-way arrows (like Blender move)
+            for (dx, dy) in [(1.0, 0.0), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0)] {
+                let end = c + egui::vec2(dx * s * 0.85, dy * s * 0.85);
+                painter.line_segment([c, end], thick);
+                let ortho = egui::vec2(-dy, dx) * s * 0.25;
+                let back = end - egui::vec2(dx, dy) * s * 0.3;
+                painter.line_segment([end, back + ortho], stroke);
+                painter.line_segment([end, back - ortho], stroke);
+            }
+        }
+        Tool::UvRotate => {
+            // Arc + arrow
+            painter.circle_stroke(c, s * 0.7, stroke);
+            let a0 = c + egui::vec2(s * 0.7, 0.0);
+            painter.line_segment([a0, a0 + egui::vec2(-s * 0.15, -s * 0.3)], thick);
+            painter.line_segment([a0, a0 + egui::vec2(-s * 0.3, s * 0.05)], thick);
+        }
+        Tool::UvScale => {
+            // Corner brackets (scale box)
+            let r = s * 0.75;
+            for (sx, sy) in [(-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)] {
+                let corner = c + egui::vec2(sx * r, sy * r);
+                painter.line_segment([corner, corner - egui::vec2(sx * s * 0.35, 0.0)], thick);
+                painter.line_segment([corner, corner - egui::vec2(0.0, sy * s * 0.35)], thick);
+            }
+        }
+        Tool::UvUnwrapSmart => {
+            // Unfolded net: center + side faces
+            painter.rect_stroke(egui::Rect::from_center_size(c, egui::vec2(s * 0.55, s * 0.55)), 0.0, stroke);
+            painter.rect_stroke(egui::Rect::from_center_size(c + egui::vec2(s * 0.7, 0.0), egui::vec2(s * 0.45, s * 0.55)), 0.0, stroke);
+            painter.rect_stroke(egui::Rect::from_center_size(c + egui::vec2(-s * 0.7, 0.0), egui::vec2(s * 0.45, s * 0.55)), 0.0, stroke);
+            painter.rect_stroke(egui::Rect::from_center_size(c + egui::vec2(0.0, -s * 0.7), egui::vec2(s * 0.55, s * 0.4)), 0.0, stroke);
+        }
+        Tool::UvUnwrapCube => {
+            // Cube perspective
+            let o = c + egui::vec2(-s * 0.25, s * 0.15);
+            let f = s * 0.55;
+            painter.rect_stroke(egui::Rect::from_min_size(o - egui::vec2(0.0, f), egui::vec2(f, f)), 0.0, stroke);
+            // top
+            painter.line_segment([o - egui::vec2(0.0, f), o + egui::vec2(s * 0.3, -f - s * 0.25)], stroke);
+            painter.line_segment([o + egui::vec2(f, -f), o + egui::vec2(f + s * 0.3, -f - s * 0.25)], stroke);
+            painter.line_segment([o + egui::vec2(s * 0.3, -f - s * 0.25), o + egui::vec2(f + s * 0.3, -f - s * 0.25)], stroke);
+            // side
+            painter.line_segment([o + egui::vec2(f, 0.0), o + egui::vec2(f + s * 0.3, -s * 0.25)], stroke);
+            painter.line_segment([o + egui::vec2(f + s * 0.3, -s * 0.25), o + egui::vec2(f + s * 0.3, -f - s * 0.25)], stroke);
+        }
+        Tool::UvUnwrapPlanar => {
+            // Plane with projection rays
+            painter.rect_stroke(egui::Rect::from_center_size(c + egui::vec2(0.0, s * 0.25), egui::vec2(s * 1.4, s * 0.15)), 0.0, stroke);
+            for x in [-0.5, 0.0, 0.5] {
+                painter.line_segment([
+                    c + egui::vec2(x * s, -s * 0.7),
+                    c + egui::vec2(x * s * 0.7, s * 0.15),
+                ], stroke);
+            }
+        }
+        Tool::UvReset => {
+            // Single triangle UV
+            let a = c + egui::vec2(-s * 0.7, s * 0.55);
+            let b = c + egui::vec2(s * 0.7, s * 0.55);
+            let d = c + egui::vec2(0.0, -s * 0.7);
+            painter.line_segment([a, b], thick);
+            painter.line_segment([b, d], thick);
+            painter.line_segment([d, a], thick);
+        }
+        Tool::UvPack => {
+            for (ox, oy) in [(-0.45, -0.45), (0.25, -0.4), (-0.4, 0.25), (0.2, 0.2)] {
+                painter.rect_stroke(
+                    egui::Rect::from_center_size(c + egui::vec2(ox * s, oy * s), egui::vec2(s * 0.5, s * 0.5)),
+                    0.0,
+                    stroke,
+                );
+            }
+        }
+        Tool::PaintBrush => {
+            painter.circle_stroke(c, s * 0.75, stroke);
+            painter.circle_filled(c, s * 0.25, col);
+        }
+        Tool::PaintErase => {
+            painter.circle_stroke(c, s * 0.75, stroke);
+            painter.line_segment([c + egui::vec2(-s * 0.4, -s * 0.4), c + egui::vec2(s * 0.4, s * 0.4)], thick);
+        }
     }
 }
 
@@ -784,6 +1551,7 @@ fn menu_bar(ui: &mut egui::Ui, doc: &mut Document, settings: &mut ViewSettings, 
             let in_edit = doc.in_edit_mode();
             mi(ui, actions, b, if in_edit { "Object Mode" } else { "Edit Mode" }, Action::ToggleEditMode, true);
             mi(ui, actions, b, if doc.sculpt_mode { "Exit Sculpt Mode" } else { "Sculpt Mode" }, Action::ToggleSculptMode, true);
+            mi(ui, actions, b, if doc.uv_mode { "Exit UV Editing" } else { "UV Editing" }, Action::ToggleUvMode, true);
             ui.separator();
             ui.add_enabled_ui(in_edit, |ui| {
                 mi(ui, actions, b, "Vertex (points)", Action::EditDomainVertex, true);
@@ -987,7 +1755,7 @@ fn menu_bar(ui: &mut egui::Ui, doc: &mut Document, settings: &mut ViewSettings, 
 
         ui.menu_button("Tools", |ui| {
             soon(ui, "Modifiers");
-            soon(ui, "UV editor");
+            if ui.button("UV Editing").clicked() { actions.push(Action::ToggleUvMode); ui.close_menu(); }
             soon(ui, "Texture painting");
             if ui.button("Sculpt Mode").clicked() { actions.push(Action::ToggleSculptMode); ui.close_menu(); }
             soon(ui, "Animation / rigging");
@@ -1274,7 +2042,7 @@ fn font_library_window(ctx: &egui::Context, st: &mut UiState) {
                 ui.weak(&st.font_status);
             }
             ui.separator();
-            ui.heading("Downloadable (free licenses)");
+            ui.heading("Font catalog (offline reference)");
             let filter = st.font_filter.to_ascii_lowercase();
             egui::ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
                 egui::Grid::new("catalog_fonts").num_columns(4).striped(true).show(ui, |ui| {
@@ -1297,15 +2065,7 @@ fn font_library_window(ctx: &egui::Context, st: &mut UiState) {
                         if installed {
                             ui.label("✓ Installed");
                         } else {
-                            #[cfg(not(target_arch = "wasm32"))]
-                            if ui.button("Download").clicked() {
-                                match crate::fonts_io::download_catalog_font(f.name) {
-                                    Ok(n) => st.font_status = format!("Downloaded {n}"),
-                                    Err(e) => st.font_status = format!("Failed: {e}"),
-                                }
-                            }
-                            #[cfg(target_arch = "wasm32")]
-                            ui.label("—");
+                            ui.label("Import a local font file to use");
                         }
                         ui.end_row();
                     }
@@ -1779,19 +2539,6 @@ fn properties(ui: &mut egui::Ui, doc: &mut Document, actions: &mut Vec<Action>) 
                                         *font_name = name;
                                     }
                                     Err(e) => log::warn!("font import: {e}"),
-                                }
-                            }
-                        }
-                        #[cfg(not(target_arch = "wasm32"))]
-                        if ui.button("Download free fonts…").clicked() {
-                            for f in free_font_catalog() {
-                                match crate::fonts_io::download_catalog_font(f.name) {
-                                    Ok(name) => {
-                                        if font_name.is_empty() {
-                                            *font_name = name;
-                                        }
-                                    }
-                                    Err(e) => log::warn!("font download {}: {e}", f.name),
                                 }
                             }
                         }

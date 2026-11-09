@@ -15,6 +15,9 @@ pub enum Action {
     ClearRecent,
     Save,
     SaveAs,
+    SavePaintImage,
+    UvSaveMap,
+    UvLoadMap,
     Import,
     ExportGlb,
     ExportObj,
@@ -114,6 +117,14 @@ pub enum Action {
     ShowAbout,
     ToggleEditMode,
     ToggleSculptMode,
+    ToggleUvMode,
+    TogglePaintMode,
+    UvUnwrapSmart,
+    UvUnwrapCube,
+    UvUnwrapPlanar,
+    UvPack,
+    UvReset,
+    UvExportLayout,
     ArmatureAddBone,
     ArmatureExtrude,
     ArmatureDeleteBones,
@@ -141,7 +152,7 @@ pub const EXTRA: &[(&str, &str, &str)] = &[
     ("Mouse", "Left drag (Select tool)", "Orbit the view"),
     ("Mouse", "Middle drag", "Orbit"),
     ("Mouse", "Shift + Middle drag", "Pan"),
-    ("Mouse", "Right drag", "Pan"),
+    ("Mouse", "Right drag", "Pan; orbit in Texture Paint and Sculpt Mode"),
     ("Mouse", "Shift + Right click", "Place the 3D cursor"),
     ("Mouse", "Mouse wheel", "Zoom (Circle select tool: change brush radius)"),
     ("Select tools", "Box tool: drag", "Select everything inside the rectangle"),
@@ -208,6 +219,12 @@ pub fn bindings() -> Vec<Binding> {
     b("Tools", "Toggle snapping", "s", K::Tab, A::ToggleSnap);
     b("Mode", "Toggle Edit Mode", "", K::Tab, A::ToggleEditMode);
     b("Mode", "Toggle Sculpt Mode", "c", K::Tab, A::ToggleSculptMode);
+    b("Mode", "Toggle UV Editing", "a", K::KeyU, A::ToggleUvMode);
+    b("Mode", "Toggle Texture Paint", "s", K::Tab, A::TogglePaintMode);
+    b("UV", "Smart UV Project", "", K::KeyU, A::UvUnwrapSmart);
+    b("UV", "Cube Projection", "s", K::KeyU, A::UvUnwrapCube);
+    b("UV", "Pack Islands", "p", K::KeyP, A::UvPack);
+    b("UV", "Reset UVs", "a", K::KeyR, A::UvReset);
     b("Mode", "Vertex select", "", K::Digit1, A::EditDomainVertex);
     b("Mode", "Edge select", "", K::Digit2, A::EditDomainEdge);
     b("Mode", "Face select", "", K::Digit3, A::EditDomainFace);

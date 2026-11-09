@@ -1,5 +1,5 @@
-//! Local font files: system fonts, disk import, one-time web download into app cache.
-use forge_core::{font_registry, free_font_catalog, system_font_dirs};
+//! Local font files: system fonts and user-selected disk imports. Offline by design.
+use forge_core::{font_registry, system_font_dirs};
 use std::path::{Path, PathBuf};
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -128,48 +128,6 @@ pub fn import_font_file(path: &Path) -> Result<String, String> {
     Ok(name)
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-pub fn download_catalog_font(name: &str) -> Result<String, String> {
-    let entry = free_font_catalog()
-        .iter()
-        .find(|f| f.name == name)
-        .ok_or_else(|| format!("unknown catalog font '{name}'"))?;
-    let Some(dir) = fonts_dir() else {
-        return Err("no fonts directory".into());
-    };
-    let file = format!("{}.ttf", name.replace(' ', "-"));
-    let dest = dir.join(&file);
-    let bytes = if dest.exists() {
-        std::fs::read(&dest).map_err(|e| e.to_string())?
-    } else {
-        let resp = ureq::get(entry.url)
-            .timeout(std::time::Duration::from_secs(90))
-            .call()
-            .map_err(|e| format!("download failed: {e}"))?;
-        let mut bytes = Vec::new();
-        resp.into_reader()
-            .read_to_end(&mut bytes)
-            .map_err(|e| format!("read body: {e}"))?;
-        if bytes.len() < 100 {
-            return Err("downloaded file too small (not a font?)".into());
-        }
-        std::fs::write(&dest, &bytes).map_err(|e| e.to_string())?;
-        bytes
-    };
-    let mut reg = font_registry().lock().unwrap();
-    reg.insert(name.to_string(), bytes)?;
-    Ok(name.to_string())
-}
-
-#[cfg(target_arch = "wasm32")]
-pub fn import_font_file(_path: &Path) -> Result<String, String> {
-    Err("font import is not available on WebAssembly".into())
-}
-
-#[cfg(target_arch = "wasm32")]
-pub fn download_catalog_font(_name: &str) -> Result<String, String> {
-    Err("font download is not available on WebAssembly".into())
-}
 
 pub fn is_catalog_installed(name: &str) -> bool {
     font_registry()

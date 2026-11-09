@@ -8,7 +8,7 @@ mod transform;
 mod ui;
 
 use egui_wgpu::wgpu;
-use forge_core::{project, Constraint, Document, EditDomain, EnvironmentMap, FixedView, ObjectKind, OrbitCamera, SameKind, SculptSettings, SculptBrush};
+use forge_core::{project, Constraint, Document, EditDomain, EnvironmentMap, FixedView, ObjectKind, OrbitCamera, SameKind, SculptSettings};
 use forge_render::{Highlight, Renderer, ViewSettings};
 use glam::{Mat4, Vec2};
 use keymap::{Action, Binding};
@@ -63,6 +63,17 @@ use winit::{
     keyboard::{KeyCode, ModifiersState, PhysicalKey},
     window::{Window, WindowId},
 };
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct UvMapFile {
+    format: String,
+    version: u32,
+    object_name: String,
+    vertex_count: usize,
+    positions: Vec<[f32; 3]>,
+    indices: Vec<u32>,
+    uvs: Vec<[f32; 2]>,
+}
 
 struct Gfx {
     window: Arc<Window>,
@@ -120,6 +131,9 @@ struct App {
     sculpt_last_hit: Option<glam::Vec3>,
     /// Cursor pos of last sculpt sample (throttle density)
     sculpt_last_sample: Option<(f64, f64)>,
+    /// True while LMB is held for a texture-paint stroke.
+    paint_stroke: bool,
+    paint_last_cursor: Option<(f64, f64)>,
     ui: UiState,
     bindings: Vec<Binding>,
     recent: recent::Recent,
@@ -262,6 +276,8 @@ impl App {
             sculpt_stroke: false,
             sculpt_last_hit: None,
             sculpt_last_sample: None,
+            paint_stroke: false,
+            paint_last_cursor: None,
             ui: UiState::default(),
             bindings: keymap::bindings(),
             recent: recent::Recent::load(),
@@ -494,6 +510,69 @@ impl App {
             Tool::SculptThumb => B::Thumb,
             _ => B::Draw,
         };
+    }
+
+
+    fn paint_sample(&mut self) {
+        if let Some(uv) = self.paint_sample_at(self.cursor) {
+            let color = if self.ts.tool == Tool::PaintErase { [0.78, 0.78, 0.78, 1.0] } else { self.ts.paint_color };
+            let _ = self.doc.paint_at_uv(uv, color, self.ts.paint_radius, self.ts.paint_strength);
+        }
+    }
+
+    fn paint_sample_at(&self, cursor: (f64, f64)) -> Option<glam::Vec2> {
+        if !self.doc.paint_mode {
+            return None;
+        }
+        let (vx, vy, vw, vh) = (self.viewport[0], self.viewport[1], self.viewport[2], self.viewport[3]);
+        if vw < 1.0 || vh < 1.0
+            || cursor.0 < vx as f64 || cursor.1 < vy as f64
+            || cursor.0 > (vx + vw) as f64 || cursor.1 > (vy + vh) as f64
+        {
+            return None;
+        }
+        let nx = ((cursor.0 as f32 - vx) / vw) * 2.0 - 1.0;
+        let ny = 1.0 - ((cursor.1 as f32 - vy) / vh) * 2.0;
+        let (origin, dir) = self.camera.ray((nx, ny), vw / vh);
+        // Raycast active mesh for UV
+        let Some(id) = self.doc.active else { return None };
+        let Some(idx) = self.doc.scene.objects.iter().position(|o| o.id == id) else { return None };
+        let world = self.doc.scene.world_matrices()[idx];
+        let inv = world.inverse();
+        let local_o = inv.transform_point3(origin);
+        let local_d = inv.transform_vector3(dir).normalize_or_zero();
+        let mesh = &self.doc.scene.objects[idx].mesh;
+        let mut best: Option<(f32, glam::Vec2)> = None;
+        for tri in mesh.indices.chunks_exact(3) {
+            if tri.iter().any(|&index| index as usize >= mesh.vertices.len()) { continue; }
+            let a = glam::Vec3::from(mesh.vertices[tri[0] as usize].position);
+            let b = glam::Vec3::from(mesh.vertices[tri[1] as usize].position);
+            let c = glam::Vec3::from(mesh.vertices[tri[2] as usize].position);
+            // Möller–Trumbore
+            let e1 = b - a;
+            let e2 = c - a;
+            let p = local_d.cross(e2);
+            let det = e1.dot(p);
+            if det.abs() < 1e-10 { continue; }
+            let inv_det = 1.0 / det;
+            let tvec = local_o - a;
+            let u = tvec.dot(p) * inv_det;
+            if !(0.0..=1.0).contains(&u) { continue; }
+            let q = tvec.cross(e1);
+            let v = local_d.dot(q) * inv_det;
+            if v < 0.0 || u + v > 1.0 { continue; }
+            let t = e2.dot(q) * inv_det;
+            if t <= 1e-5 { continue; }
+            if best.map(|(bt, _)| t < bt).unwrap_or(true) {
+                let ua = glam::Vec2::from(mesh.vertices[tri[0] as usize].uv);
+                let ub = glam::Vec2::from(mesh.vertices[tri[1] as usize].uv);
+                let uc = glam::Vec2::from(mesh.vertices[tri[2] as usize].uv);
+                let uv = ua * (1.0 - u - v) + ub * u + uc * v;
+                best = Some((t, uv));
+            }
+        }
+        let Some((_, uv)) = best else { return None };
+        Some(uv)
     }
 
     fn sculpt_sample(&mut self) {
@@ -1395,6 +1474,9 @@ impl App {
                     p
                 }
             };
+            // Edit Mode owns a working mesh copy. Commit it before serializing so
+            // UV edits and geometry changes cannot be omitted from the project.
+            self.doc.sync_edit_mesh();
             match project::to_bytes(&self.doc.scene).and_then(|b| std::fs::write(&path, b).map_err(Into::into)) {
                 Ok(()) => {
                     self.doc.path = Some(path.clone());
@@ -1757,14 +1839,18 @@ impl App {
             A::MakeSingleUser => self.doc.make_single_user(),
 
             A::SelectAll => {
-                if self.doc.in_edit_mode() {
+                if self.doc.uv_mode {
+                    self.doc.uv_select_all();
+                } else if self.doc.in_edit_mode() {
                     self.doc.edit_select_all();
                 } else {
                     self.doc.select_all();
                 }
             },
             A::SelectNone => {
-                if self.doc.in_edit_mode() {
+                if self.doc.uv_mode {
+                    self.doc.uv_select_none();
+                } else if self.doc.in_edit_mode() {
                     self.doc.edit_select_none();
                 } else {
                     self.doc.select_none();
@@ -1944,6 +2030,67 @@ impl App {
 
             A::ToggleShortcuts => self.ui.show_shortcuts = !self.ui.show_shortcuts,
             A::ShowAbout => self.ui.show_about = true,
+            A::SavePaintImage => self.save_paint_image(),
+            A::UvSaveMap => self.save_uv_map(),
+            A::UvLoadMap => self.load_uv_map(),
+            A::TogglePaintMode => {
+                match self.doc.toggle_paint_mode() {
+                    Ok(()) => {
+                        if self.doc.paint_mode {
+                            self.ts.tool = Tool::PaintBrush;
+                            self.status("Texture Paint – LMB paint · Erase tool · Wheel radius");
+                        } else {
+                            self.ts.tool = Tool::Select;
+                            self.status("Object Mode");
+                        }
+                    }
+                    Err(e) => self.status(e),
+                }
+            },
+            A::ToggleUvMode => {
+                match self.doc.toggle_uv_mode() {
+                    Ok(()) => {
+                        if self.doc.uv_mode {
+                            self.ts.tool = Tool::UvSelect;
+                            // Auto smart unwrap if UVs look unset (all near zero)
+                            if let Some(id) = self.doc.active {
+                                if let Some(obj) = self.doc.scene.objects.iter().find(|o| o.id == id) {
+                                    let max_u = obj.mesh.vertices.iter().map(|v| v.uv[0].abs() + v.uv[1].abs()).fold(0.0f32, f32::max);
+                                    if max_u < 1e-5 {
+                                        self.doc.uv_unwrap_smart();
+                                    }
+                                }
+                            }
+                            self.status("UV Editing – unwrap tools in toolbar · select & drag in UV Editor");
+                        } else {
+                            self.ts.tool = Tool::Select;
+                            self.status("Object Mode");
+                        }
+                    }
+                    Err(e) => self.status(e),
+                }
+            },
+            A::UvUnwrapSmart => {
+                self.doc.uv_unwrap_smart();
+                self.status("Smart UV Project");
+            },
+            A::UvUnwrapCube => {
+                self.doc.uv_unwrap_cube();
+                self.status("Cube Projection");
+            },
+            A::UvUnwrapPlanar => {
+                self.doc.uv_unwrap_planar();
+                self.status("Project from View (planar)");
+            },
+            A::UvPack => {
+                self.doc.uv_pack();
+                self.status("Pack Islands");
+            },
+            A::UvReset => {
+                self.doc.uv_unwrap_reset();
+                self.status("Reset UVs");
+            },
+            A::UvExportLayout => self.export_uv_layout(),
             A::ToggleSculptMode => {
                 match self.doc.toggle_sculpt_mode() {
                     Ok(()) => {
@@ -2018,6 +2165,181 @@ impl App {
                 }
             }
 
+        }
+    }
+
+    /// Save UV coordinates as an independent, portable BlendCraft UV-map file.
+    fn save_uv_map(&mut self) {
+        #[cfg(target_arch = "wasm32")]
+        { self.status("Saving UV maps is not available on WebAssembly yet"); return; }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.doc.sync_edit_mesh();
+            let Some(id) = self.doc.active else { self.status("Select a mesh before saving its UV map"); return };
+            let Some(obj) = self.doc.scene.objects.iter().find(|o| o.id == id) else { self.status("Active object no longer exists"); return };
+            if obj.mesh.vertices.is_empty() || obj.mesh.indices.is_empty() { self.status("Active mesh has no UV faces"); return; }
+            let file = UvMapFile {
+                format: "BlendCraft UV Map".to_string(), version: 1,
+                object_name: obj.name.clone(), vertex_count: obj.mesh.vertices.len(),
+                positions: obj.mesh.vertices.iter().map(|v| v.position).collect(),
+                indices: obj.mesh.indices.clone(),
+                uvs: obj.mesh.vertices.iter().map(|v| v.uv).collect(),
+            };
+            let Some(mut path) = rfd::FileDialog::new()
+                .add_filter("BlendCraft UV Map", &["uvmap"])
+                .set_file_name(&format!("{}.uvmap", obj.name.replace('/', "_").replace('\\', "_")))
+                .save_file() else { return };
+            if path.extension().is_none() { path.set_extension("uvmap"); }
+            match serde_json::to_vec_pretty(&file) {
+                Ok(bytes) => match std::fs::write(&path, bytes) {
+                    Ok(()) => self.status(format!("Saved UV map to {}", path.display())),
+                    Err(e) => self.status(format!("UV map save failed: {e}")),
+                },
+                Err(e) => self.status(format!("UV map serialization failed: {e}")),
+            }
+        }
+    }
+
+    /// Load a standalone UV-map file, requiring an exact mesh topology match.
+    fn load_uv_map(&mut self) {
+        #[cfg(target_arch = "wasm32")]
+        { self.status("Loading UV maps is not available on WebAssembly yet"); return; }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let Some(path) = rfd::FileDialog::new().add_filter("BlendCraft UV Map", &["uvmap"]).pick_file() else { return };
+            let loaded: Result<UvMapFile, String> = std::fs::read(&path)
+                .map_err(|e| format!("Could not read UV map: {e}"))
+                .and_then(|bytes| serde_json::from_slice(&bytes).map_err(|e| format!("Invalid UV map file: {e}")));
+            let file = match loaded { Ok(f) => f, Err(e) => { self.status(e); return; } };
+            if file.format != "BlendCraft UV Map" || file.version != 1 {
+                self.status("Unsupported UV map file format or version"); return;
+            }
+            let Some(id) = self.doc.active else { self.status("Select the target mesh before loading a UV map"); return };
+            let current_mesh = self.doc.edit.as_ref().filter(|e| e.object_id == id).map(|e| e.mesh.clone())
+                .or_else(|| self.doc.scene.objects.iter().find(|o| o.id == id).map(|o| (*o.mesh).clone()));
+            let Some(current_mesh) = current_mesh else { self.status("Active object no longer exists"); return };
+            if current_mesh.vertices.len() != file.vertex_count || current_mesh.indices != file.indices
+                || file.uvs.len() != file.vertex_count || file.positions.len() != file.vertex_count
+                || current_mesh.vertices.iter().zip(file.positions.iter()).any(|(v, p)| v.position != *p) {
+                self.status("UV map does not match this mesh geometry/topology. Select the original mesh or matching duplicate."); return;
+            }
+            if file.uvs.iter().flatten().any(|v| !v.is_finite()) {
+                self.status("UV map contains invalid coordinates"); return;
+            }
+            self.doc.checkpoint();
+            let mut mesh = current_mesh;
+            for (vertex, uv) in mesh.vertices.iter_mut().zip(file.uvs.iter()) { vertex.uv = *uv; }
+            if let Some(session) = self.doc.edit.as_mut().filter(|e| e.object_id == id) {
+                session.mesh = mesh.clone();
+            }
+            if let Some(obj) = self.doc.scene.objects.iter_mut().find(|o| o.id == id) {
+                obj.mesh = Arc::new(mesh);
+                obj.primitive = None;
+            }
+            self.doc.touch();
+            self.status(format!("Loaded UV map '{}' from {}", file.object_name, path.display()));
+        }
+    }
+
+    /// Export the active UV map as a transparent PNG reference image.
+    fn export_uv_layout(&mut self) {
+        #[cfg(target_arch = "wasm32")]
+        {
+            self.status("UV layout export is not available on WebAssembly yet");
+            return;
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let mesh = if let Some(session) = self.doc.edit.as_ref() {
+                Some(session.mesh.clone())
+            } else {
+                self.doc.active.and_then(|id| self.doc.scene.objects.iter().find(|o| o.id == id))
+                    .map(|o| (*o.mesh).clone())
+            };
+            let Some(mesh) = mesh else { self.status("Select a mesh before exporting its UV layout"); return };
+            if mesh.indices.len() < 3 { self.status("The active mesh has no UV faces"); return; }
+            let Some(mut path) = rfd::FileDialog::new()
+                .add_filter("PNG image", &["png"])
+                .set_file_name("uv-layout.png")
+                .save_file() else { return };
+            if path.extension().is_none() { path.set_extension("png"); }
+
+            const SIZE: u32 = 1024;
+            let mut rgba = vec![0u8; (SIZE * SIZE * 4) as usize];
+            let mut internal_diagonals = std::collections::HashSet::new();
+            for q in mesh.quad_faces() {
+                let (a, b) = (q[1].min(q[3]), q[1].max(q[3]));
+                internal_diagonals.insert((a, b));
+            }
+            let mut draw_line = |a: glam::Vec2, b: glam::Vec2| {
+                if !a.is_finite() || !b.is_finite() { return; }
+                // Clip to the standard 0..1 UV tile, as Blender's UV layout export does.
+                if a.x < 0.0 || a.x > 1.0 || a.y < 0.0 || a.y > 1.0
+                    || b.x < 0.0 || b.x > 1.0 || b.y < 0.0 || b.y > 1.0 { return; }
+                let ax = a.x * (SIZE - 1) as f32;
+                let ay = (1.0 - a.y) * (SIZE - 1) as f32;
+                let bx = b.x * (SIZE - 1) as f32;
+                let by = (1.0 - b.y) * (SIZE - 1) as f32;
+                let steps = ((bx - ax).abs().max((by - ay).abs())).ceil().max(1.0) as u32;
+                for step in 0..=steps {
+                    let t = step as f32 / steps as f32;
+                    let x = (ax + (bx - ax) * t).round() as i32;
+                    let y = (ay + (by - ay) * t).round() as i32;
+                    for oy in -1..=1 {
+                        for ox in -1..=1 {
+                            let px = x + ox;
+                            let py = y + oy;
+                            if px < 0 || py < 0 || px >= SIZE as i32 || py >= SIZE as i32 { continue; }
+                            let i = ((py as u32 * SIZE + px as u32) * 4) as usize;
+                            rgba[i..i + 4].copy_from_slice(&[245, 205, 90, 255]);
+                        }
+                    }
+                }
+            };
+            for tri in mesh.indices.chunks_exact(3) {
+                if tri.iter().any(|&i| i as usize >= mesh.vertices.len()) { continue; }
+                for (a, b) in [(tri[0], tri[1]), (tri[1], tri[2]), (tri[2], tri[0])] {
+                    let edge = (a.min(b), a.max(b));
+                    if internal_diagonals.contains(&edge) { continue; }
+                    draw_line(
+                        glam::Vec2::from(mesh.vertices[a as usize].uv),
+                        glam::Vec2::from(mesh.vertices[b as usize].uv),
+                    );
+                }
+            }
+            match image::save_buffer(&path, &rgba, SIZE, SIZE, image::ColorType::Rgba8) {
+                Ok(()) => self.status(format!("Exported UV layout to {}", path.display())),
+                Err(e) => self.status(format!("UV layout export failed: {e}")),
+            }
+        }
+    }
+
+    /// Save the active material's base-color paint image as a local PNG.
+    fn save_paint_image(&mut self) {
+        #[cfg(target_arch = "wasm32")]
+        {
+            self.status("Saving paint images is not available on WebAssembly yet");
+            return;
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let Some(id) = self.doc.active else { self.status("No active paint object"); return };
+            let image = self.doc.scene.objects.iter().find(|o| o.id == id)
+                .and_then(|o| o.material.or(Some(0)))
+                .and_then(|mi| self.doc.scene.materials.get(mi))
+                .and_then(|m| m.base_color_tex)
+                .and_then(|ti| self.doc.scene.textures.get(ti))
+                .cloned();
+            let Some(image) = image else { self.status("No paint image assigned"); return };
+            let Some(mut path) = rfd::FileDialog::new()
+                .add_filter("PNG image", &["png"])
+                .set_file_name("paint-texture.png")
+                .save_file() else { return };
+            if path.extension().is_none() { path.set_extension("png"); }
+            match image::save_buffer(&path, &image.rgba8, image.width, image.height, image::ColorType::Rgba8) {
+                Ok(()) => self.status(format!("Saved paint image to {}", path.display())),
+                Err(e) => self.status(format!("Could not save paint image: {e}")),
+            }
         }
     }
 
@@ -2186,6 +2508,21 @@ impl App {
                     if !start {
                         return;
                     }
+                    // --- Texture Paint ---
+                    if self.doc.paint_mode {
+                        let alt = self.mods.alt_key();
+                        if alt {
+                            self.left = true;
+                            self.press = self.cursor;
+                            self.dragged = false;
+                            return;
+                        }
+                        self.doc.checkpoint();
+                        self.paint_stroke = true;
+                        self.paint_last_cursor = Some(self.cursor);
+                        self.paint_sample();
+                        return;
+                    }
                     // --- Sculpt Mode ---
                     if self.doc.sculpt_mode {
                         // Alt+LMB = orbit / Alt+Shift+LMB = pan (Blender "Emulate 3 Button Mouse")
@@ -2286,6 +2623,10 @@ impl App {
                             self.dragged = false;
                         }
                     }
+                } else if self.paint_stroke {
+                    self.paint_stroke = false;
+                    self.paint_last_cursor = None;
+                    self.status("Paint stroke done");
                 } else if self.sculpt_stroke {
                     self.sculpt_stroke = false;
                     self.sculpt_last_hit = None;
@@ -2334,6 +2675,25 @@ impl App {
         let (dx, dy) = ((x - self.cursor.0) as f32, (y - self.cursor.1) as f32);
         self.cursor = (x, y);
         let (shift, ctrl) = (self.mods.shift_key(), self.ctrl());
+        // Texture painting is a continuous stroke, not a single click stamp.
+        // Interpolate screen-space samples so fast pointer movement cannot leave gaps.
+        if self.paint_stroke {
+            let from = self.paint_last_cursor.unwrap_or((x, y));
+            let distance = ((x - from.0).powi(2) + (y - from.1).powi(2)).sqrt();
+            let steps = (distance / 4.0).ceil().max(1.0) as usize;
+            let mut uvs = Vec::with_capacity(steps);
+            for step in 1..=steps {
+                let t = step as f64 / steps as f64;
+                let sample = (from.0 + (x - from.0) * t, from.1 + (y - from.1) * t);
+                if let Some(uv) = self.paint_sample_at(sample) { uvs.push(uv); }
+            }
+            if !uvs.is_empty() {
+                let color = if self.ts.tool == Tool::PaintErase { [0.78, 0.78, 0.78, 1.0] } else { self.ts.paint_color };
+                let _ = self.doc.paint_stroke_uv(&uvs, color, self.ts.paint_radius, self.ts.paint_strength);
+            }
+            self.paint_last_cursor = Some((x, y));
+            return;
+        }
         // Live measure second point
         if self.ts.tool == Tool::Measure && self.measure_a.is_some() {
             if let Some(hit) = self.raycast_ground_or_mesh() {
@@ -2419,9 +2779,10 @@ impl App {
                 self.right_dragged = true;
             }
             if self.right_dragged {
-                // In Sculpt Mode: RMB orbits (Unity-style look) so you never paint by mistake.
-                // Elsewhere: RMB pans (existing behavior).
-                if self.doc.sculpt_mode {
+                // Unity-style viewport navigation in both paint and sculpt modes:
+                // hold RMB and move to orbit; Shift+RMB pans. Keep the legacy
+                // RMB-pan behavior in the other workspaces.
+                if self.doc.paint_mode || self.doc.sculpt_mode {
                     if shift {
                         self.camera.pan(dx, dy);
                     } else {
@@ -2620,7 +2981,15 @@ impl ApplicationHandler for App {
                         MouseScrollDelta::LineDelta(_, y) => y,
                         MouseScrollDelta::PixelDelta(p) => p.y as f32 / 50.0,
                     };
-                    if self.doc.sculpt_mode {
+                    if self.doc.paint_mode {
+                        if self.mods.shift_key() {
+                            self.ts.paint_strength = (self.ts.paint_strength + y * 0.05).clamp(0.05, 1.0);
+                            self.status(format!("Paint strength: {:.2}", self.ts.paint_strength));
+                        } else {
+                            self.ts.paint_radius = (self.ts.paint_radius * (1.0 + 0.1 * y)).clamp(0.005, 0.25);
+                            self.status(format!("Paint radius: {:.3}", self.ts.paint_radius));
+                        }
+                    } else if self.doc.sculpt_mode {
                         if self.mods.alt_key() {
                             self.sculpt.dyntopo_detail = (self.sculpt.dyntopo_detail - y * 0.05).clamp(0.15, 1.5);
                             self.status(format!(

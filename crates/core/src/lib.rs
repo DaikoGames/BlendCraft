@@ -10,6 +10,7 @@ pub mod material;
 pub mod mesh;
 mod edit;
 pub mod sculpt;
+pub mod uv;
 pub mod primitives;
 pub mod fonts;
 pub mod project;
@@ -28,4 +29,8 @@ pub use primitives::{Primitive, TextFont};
 pub use fonts::{font_registry, free_font_catalog, mesh_from_font, system_font_dirs, FontRegistry, CatalogFont};
 pub use edit::{EditDomain, EditPick, EditSelection, EditSession, edge_key, world_positions};
 pub use sculpt::{apply_brush, dyntopo_refine, raycast_mesh, SculptBrush, SculptSettings};
+pub use uv::{
+    normalize_uvs, pack_islands, pick_uv, unwrap_cube, unwrap_planar, unwrap_reset, unwrap_smart,
+    uv_islands, uv_rotate, uv_scale, uv_selection_center, uv_translate,
+};
 pub use scene::{Collection, Object, Scene};

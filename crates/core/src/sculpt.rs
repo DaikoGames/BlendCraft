@@ -67,8 +67,8 @@ impl Default for SculptSettings {
             strength: 0.35,
             invert: false,
             dyntopo: false,
-            /// Relative detail: fraction of brush radius (Blender-like "Relative Detail").
-            /// 0.4 ≈ medium; smaller = denser. Typical range 0.2 .. 0.8
+            // Relative detail: fraction of brush radius (Blender-like).
+            // 0.4 ≈ medium; smaller = denser. Typical range 0.2 .. 0.8
             dyntopo_detail: 0.4,
         }
     }
@@ -196,10 +196,7 @@ pub fn dyntopo_refine(mesh: &mut MeshData, hit: Vec3, radius: f32, detail_relati
         if len < detail * 1.5 {
             continue;
         }
-        let mut v = mesh.vertices[a as usize].clone();
-        v.position = mid.to_array();
         let ni = mesh.vertices.len() as u32 + splits.len() as u32;
-        // push later in order
         splits.insert((a, b), ni);
     }
 

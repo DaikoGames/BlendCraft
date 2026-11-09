@@ -118,3 +118,7 @@ Cross-compiling to other OS/arch pairs is easiest with [cross](https://github.co
 cargo install cross --git https://github.com/cross-rs/cross
 cross build --release -p forge-app --target aarch64-unknown-linux-gnu
 ```
+
+## Offline operation
+
+BlendCraft's modeling, UV editing, project saving, and texture painting are local operations. The optional font catalog is shown as offline reference information only; fonts must be imported from files on the local computer. The application no longer includes the `ureq` HTTP client or a font-download action, and it does not upload project, mesh, UV, or texture data to a server.
