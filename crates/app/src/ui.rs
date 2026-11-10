@@ -2487,7 +2487,13 @@ fn draw_timeline(ui: &mut egui::Ui, doc: &mut Document, st: &mut UiState, action
             actions.push(Action::AnimScrub);
         }
         ui.label(format!("/ {}", anim.frame_end));
-        ui.weak(format!("{} fps", anim.fps));
+        ui.separator();
+        ui.label("FPS");
+        let mut fps = anim.fps;
+        if ui.add(egui::DragValue::new(&mut fps).range(1..=120).speed(1)).changed() {
+            anim.fps = fps.max(1);
+        }
+        ui.weak("playback & render");
 
         ui.separator();
         let auto = anim.auto_key;
@@ -3420,7 +3426,7 @@ fn effective_render_size(st: &UiState) -> (u32, u32) {
     (w.clamp(64, 7680), h.clamp(64, 4320))
 }
 
-fn draw_render_output_props(ui: &mut egui::Ui, st: &mut UiState, actions: &mut Vec<Action>) {
+fn draw_render_output_props(ui: &mut egui::Ui, st: &mut UiState, anim: &mut AnimationData, actions: &mut Vec<Action>) {
     if st.render_width < 64 { st.render_width = 1920; }
     if st.render_height < 64 { st.render_height = 1080; }
     if st.render_percent == 0 { st.render_percent = 100; }
@@ -3500,17 +3506,34 @@ fn draw_render_output_props(ui: &mut egui::Ui, st: &mut UiState, actions: &mut V
         });
 
         ui.separator();
-        ui.label(RichText::new("Frame Range").strong());
+        ui.label(RichText::new("Frame Range (from Timeline)").strong());
         ui.horizontal(|ui| {
-            ui.label("Frames");
-            ui.add(egui::DragValue::new(&mut st.render_anim_frames).range(1..=360).speed(1));
+            ui.label("Start");
+            let mut fs = anim.frame_start;
+            if ui.add(egui::DragValue::new(&mut fs).speed(1)).changed() {
+                anim.frame_start = fs.min(anim.frame_end);
+            }
+            ui.label("End");
+            let mut fe = anim.frame_end;
+            if ui.add(egui::DragValue::new(&mut fe).speed(1)).changed() {
+                anim.frame_end = fe.max(anim.frame_start);
+            }
         });
         ui.horizontal(|ui| {
             ui.label("Frame Rate");
-            ui.add(egui::DragValue::new(&mut st.render_fps).range(1..=120).suffix(" fps"));
+            let mut fps = anim.fps;
+            if ui.add(egui::DragValue::new(&mut fps).range(1..=120).suffix(" fps")).changed() {
+                anim.fps = fps.max(1);
+            }
         });
-        let secs = st.render_anim_frames as f32 / st.render_fps.max(1) as f32;
-        ui.weak(format!("Animation ≈ {secs:.1}s turntable · PNG sequence"));
+        let nframes = (anim.frame_end - anim.frame_start + 1).max(1) as f32;
+        let secs = nframes / anim.fps.max(1) as f32;
+        ui.weak(format!(
+            "{nframes:.0} frames at {fps} fps → video ≈ {secs:.2}s",
+            fps = anim.fps.max(1)
+        ));
+        ui.weak(format!("Same FPS as Timeline · 1 frame = 1/{} s of time", anim.fps.max(1)));
+        ui.weak("Tip: use 720p or 50% for faster animation bakes.");
 
         ui.separator();
         ui.label(RichText::new("Output").strong());
@@ -3572,7 +3595,7 @@ fn properties(ui: &mut egui::Ui, doc: &mut Document, st: &mut UiState, actions: 
 
     // --- Render / Output tabs do not need a selection ---
     if st.properties_tab == PropertiesTab::Render || st.properties_tab == PropertiesTab::Output {
-        draw_render_output_props(ui, st, actions);
+        draw_render_output_props(ui, st, &mut doc.scene.animation, actions);
         return;
     }
 

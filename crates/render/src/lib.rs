@@ -93,7 +93,6 @@ const LINE_ATTRS: [wgpu::VertexAttribute; 2] = wgpu::vertex_attr_array![0 => Flo
 
 type TexCache = HashMap<(usize, bool), wgpu::TextureView>;
 
-const SHADOW_SIZE: u32 = 4096;
 
 pub struct Renderer {
     surface: wgpu::Surface<'static>,
@@ -160,14 +159,35 @@ impl Renderer {
     pub async fn new(target: impl Into<wgpu::SurfaceTarget<'static>>, width: u32, height: u32) -> Result<Self> {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::default());
         let surface = instance.create_surface(target)?;
-        let adapter = instance
-            .request_adapter(&wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::HighPerformance,
+        // Prefer hardware rendering, but do not require a discrete GPU.
+        // Retry with a lower-power adapter and finally a software/fallback adapter.
+        let adapter_options = |power_preference, force_fallback_adapter| {
+            wgpu::RequestAdapterOptions {
+                power_preference,
                 compatible_surface: Some(&surface),
-                force_fallback_adapter: false,
-            })
+                force_fallback_adapter,
+            }
+        };
+        let adapter = if let Some(adapter) = instance
+            .request_adapter(&adapter_options(wgpu::PowerPreference::HighPerformance, false))
             .await
-            .ok_or_else(|| anyhow!("no suitable GPU adapter found"))?;
+        {
+            adapter
+        } else if let Some(adapter) = instance
+            .request_adapter(&adapter_options(wgpu::PowerPreference::LowPower, false))
+            .await
+        {
+            adapter
+        } else if let Some(adapter) = instance
+            .request_adapter(&adapter_options(wgpu::PowerPreference::LowPower, true))
+            .await
+        {
+            adapter
+        } else {
+            return Err(anyhow!(
+                "No compatible graphics adapter was found. Check that a graphics driver or supported software renderer is available; this platform/backend may not be supported by wgpu."
+            ));
+        };
         let (device, queue) = adapter
             .request_device(
                 &wgpu::DeviceDescriptor {
@@ -181,7 +201,18 @@ impl Renderer {
             .await?;
 
         let caps = surface.get_capabilities(&adapter);
-        let format = caps.formats.iter().copied().find(|f| f.is_srgb()).unwrap_or(caps.formats[0]);
+        let format = caps
+            .formats
+            .iter()
+            .copied()
+            .find(|f| f.is_srgb())
+            .or_else(|| caps.formats.first().copied())
+            .ok_or_else(|| anyhow!("The selected graphics adapter exposes no surface formats"))?;
+        let alpha_mode = caps
+            .alpha_modes
+            .first()
+            .copied()
+            .ok_or_else(|| anyhow!("The selected graphics adapter exposes no surface alpha modes"))?;
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format,
@@ -189,7 +220,7 @@ impl Renderer {
             height: height.max(1),
             present_mode: wgpu::PresentMode::AutoVsync,
             desired_maximum_frame_latency: 2,
-            alpha_mode: caps.alpha_modes[0],
+            alpha_mode,
             view_formats: vec![],
         };
         surface.configure(&device, &config);
@@ -324,9 +355,15 @@ impl Renderer {
             build_environment(&device, &queue, &EnvironmentMap::procedural_sky(512, 256));
 
         // ---- shadow map (single depth map) ----
+        // Downlevel devices and software adapters may expose a smaller texture limit.
+        let shadow_size = 4096u32.min(device.limits().max_texture_dimension_2d).max(1);
         let shadow_tex = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("shadow map"),
-            size: wgpu::Extent3d { width: SHADOW_SIZE, height: SHADOW_SIZE, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width: shadow_size,
+                height: shadow_size,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -1080,7 +1117,7 @@ fn vs_main(@location(0) pos: vec3<f32>) -> @builtin(position) vec4<f32> {
         let cache = self.capture_cache.as_ref().unwrap();
         let color_view = &cache.color_view;
         let depth_view = &cache.depth_view;
-        let color_tex = &cache.color_tex;
+        let _color_tex = &cache.color_tex;
         let padded_bpr = cache.padded_bpr;
 
         let vp = camera.view_proj(width as f32 / height as f32);
