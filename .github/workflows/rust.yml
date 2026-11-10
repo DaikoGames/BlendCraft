@@ -17,6 +17,10 @@ env:
   # (see "Detect binary name" steps), so it no longer has to match this.
   APP_PACKAGE: forge-app
 
+# NOTE: OpenH264 and minimp4 were removed (video export is now the pure-Rust
+# `forge-video` crate), so no job below needs cmake, nasm, libclang or a C++
+# cross compiler any more, and there is no Cross.toml pre-build step.
+
 jobs:
   # ---------------------------------------------------------------------------
   # Tests (fast feedback, Linux only)
@@ -34,7 +38,7 @@ jobs:
           sudo apt-get install -y pkg-config libx11-dev libxcursor-dev libxrandr-dev \
             libxi-dev libxkbcommon-dev libwayland-dev libgl1-mesa-dev libasound2-dev \
             libudev-dev
-      - run: cargo test -p forge-core
+      - run: cargo test -p forge-core -p forge-video
 
   # ---------------------------------------------------------------------------
   # WebAssembly: library crates only (the full GUI app has no web entry yet)
@@ -70,6 +74,8 @@ jobs:
           - { name: linux-armv7,   os: ubuntu-24.04,   target: armv7-unknown-linux-gnueabihf, cross: true,  ext: "",     experimental: true  }
           - { name: linux-riscv64,      os: ubuntu-24.04, target: riscv64gc-unknown-linux-gnu,  cross: true, ext: "", experimental: true }
           # No cross image exists for this target, so it is built with cargo-zigbuild (zig as C cross-compiler).
+          # NOTE: static musl binaries cannot dlopen the system GPU/windowing libraries,
+          # so this one compiles but is unlikely to open a window at runtime.
           - { name: linux-riscv64-musl, os: ubuntu-24.04, target: riscv64gc-unknown-linux-musl, cross: false, zig: true, ext: "", experimental: true }
           # ---- Windows ----
           - { name: windows-x64,   os: windows-latest, target: x86_64-pc-windows-msvc,        cross: false, ext: ".exe", experimental: false }
@@ -480,4 +486,6 @@ jobs:
 
             Experimental, untested builds: Linux x86 / ARM64 / ARMv7 / RISC-V 64 (glibc and musl), Windows x86 / ARM64,
             FreeBSD x86 / ARM64. Flatpaks are built for x86_64 and aarch64. On Linux/macOS/FreeBSD run chmod +x on the downloaded file first. If one is missing from the assets, its build failed.
+
+            Animation export is written by a built-in pure-Rust encoder (Motion-JPEG in an .avi file); no ffmpeg or other external tool is needed.
           files: out/*
