@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/core", "crates/io", "crates/render", "crates/app"]
+members = ["crates/core", "crates/io", "crates/render", "crates/video", "crates/app"]
 
 [workspace.package]
 version = "0.1.0"
@@ -45,6 +45,7 @@ web-sys = { version = "0.3", features = [
 forge-core = { path = "crates/core" }
 forge-io = { path = "crates/io" }
 forge-render = { path = "crates/render" }
+forge-video = { path = "crates/video" }
 
 [profile.release]
 lto = "thin"

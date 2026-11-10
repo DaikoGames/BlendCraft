@@ -1,0 +1,10 @@
+[package]
+name = "forge-video"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Pure-Rust, multi-threaded MJPEG/AVI writer for BlendCraft animation export (no C/C++ code, no ffmpeg)"
+
+[dependencies]
+# Pure-Rust JPEG encoder (already used by the app for texture import).
+image.workspace = true

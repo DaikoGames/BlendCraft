@@ -84,9 +84,12 @@ File > Export has glTF Binary and Wavefront OBJ, each also as "selected only".
 ## Rendering
 - Viewport is real-time with optional shadows.
 - **View > Render Image…** saves a PNG of the current 3D view (resolution configurable in the Render panel).
-- **View > Render Animation…** renders the current timeline range as a PNG sequence plus an H.264 MP4.
-  The MP4 is produced with the OpenH264 encoder (Cisco, real-time capable) and the pure-Rust minimp4 muxer —
-  no system `ffmpeg` binary is required. This works out of the box on Windows, Linux, macOS and FreeBSD.
+- **View > Render Animation…** renders the current timeline range to `animation.avi` (Motion-JPEG).
+  The encoder is the pure-Rust `forge-video` crate: frames are JPEG-compressed on a pool of worker threads
+  while the GPU renders the next frame, and streamed straight to disk. There is no C/C++ code, no `ffmpeg`
+  and no extra build tools, so it builds and runs on every target the rest of the app supports.
+  The AVI opens in VLC, mpv, QuickTime, Windows players and video editors (Blender, DaVinci, Premiere).
+  Need an H.264 MP4? `ffmpeg -i animation.avi -c:v libx264 -crf 18 animation.mp4`.
 
 ## Recent files
 File > Open Recent lists the last 10 projects you opened or saved. The list is stored in `recent.txt` in your config folder (APPDATA\BlendCraft on Windows, ~/Library/Application Support/BlendCraft on macOS, ~/.config/BlendCraft on Linux).

@@ -2582,81 +2582,22 @@ impl App {
             // 1. Fast GPU path already skips shadows and reuses offscreen targets.
             // 2. Do NOT write a PNG every frame by default when video export works
             //    (PNG compress + disk is often slower than the GPU itself).
-            // 3. OpenH264 encode runs on a background thread so the next frame can
-            //    start rendering while the previous one is compressed.
-            // 4. Bound the in-flight queue (2 frames) so RAM stays reasonable.
+            // 3. JPEG encoding runs on a pool of worker threads so the next frame can
+            //    start rendering while previous ones are compressed in parallel.
+            // 4. The in-flight queue is bounded so RAM stays reasonable.
             // Resolution still comes from Render settings — use 50% / 1280×720
             // if you need more speed on weaker GPUs.
             let write_png_frames = false; // set true only if you need the image sequence
 
-            #[cfg(feature = "video-export")]
-            let enc_w = (w & !1).max(2);
-            #[cfg(feature = "video-export")]
-            let enc_h = (h & !1).max(2);
-
-            #[cfg(feature = "video-export")]
-            let (job_tx, job_rx) = std::sync::mpsc::sync_channel::<(u32, Vec<u8>)>(2);
-            #[cfg(feature = "video-export")]
-            let (done_tx, done_rx) = std::sync::mpsc::channel::<Result<Vec<u8>, String>>();
-
-            #[cfg(feature = "video-export")]
-            let worker = {
-                let frames_dir = frames_dir.clone();
-                let write_png = write_png_frames;
-                let fps = fps;
-                let enc_w = enc_w;
-                let enc_h = enc_h;
-                let w = w;
-                let h = h;
-                std::thread::spawn(move || {
-                    let config = openh264::encoder::EncoderConfig::new()
-                        .max_frame_rate(fps as f32)
-                        .set_bitrate_bps(
-                            (enc_w as u64 * enc_h as u64 * fps as u64 / 6).max(400_000) as u32,
-                        );
-                    let mut encoder = match openh264::encoder::Encoder::with_api_config(
-                        openh264::OpenH264API::from_source(),
-                        config,
-                    ) {
-                        Ok(e) => Some(e),
-                        Err(e) => {
-                            log::warn!("OpenH264 encoder init failed: {e}");
-                            None
-                        }
-                    };
-                    let mut yuv = openh264::formats::YUVBuffer::new(enc_w as usize, enc_h as usize);
-                    let mut h264_buf: Vec<u8> = Vec::new();
-
-                    while let Ok((frame, rgba)) = job_rx.recv() {
-                        if write_png {
-                            let path = frames_dir.join(format!("frame_{:04}.png", frame));
-                            let _ = image::save_buffer(&path, &rgba, w, h, image::ColorType::Rgba8);
-                        }
-                        if let Some(enc) = encoder.as_mut() {
-                            let mut rgb = Vec::with_capacity((enc_w * enc_h * 3) as usize);
-                            for y in 0..enc_h {
-                                let src_row = (y as usize) * (w as usize) * 4;
-                                for x in 0..enc_w {
-                                    let i = src_row + (x as usize) * 4;
-                                    if i + 2 < rgba.len() {
-                                        rgb.extend_from_slice(&rgba[i..i + 3]);
-                                    } else {
-                                        rgb.extend_from_slice(&[0, 0, 0]);
-                                    }
-                                }
-                            }
-                            let rgb_src = openh264::formats::RgbSliceU8::new(
-                                &rgb,
-                                (enc_w as usize, enc_h as usize),
-                            );
-                            yuv.read_rgb(rgb_src);
-                            if let Ok(bitstream) = enc.encode(&yuv) {
-                                bitstream.write_vec(&mut h264_buf);
-                            }
-                        }
-                    }
-                    let _ = done_tx.send(Ok(h264_buf));
-                })
+            // Pure-Rust MJPEG/AVI writer (crates/video): frames are JPEG-compressed on a
+            // pool of worker threads and streamed to disk, so no C/C++ encoder is needed.
+            let avi_path = dir.join("animation.avi");
+            let mut video = match forge_video::VideoWriter::create(&avi_path, w, h, fps, 90) {
+                Ok(v) => Some(v),
+                Err(e) => {
+                    log::warn!("video writer init failed: {e}");
+                    None
+                }
             };
 
             for frame in start..=end {
@@ -2677,20 +2618,17 @@ impl App {
                 match result {
                     Ok(rgba) => {
                         ok += 1;
-                        #[cfg(feature = "video-export")]
-                        {
-                            // Bounded channel: blocks only if 2 frames are already
-                            // waiting to be encoded (protects RAM on long bakes).
-                            if job_tx.send((frame as u32, rgba)).is_err() {
-                                err_msg = Some("Encode worker stopped unexpectedly".into());
-                                break;
-                            }
-                        }
-                        #[cfg(not(feature = "video-export"))]
-                        {
+                        // PNG sequence only when requested, or as a fallback if the
+                        // video writer could not be created.
+                        if write_png_frames || video.is_none() {
                             let path = frames_dir.join(format!("frame_{:04}.png", frame));
-                            if image::save_buffer(&path, &rgba, w, h, image::ColorType::Rgba8).is_ok() {
-                                // counted above
+                            let _ = image::save_buffer(&path, &rgba, w, h, image::ColorType::Rgba8);
+                        }
+                        if let Some(v) = video.as_mut() {
+                            // Blocks only if the encoder queue is full (bounds RAM).
+                            if let Err(e) = v.push_rgba(rgba) {
+                                err_msg = Some(format!("Video encoding failed: {e}"));
+                                break;
                             }
                         }
                     }
@@ -2712,60 +2650,28 @@ impl App {
             let elapsed = t0.elapsed().as_secs_f32();
             let fps_render = if elapsed > 0.0 { ok as f32 / elapsed } else { 0.0 };
 
-            // Finish encode worker and mux MP4.
+            // Finish the encoder threads and finalize the AVI index.
             let mut video_note = String::new();
-            #[cfg(feature = "video-export")]
-            {
-                drop(job_tx); // close channel so worker exits
-                let h264_buf = match done_rx.recv() {
-                    Ok(Ok(buf)) => buf,
-                    Ok(Err(e)) => {
-                        log::warn!("encode worker error: {e}");
-                        Vec::new()
+            match video.take() {
+                Some(v) => match v.finish() {
+                    Ok(stats) if err_msg.is_none() && stats.frames > 0 => {
+                        video_note = format!(" · video {}", avi_path.display());
                     }
-                    Err(_) => Vec::new(),
-                };
-                let _ = worker.join();
-
-                if err_msg.is_none() && ok > 0 && !h264_buf.is_empty() {
-                    let mp4_path = dir.join("animation.mp4");
-                    let mut video_buffer = std::io::Cursor::new(Vec::new());
-                    {
-                        let mut mp4muxer = minimp4::Mp4Muxer::new(&mut video_buffer);
-                        mp4muxer.init_video(w as i32, h as i32, false, "BlendCraft animation");
-                        // Critical: pass the scene FPS so the container duration matches playback
-                        // (write_video alone hardcodes 60 fps in minimp4).
-                        mp4muxer.write_video_with_fps(&h264_buf, fps.max(1));
-                        mp4muxer.close();
-                    }
-                    use std::io::{Read, Seek, SeekFrom, Write};
-                    if video_buffer.seek(SeekFrom::Start(0)).is_ok() {
-                        let mut out = Vec::new();
-                        if video_buffer.read_to_end(&mut out).is_ok() {
-                            if let Ok(mut f) = std::fs::File::create(&mp4_path) {
-                                if f.write_all(&out).is_ok() {
-                                    video_note = format!(" · video {}", mp4_path.display());
-                                }
-                            }
+                    Ok(_) => {}
+                    Err(e) => {
+                        if err_msg.is_none() {
+                            err_msg = Some(format!("Video encoding failed: {e}"));
                         }
                     }
-                    if video_note.is_empty() {
-                        video_note = " · MP4 mux failed".into();
-                    }
-                } else if err_msg.is_none() && ok > 0 {
-                    video_note = " · OpenH264 unavailable (no MP4)".into();
-                    // Fallback: write PNGs if we skipped them and video failed
-                    if !write_png_frames {
-                        video_note.push_str(" · re-run with PNG fallback if needed");
+                },
+                None => {
+                    if err_msg.is_none() && ok > 0 {
+                        video_note = " · video writer unavailable (PNG sequence in frames/)".into();
                     }
                 }
             }
-            #[cfg(not(feature = "video-export"))]
-            if err_msg.is_none() && ok > 0 {
-                video_note = " · video-export feature disabled (PNG sequence in frames/)".into();
-            }
 
-                        if let Some(msg) = err_msg {
+            if let Some(msg) = err_msg {
                 self.status(msg);
             } else {
                 self.status(format!(
