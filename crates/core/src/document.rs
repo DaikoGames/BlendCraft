@@ -58,6 +58,8 @@ pub struct Document {
     pub edit: Option<EditSession>,
     /// When true, the active armature is in bone Edit Mode (structure).
     pub armature_edit: bool,
+    /// Armature Pose Mode; separate from Object Mode and Armature Edit Mode.
+    pub pose_mode: bool,
     /// Sculpt Mode on the active mesh.
     pub sculpt_mode: bool,
     /// UV Editing Mode.
@@ -127,6 +129,7 @@ impl Document {
             edit_open: false,
             edit: None,
             armature_edit: false,
+            pose_mode: false,
             sculpt_mode: false,
             uv_mode: false,
             paint_mode: false,
@@ -143,6 +146,10 @@ impl Document {
     }
 
     fn sel_changed(&mut self) {
+        if self.active_armature().is_none() {
+            self.armature_edit = false;
+            self.pose_mode = false;
+        }
         self.version += 1;
     }
 
@@ -218,6 +225,10 @@ impl Document {
         self.selection.retain(|id| ids.contains(id));
         if self.active.map_or(false, |a| !ids.contains(&a)) {
             self.active = None;
+        }
+        if self.active_armature().is_none() {
+            self.armature_edit = false;
+            self.pose_mode = false;
         }
         // Keep Edit Mode only if the edited object still exists
         if let Some(e) = self.edit.as_ref() {
@@ -1090,6 +1101,7 @@ impl Document {
             self.exit_uv_mode();
         }
         self.armature_edit = false;
+        self.pose_mode = false;
         let id = self.active.or_else(|| self.selection.iter().copied().next())
             .ok_or_else(|| "Select a mesh object first".to_string())?;
         let obj = self.scene.objects.iter().find(|o| o.id == id)
@@ -1266,6 +1278,7 @@ impl Document {
             self.exit_sculpt_mode();
         }
         self.armature_edit = false;
+        self.pose_mode = false;
         let id = self.active.or_else(|| self.selection.iter().copied().next())
             .ok_or_else(|| "Select a mesh object first".to_string())?;
         let obj = self.scene.objects.iter().find(|o| o.id == id)
@@ -1489,6 +1502,7 @@ impl Document {
             self.exit_edit_mode(true);
         }
         self.armature_edit = false;
+        self.pose_mode = false;
         let id = self.active.or_else(|| self.selection.iter().copied().next())
             .ok_or_else(|| "Select a mesh object first".to_string())?;
         let obj = self.scene.objects.iter().find(|o| o.id == id)
@@ -1563,6 +1577,7 @@ impl Document {
             .ok_or_else(|| "Object not found".to_string())?;
         let obj = &self.scene.objects[idx];
         if matches!(obj.kind, ObjectKind::Armature(_)) {
+            self.pose_mode = false;
             self.armature_edit = true;
             self.checkpoint();
             return Ok(());
@@ -1607,8 +1622,15 @@ impl Document {
     }
 
     pub fn toggle_edit_mode(&mut self) -> Result<(), String> {
+        // Tab leaves Pose Mode for Object Mode; the mode selector can switch
+        // directly to Armature Edit Mode when that is explicitly requested.
+        if self.pose_mode {
+            self.pose_mode = false;
+            return Ok(());
+        }
         if self.armature_edit {
             self.armature_edit = false;
+            self.pose_mode = false;
             return Ok(());
         }
         if self.edit.is_some() {
@@ -1872,12 +1894,28 @@ impl Document {
             return Err("Select an Armature object".into());
         }
         self.checkpoint();
+        self.pose_mode = false;
         self.armature_edit = true;
         Ok(())
     }
 
     pub fn exit_armature_edit(&mut self) {
         self.armature_edit = false;
+        self.pose_mode = false;
+    }
+
+    pub fn toggle_pose_mode(&mut self) -> Result<(), String> {
+        if self.active_armature().is_none() {
+            return Err("Select an Armature object".into());
+        }
+        if self.armature_edit {
+            self.armature_edit = false;
+            self.pose_mode = true;
+        } else {
+            self.pose_mode = !self.pose_mode;
+        }
+        self.touch();
+        Ok(())
     }
 
     pub fn armature_extrude(&mut self) {
@@ -1898,10 +1936,42 @@ impl Document {
     }
 
     pub fn armature_delete_bones(&mut self) {
+        let Some(armature_id) = self.active else { return };
         self.checkpoint();
-        if let Some(a) = self.active_armature_mut() {
-            a.delete_selected();
+        let remap = if let Some(a) = self.active_armature_mut() {
+            a.delete_selected()
+        } else { return };
+
+        // Keep every bound mesh's joint indices valid after bone indices shift.
+        for object in &mut self.scene.objects {
+            let Some(skin) = object.skin.as_mut() else { continue };
+            if skin.armature_id != armature_id { continue; }
+            for vertex in 0..skin.joints.len().min(skin.weights.len()) {
+                let mut joints = skin.joints[vertex];
+                let mut weights = skin.weights[vertex];
+                for slot in 0..4 {
+                    let old = joints[slot] as usize;
+                    if let Some(Some(new)) = remap.get(old) {
+                        joints[slot] = *new as u16;
+                    } else {
+                        weights[slot] = 0.0;
+                    }
+                }
+                let sum: f32 = weights.iter().sum();
+                if sum > 1.0e-8 {
+                    for weight in &mut weights { *weight /= sum; }
+                } else {
+                    // Keep a deterministic fallback binding. With zero bones the
+                    // skin evaluator returns rest positions; a later first bone
+                    // can safely become joint 0 instead of collapsing the mesh.
+                    joints = [0; 4];
+                    weights = [1.0, 0.0, 0.0, 0.0];
+                }
+                skin.joints[vertex] = joints;
+                skin.weights[vertex] = weights;
+            }
         }
+        self.apply_all_skinning();
         self.touch();
     }
 

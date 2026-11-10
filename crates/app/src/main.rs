@@ -26,11 +26,23 @@ enum EditXformKind {
     Scale,
 }
 
-/// Modal transform for selected mesh components in Edit Mode (G / R / S).
+/// Active mouse drag for extruding a new bone from a selected bone tip.
 struct BoneExtrudeDrag {
     bone_idx: u32,
     /// Fixed head in armature local space
     head: glam::Vec3,
+}
+
+/// Snapshot-based transform for selected armature bones. The same tool works
+/// on rest geometry in Armature Edit Mode and pose channels in Pose Mode.
+struct BoneXform {
+    kind: EditXformKind,
+    start_cursor: (f64, f64),
+    bones: Vec<(u32, [f32; 3], [f32; 3], [f32; 4], [f32; 3], [f32; 3])>,
+    /// Original rest endpoints for every bone, used to preserve connected joints.
+    rest_joints: Vec<(glam::Vec3, glam::Vec3)>,
+    center: glam::Vec3,
+    inv_world: glam::Mat4,
 }
 
 struct EditGizmoDrag {
@@ -43,6 +55,7 @@ struct EditGizmoDrag {
     inv_world: glam::Mat4,
 }
 
+/// Modal transform for selected mesh components in Edit Mode (G / R / S).
 struct EditXform {
     kind: EditXformKind,
     start_cursor: (f64, f64),
@@ -111,17 +124,19 @@ struct App {
     /// Hovered axis of the Edit Mode move gizmo (0=X,1=Y,2=Z)
     edit_gizmo_hover: Option<usize>,
     edit_gizmo_drag: Option<EditGizmoDrag>,
-    bone_pose_drag: Option<(f64, f64)>,
+    bone_xform_drag: Option<BoneXform>,
     bone_extrude_drag: Option<BoneExtrudeDrag>,
     sel_drag: Option<SelDrag>,
-    /// Measure tool: first click point in world space
+    /// Completed measurements remain visible until explicitly cleared.
+    measurements: Vec<(glam::Vec3, glam::Vec3)>,
+    /// Start and live endpoint for the measurement currently being drawn.
     measure_a: Option<glam::Vec3>,
-    /// Measure tool: second point (live while moving)
     measure_b: Option<glam::Vec3>,
     /// Annotate tool: strokes as lists of world-space points
     annotations: Vec<Vec<glam::Vec3>>,
-    /// Stroke currently being drawn
+    /// Stroke currently being drawn; only active after an explicit LMB press.
     annotate_stroke: Option<Vec<glam::Vec3>>,
+    annotate_drag_active: bool,
     /// Ctrl+LMB interactive edit tool
     tool_drag: Option<ToolDrag>,
     sculpt: SculptSettings,
@@ -265,13 +280,15 @@ impl App {
             edit_xform: None,
             edit_gizmo_hover: None,
             edit_gizmo_drag: None,
-            bone_pose_drag: None,
+            bone_xform_drag: None,
             bone_extrude_drag: None,
             sel_drag: None,
+            measurements: Vec::new(),
             measure_a: None,
             measure_b: None,
             annotations: Vec::new(),
             annotate_stroke: None,
+            annotate_drag_active: false,
             tool_drag: None,
             sculpt: SculptSettings::default(),
             sculpt_stroke: false,
@@ -751,6 +768,11 @@ impl App {
             (None, false) => self.doc.select_none(),
             (None, true) => {}
         }
+        if !self.doc.armature_edit && !self.doc.pose_mode
+            && matches!(self.ts.tool, Tool::BoneAdd | Tool::BoneExtrude | Tool::BoneDelete | Tool::PoseClear)
+        {
+            self.ts.tool = Tool::Select;
+        }
     }
 
 
@@ -897,6 +919,50 @@ impl App {
     }
 
 
+    /// Start an extrusion directly from a visible bone joint. The new bone
+    /// begins exactly at the clicked head or tail and is placed by dragging.
+    fn start_bone_extrude_from_joint(&mut self, parent: u32, from_head: bool) -> bool {
+        if !self.doc.armature_edit { return false; }
+        let joint = {
+            let Some(arm) = self.doc.active_armature() else { return false };
+            let Some(bone) = arm.bones.get(parent as usize) else { return false };
+            if from_head { bone.head_v() } else { bone.tail_v() }
+        };
+        self.doc.checkpoint();
+        let new_index = self.doc.active_armature_mut().and_then(|arm| arm.extrude_from_joint(parent, from_head));
+        let Some(new_index) = new_index else { self.doc.undo(); return false; };
+        let head = joint;
+        self.bone_extrude_drag = Some(BoneExtrudeDrag { bone_idx: new_index, head });
+        self.update_bone_extrude();
+        self.status(if from_head { "Extruding branch from bone head" } else { "Extruding child from bone tail" });
+        true
+    }
+
+    /// Hit-test the visible head/tail handles. Returns true when a drag starts.
+    fn try_start_bone_joint_extrude(&mut self) -> bool {
+        if !self.doc.armature_edit { return false; }
+        let Some(id) = self.doc.active else { return false };
+        let Some(object_index) = self.doc.scene.objects.iter().position(|o| o.id == id) else { return false };
+        let world = self.doc.scene.world_matrices()[object_index];
+        let Some(arm) = self.doc.active_armature() else { return false };
+        let cursor = glam::Vec2::new(self.cursor.0 as f32, self.cursor.1 as f32);
+        let mut best: Option<(f32, u32, bool)> = None;
+        for (index, bone) in arm.bones.iter().enumerate() {
+            for (point, from_head) in [(bone.head_v(), true), (bone.tail_v(), false)] {
+                let point_world = world.transform_point3(point);
+                let Some(screen) = tools::project_px(&self.camera, self.viewport, point_world) else { continue };
+                let distance = (screen - cursor).length();
+                if distance <= 10.0 && best.map_or(true, |(d, _, _)| distance < d) {
+                    best = Some((distance, index as u32, from_head));
+                }
+            }
+        }
+        if let Some((_, bone, from_head)) = best {
+            return self.start_bone_extrude_from_joint(bone, from_head);
+        }
+        false
+    }
+
     /// Blender-style: extrude bone from selected tip, then grab the new tip with the mouse.
     fn start_bone_extrude(&mut self) {
         if !self.doc.armature_edit {
@@ -998,14 +1064,118 @@ impl App {
         self.status("Extrude cancelled");
     }
 
-    fn start_bone_pose_rotate(&mut self) {
-        if self.doc.active_armature().map(|a| a.active.is_none()).unwrap_or(true) {
-            self.status("Select a bone first");
+    fn start_bone_xform(&mut self, kind: EditXformKind, confirm_on_release: bool) {
+        let Some(arm) = self.doc.active_armature() else {
+            self.status("Select an Armature first");
+            return;
+        };
+        let mut indices: Vec<u32> = arm.selected.iter().copied().collect();
+        if indices.is_empty() {
+            if let Some(active) = arm.active { indices.push(active); }
+        }
+        if indices.is_empty() {
+            self.status("Select one or more bones first");
             return;
         }
+        let snapshots: Vec<_> = indices.into_iter().filter_map(|i| {
+            arm.bones.get(i as usize).map(|b| (
+                i, b.head, b.tail, b.pose_rot, b.pose_loc, b.pose_scale
+            ))
+        }).collect();
+        if snapshots.is_empty() { return; }
+        let rest_joints: Vec<_> = arm.bones.iter()
+            .map(|b| (b.head_v(), b.tail_v()))
+            .collect();
+        let center = snapshots.iter().fold(glam::Vec3::ZERO, |sum, b| {
+            sum + glam::Vec3::from(b.1) + glam::Vec3::from(b.2)
+        }) / (snapshots.len() as f32 * 2.0);
+        let Some(id) = self.doc.active else { return };
+        let Some(idx) = self.doc.scene.objects.iter().position(|o| o.id == id) else { return };
+        let inv_world = self.doc.scene.world_matrices()[idx].inverse();
         self.doc.checkpoint();
-        self.bone_pose_drag = Some(self.cursor);
-        self.status("Pose rotate — move mouse, LMB confirm, RMB/Esc cancel");
+        self.bone_xform_drag = Some(BoneXform {
+            kind, start_cursor: self.cursor, bones: snapshots, rest_joints, center, inv_world,
+        });
+        let name = match kind { EditXformKind::Move => "Move", EditXformKind::Rotate => "Rotate", EditXformKind::Scale => "Scale" };
+        self.status(if confirm_on_release { format!("Bone {name} — drag and release to confirm") } else { format!("Bone {name} — LMB confirm, RMB/Esc cancel") });
+    }
+
+    fn update_bone_xform(&mut self) {
+        let Some(xf) = self.bone_xform_drag.as_ref() else { return };
+        let dx = (self.cursor.0 - xf.start_cursor.0) as f32;
+        let dy = (self.cursor.1 - xf.start_cursor.1) as f32;
+        let inv_view = self.camera.view().inverse();
+        let right = inv_view.x_axis.truncate().normalize_or_zero();
+        let up = inv_view.y_axis.truncate().normalize_or_zero();
+        let view_axis = inv_view.z_axis.truncate().normalize_or_zero();
+        let dist = (self.camera.target - inv_view.w_axis.truncate()).length().max(0.1);
+        let world_delta = right * (dx * dist * 0.0025) + up * (-dy * dist * 0.0025);
+        let local_delta = xf.inv_world.transform_vector3(world_delta);
+        let local_axis = xf.inv_world.transform_vector3(view_axis).normalize_or_zero();
+        let angle = dx * 0.01;
+        let rotation = glam::Quat::from_axis_angle(local_axis, angle);
+        let factor = (-dy * 0.01).exp().clamp(0.01, 100.0);
+        let center = xf.center;
+        let kind = xf.kind;
+        let snapshots = xf.bones.clone();
+        let rest_joints = xf.rest_joints.clone();
+        let selected_bones: std::collections::BTreeSet<u32> = snapshots.iter().map(|b| b.0).collect();
+        let pose_mode = self.doc.pose_mode;
+        if let Some(arm) = self.doc.active_armature_mut() {
+            for (i, head, tail, pose_rot, pose_loc, pose_scale) in snapshots {
+                let Some(b) = arm.bones.get_mut(i as usize) else { continue };
+                if pose_mode {
+                    match kind {
+                        EditXformKind::Move => {
+                            let p = glam::Vec3::from(pose_loc) + local_delta;
+                            b.pose_loc = p.to_array();
+                        }
+                        EditXformKind::Rotate => {
+                            let rest_dir = (glam::Vec3::from(tail) - glam::Vec3::from(head)).normalize_or_zero();
+                            let rest_rot = if rest_dir.length_squared() < 1e-10 { glam::Quat::IDENTITY } else { glam::Quat::from_rotation_arc(glam::Vec3::Y, rest_dir) };
+                            let bone_axis = rest_rot.conjugate() * local_axis;
+                            let bone_delta = glam::Quat::from_axis_angle(bone_axis, angle);
+                            let q = glam::Quat::from_xyzw(pose_rot[0], pose_rot[1], pose_rot[2], pose_rot[3]).normalize();
+                            let q = (bone_delta * q).normalize();
+                            b.pose_rot = [q.x, q.y, q.z, q.w];
+                        }
+                        EditXformKind::Scale => {
+                            b.pose_scale = (glam::Vec3::from(pose_scale) * factor).clamp(glam::Vec3::splat(0.01), glam::Vec3::splat(100.0)).to_array();
+                        }
+                    }
+                } else {
+                    let h = glam::Vec3::from(head);
+                    let t = glam::Vec3::from(tail);
+                    let (h, t) = match kind {
+                        EditXformKind::Move => (h + local_delta, t + local_delta),
+                        EditXformKind::Rotate => (center + rotation * (h - center), center + rotation * (t - center)),
+                        EditXformKind::Scale => (center + (h - center) * factor, center + (t - center) * factor),
+                    };
+                    b.head = h.to_array();
+                    b.tail = t.to_array();
+                }
+            }
+            if !pose_mode {
+                arm.propagate_connected_rest_joints(&rest_joints, &selected_bones);
+            }
+        }
+        if pose_mode { self.doc.apply_all_skinning(); }
+        self.doc.touch();
+    }
+
+    fn finish_bone_xform(&mut self, cancel: bool) {
+        if self.bone_xform_drag.take().is_some() {
+            if cancel {
+                self.doc.undo();
+                self.status("Bone transform cancelled");
+            } else {
+                self.status("Bone transform confirmed");
+            }
+        }
+    }
+
+    fn start_bone_pose_rotate(&mut self) {
+        self.start_bone_xform(EditXformKind::Rotate, false);
     }
 
     fn try_pick_bone(&mut self, extend: bool) -> bool {
@@ -1025,27 +1195,33 @@ impl App {
         let local_d = inv.transform_vector3(rd);
         let dist = (world.w_axis.truncate() - self.camera.target).length().max(0.5);
         let thresh = dist * 0.12;
-        let pick = session_arm.pick_bone(local_o, local_d, thresh);
+        let pick = if self.doc.armature_edit {
+            session_arm.pick_bone_rest(local_o, local_d, thresh)
+        } else {
+            session_arm.pick_bone(local_o, local_d, thresh)
+        };
         let Some(bi) = pick else { return false };
-        self.doc.checkpoint();
-        if let Some(a) = self.doc.active_armature_mut() {
-            a.select_bone(bi, extend);
-        }
+        let was_selected = session_arm.selected.contains(&bi);
+        let preserve_multi_selection = self.ts.tool.is_gizmo() && was_selected && !extend;
+        if !preserve_multi_selection { self.doc.checkpoint(); }
+        let selected_after_pick = if let Some(a) = self.doc.active_armature_mut() {
+            // Clicking an already-selected bone with a transform tool should
+            // preserve the whole multi-selection so it can be transformed.
+            if preserve_multi_selection { a.active = Some(bi); }
+            else { a.select_bone(bi, extend); }
+            a.selected.contains(&bi)
+        } else { false };
         self.status(format!("Bone {}", bi + 1));
+        if selected_after_pick && self.ts.tool.is_gizmo() {
+            let kind = match self.ts.tool {
+                Tool::Move => EditXformKind::Move,
+                Tool::Rotate => EditXformKind::Rotate,
+                Tool::Scale => EditXformKind::Scale,
+                _ => EditXformKind::Move,
+            };
+            self.start_bone_xform(kind, true);
+        }
         true
-    }
-
-    /// Rotate active bone pose with mouse delta (call from ModalRotate when armature selected).
-    fn pose_rotate_active_bone(&mut self, dx: f32, dy: f32) {
-        let Some(a) = self.doc.active_armature_mut() else { return };
-        let Some(ai) = a.active else { return };
-        let Some(bone) = a.bones.get_mut(ai as usize) else { return };
-        let q = glam::Quat::from_xyzw(bone.pose_rot[0], bone.pose_rot[1], bone.pose_rot[2], bone.pose_rot[3]);
-        let delta = glam::Quat::from_euler(glam::EulerRot::YXZ, dx * 0.01, dy * 0.01, 0.0);
-        let nq = (delta * q).normalize();
-        bone.pose_rot = [nq.x, nq.y, nq.z, nq.w];
-        drop(a);
-        self.doc.apply_all_skinning();
     }
 
     fn try_edit_click_drag(&mut self, extend: bool) -> bool {
@@ -1263,9 +1439,12 @@ impl App {
         };
         let p = Vec2::new(self.cursor.0 as f32, self.cursor.1 as f32);
         self.sel_drag = Some(SelDrag { tool: self.ts.tool, start: self.cursor, points: vec![p], op });
+        if self.doc.armature_edit || self.doc.pose_mode { self.doc.checkpoint(); }
         if self.ts.tool == Tool::Circle {
             if op == SelectOp::Replace {
-                self.doc.select_none();
+                if self.doc.armature_edit || self.doc.pose_mode {
+                    if let Some(a) = self.doc.active_armature_mut() { a.selected.clear(); a.active = None; }
+                } else { self.doc.select_none(); }
             }
             self.circle_paint(op);
         }
@@ -1274,6 +1453,11 @@ impl App {
     fn circle_paint(&mut self, op: SelectOp) {
         let c = Vec2::new(self.cursor.0 as f32, self.cursor.1 as f32);
         let r = self.ts.circle_radius;
+        if self.doc.armature_edit || self.doc.pose_mode {
+            let bone_op = if op == SelectOp::Replace { SelectOp::Extend } else { op };
+            self.select_bones_in_shape(bone_op, |p| (p - c).length() <= r);
+            return;
+        }
         let hits: Vec<usize> = anchors(&self.doc, &self.camera, self.viewport).into_iter().filter(|(_, p)| (*p - c).length() <= r).map(|(i, _)| i).collect();
         apply_selection(&mut self.doc, &hits, if op == SelectOp::Subtract { SelectOp::Subtract } else { SelectOp::Extend });
     }
@@ -1302,10 +1486,21 @@ impl App {
         let cur = Vec2::new(self.cursor.0 as f32, self.cursor.1 as f32);
         let start = Vec2::new(d.start.0 as f32, d.start.1 as f32);
         if (cur - start).length() < 4.0 {
-            self.pick(d.op == SelectOp::Extend);
+            if self.doc.armature_edit || self.doc.pose_mode {
+                self.try_pick_bone(d.op == SelectOp::Extend);
+            } else { self.pick(d.op == SelectOp::Extend); }
             return;
         }
         let (lo, hi) = (start.min(cur), start.max(cur));
+        if self.doc.armature_edit || self.doc.pose_mode {
+            let tool = d.tool;
+            let points = d.points.clone();
+            self.select_bones_in_shape(d.op, |p| match tool {
+                Tool::BoxSelect => p.x >= lo.x && p.x <= hi.x && p.y >= lo.y && p.y <= hi.y,
+                _ => point_in_polygon(p, &points),
+            });
+            return;
+        }
         if self.doc.in_edit_mode() {
             let extend = d.op != SelectOp::Replace;
             self.finish_edit_sel_rect(lo, hi, extend);
@@ -1320,6 +1515,51 @@ impl App {
             .map(|(i, _)| i)
             .collect();
         apply_selection(&mut self.doc, &hits, d.op);
+    }
+
+    fn select_bones_in_shape(&mut self, op: SelectOp, mut contains: impl FnMut(Vec2) -> bool) {
+        let Some(id) = self.doc.active else { return };
+        let Some(idx) = self.doc.scene.objects.iter().position(|o| o.id == id) else { return };
+        let world = self.doc.scene.world_matrices()[idx];
+        let cam = self.camera.clone();
+        let vp = self.viewport;
+        let Some(arm) = self.doc.active_armature() else { return };
+        let deform = if self.doc.pose_mode { Some(arm.deform_matrices_hierarchical()) } else { None };
+        let mut hits = Vec::new();
+        for (i, b) in arm.bones.iter().enumerate() {
+            let (head, tail) = if let Some(mats) = deform.as_ref() {
+                let dir = b.direction();
+                let rest_rot = if dir.length_squared() < 1e-10 { glam::Quat::IDENTITY } else { glam::Quat::from_rotation_arc(glam::Vec3::Y, dir) };
+                let rest = glam::Mat4::from_rotation_translation(rest_rot, b.head_v());
+                let posed = mats[i] * rest;
+                (posed.transform_point3(glam::Vec3::ZERO), posed.transform_point3(glam::Vec3::new(0.0, b.length(), 0.0)))
+            } else { (b.head_v(), b.tail_v()) };
+            let mid = world.transform_point3((head + tail) * 0.5);
+            let head_world = world.transform_point3(head);
+            let tail_world = world.transform_point3(tail);
+            let mut inside = false;
+            for point in [mid, head_world, tail_world] {
+                if let Some(px) = crate::tools::project_px(&cam, vp, point) {
+                    if contains(px) { inside = true; break; }
+                }
+            }
+            if inside { hits.push(i as u32); }
+        }
+        if let Some(arm) = self.doc.active_armature_mut() {
+            match op {
+                SelectOp::Replace => arm.selected.clear(),
+                SelectOp::Extend | SelectOp::Subtract => {}
+            }
+            for i in hits {
+                if op == SelectOp::Subtract { arm.selected.remove(&i); }
+                else { arm.selected.insert(i); arm.active = Some(i); }
+            }
+            if arm.active.map_or(false, |active| !arm.selected.contains(&active)) {
+                arm.active = arm.selected.iter().next_back().copied();
+            }
+            if op == SelectOp::Replace && arm.selected.is_empty() { arm.active = None; }
+        }
+        self.doc.touch();
     }
 
     fn finish_edit_sel_rect(&mut self, lo: Vec2, hi: Vec2, extend: bool) {
@@ -1655,15 +1895,14 @@ impl App {
                 }
             }
             A::Delete => {
-                if self.doc.armature_edit && self.doc.active_armature().is_some() {
+                if self.doc.pose_mode {
+                    self.status("Switch to Armature Edit Mode to delete bones");
+                } else if self.doc.armature_edit && self.doc.active_armature().is_some() {
                     self.doc.armature_delete_bones();
                     self.status("Deleted bones");
                 } else if self.doc.edit.is_some() {
                     self.doc.edit_delete();
                     self.status("Deleted selection");
-                } else if self.doc.active_armature().is_some() {
-                    self.doc.armature_delete_bones();
-                    self.status("Deleted bones");
                 } else {
                     self.doc.delete_selected();
                 }
@@ -1856,6 +2095,12 @@ impl App {
             A::SelectAll => {
                 if self.doc.uv_mode {
                     self.doc.uv_select_all();
+                } else if self.doc.armature_edit || self.doc.pose_mode {
+                    if let Some(a) = self.doc.active_armature_mut() {
+                        a.selected = (0..a.bones.len() as u32).collect();
+                        a.active = a.selected.iter().next_back().copied();
+                    }
+                    self.doc.touch();
                 } else if self.doc.in_edit_mode() {
                     self.doc.edit_select_all();
                 } else {
@@ -1865,6 +2110,9 @@ impl App {
             A::SelectNone => {
                 if self.doc.uv_mode {
                     self.doc.uv_select_none();
+                } else if self.doc.armature_edit || self.doc.pose_mode {
+                    if let Some(a) = self.doc.active_armature_mut() { a.selected.clear(); a.active = None; }
+                    self.doc.touch();
                 } else if self.doc.in_edit_mode() {
                     self.doc.edit_select_none();
                 } else {
@@ -1872,7 +2120,14 @@ impl App {
                 }
             },
             A::SelectInvert => {
-                if self.doc.in_edit_mode() {
+                if self.doc.armature_edit || self.doc.pose_mode {
+                    if let Some(a) = self.doc.active_armature_mut() {
+                        let old = a.selected.clone();
+                        a.selected = (0..a.bones.len() as u32).filter(|i| !old.contains(i)).collect();
+                        a.active = a.selected.iter().next_back().copied();
+                    }
+                    self.doc.touch();
+                } else if self.doc.in_edit_mode() {
                     self.doc.edit_invert_selection();
                 } else {
                     self.doc.select_invert();
@@ -1887,6 +2142,10 @@ impl App {
             A::SelectLinked => self.doc.select_same(SameKind::Linked),
 
             A::SetTool(t) => {
+                if t != Tool::Annotate {
+                    self.annotate_drag_active = false;
+                    self.annotate_stroke = None;
+                }
                 self.ts.tool = t;
                 self.sel_drag = None;
             }
@@ -1900,14 +2159,16 @@ impl App {
             }
             A::ToggleSnap => self.ts.snap.enabled = !self.ts.snap.enabled,
             A::ModalMove => {
-                if self.doc.in_edit_mode() {
+                if self.doc.armature_edit || self.doc.pose_mode {
+                    self.start_bone_xform(EditXformKind::Move, false);
+                } else if self.doc.in_edit_mode() {
                     self.start_edit_xform(EditXformKind::Move);
                 } else {
                     self.start_modal(ModalKind::Move, true);
                 }
             },
             A::ModalRotate => {
-                if self.doc.active_armature().is_some() && self.doc.edit.is_none() {
+                if self.doc.armature_edit || self.doc.pose_mode {
                     self.start_bone_pose_rotate();
                 } else if self.doc.in_edit_mode() {
                     self.start_edit_xform(EditXformKind::Rotate);
@@ -1916,7 +2177,9 @@ impl App {
                 }
             },
             A::ModalScale => {
-                if self.doc.in_edit_mode() {
+                if self.doc.armature_edit || self.doc.pose_mode {
+                    self.start_bone_xform(EditXformKind::Scale, false);
+                } else if self.doc.in_edit_mode() {
                     self.start_edit_xform(EditXformKind::Scale);
                 } else {
                     self.start_modal(ModalKind::Scale, true);
@@ -2159,9 +2422,21 @@ impl App {
                             self.ts.tool = Tool::Select;
                             self.status("Edit Mode — select points, then G to move".to_string());
                         } else {
+                            self.ts.tool = Tool::Select;
                             self.status("Object Mode".to_string());
                         }
                         self.frame(false);
+                    }
+                    Err(e) => self.status(e),
+                }
+            }
+            A::TogglePoseMode => {
+                if self.gizmo.dragging() { self.gizmo.end(); }
+                self.bone_xform_drag = None;
+                match self.doc.toggle_pose_mode() {
+                    Ok(()) => {
+                        self.ts.tool = Tool::Select;
+                        self.status(if self.doc.pose_mode { "Pose Mode — select bones and use G/R/S to transform" } else { "Object Mode" });
                     }
                     Err(e) => self.status(e),
                 }
@@ -2179,8 +2454,10 @@ impl App {
                 self.status("Face select".to_string());
             }
             A::ArmatureAddBone => {
-                self.doc.armature_add_bone();
-                self.status("Bone added");
+                if self.doc.armature_edit {
+                    self.doc.armature_add_bone();
+                    self.status("Bone added");
+                } else { self.status("Enter Armature Edit Mode to add bones"); }
             }
             A::ArmatureExtrude => {
                 if self.doc.armature_edit {
@@ -2190,12 +2467,16 @@ impl App {
                 }
             }
             A::ArmatureDeleteBones => {
-                self.doc.armature_delete_bones();
-                self.status("Deleted bones");
+                if self.doc.armature_edit {
+                    self.doc.armature_delete_bones();
+                    self.status("Deleted bones");
+                } else { self.status("Enter Armature Edit Mode to delete bones"); }
             }
             A::ArmatureClearPose => {
-                self.doc.armature_clear_pose();
-                self.status("Pose cleared");
+                if self.doc.pose_mode {
+                    self.doc.armature_clear_pose();
+                    self.status("Selected bone pose cleared");
+                } else { self.status("Enter Pose Mode to clear bone poses"); }
             }
             A::ArmatureBindMeshes => {
                 match self.doc.bind_selected_to_armature() {
@@ -2682,15 +2963,23 @@ impl App {
     }
 
     fn shortcut(&mut self, code: KeyCode, el: &ActiveEventLoop) {
+        if matches!(code, KeyCode::Enter | KeyCode::NumpadEnter) && self.bone_xform_drag.is_some() {
+            self.finish_bone_xform(false);
+            return;
+        }
         if code == KeyCode::Escape {
-            if self.bone_extrude_drag.is_some() {
-                self.cancel_bone_extrude();
+            if self.ts.tool == Tool::Measure && self.measure_a.is_some() {
+                self.measure_a = None;
+                self.measure_b = None;
+                self.status("Measurement cancelled");
                 return;
             }
-            if self.bone_pose_drag.is_some() {
-                self.bone_pose_drag = None;
-                self.doc.undo();
-                self.status("Pose cancelled");
+            if self.bone_xform_drag.is_some() {
+                self.finish_bone_xform(true);
+                return;
+            }
+            if self.bone_extrude_drag.is_some() {
+                self.cancel_bone_extrude();
                 return;
             }
             if self.edit_xform.is_some() {
@@ -2700,6 +2989,7 @@ impl App {
             self.sel_drag = None;
             if self.doc.armature_edit {
                 self.doc.exit_armature_edit();
+                self.ts.tool = Tool::Select;
                 self.status("Object Mode");
                 return;
             }
@@ -2707,6 +2997,13 @@ impl App {
                 self.doc.exit_edit_mode(true);
                 self.status("Object Mode");
             }
+            return;
+        }
+        if self.ts.tool == Tool::Measure && code == KeyCode::Delete {
+            self.measurements.clear();
+            self.measure_a = None;
+            self.measure_b = None;
+            self.status("All measurements cleared");
             return;
         }
         let (ctrl, shift, alt) = (self.ctrl(), self.mods.shift_key(), self.mods.alt_key());
@@ -2750,23 +3047,16 @@ impl App {
     // ------------------------------------------------------------------ input
     fn mouse_button(&mut self, state: ElementState, button: MouseButton, consumed: bool) {
         let down = state == ElementState::Pressed;
+        if self.bone_xform_drag.is_some() {
+            if button == MouseButton::Left && !down { self.finish_bone_xform(false); }
+            else if button == MouseButton::Right && down { self.finish_bone_xform(true); }
+            return;
+        }
         if self.bone_extrude_drag.is_some() {
             if button == MouseButton::Left && !down {
                 self.confirm_bone_extrude();
             } else if button == MouseButton::Right && down {
                 self.cancel_bone_extrude();
-            }
-            return;
-        }
-        if self.bone_pose_drag.is_some() {
-            if button == MouseButton::Left && !down {
-                self.bone_pose_drag = None;
-                self.doc.apply_all_skinning();
-                self.status("Pose applied");
-            } else if button == MouseButton::Right && down {
-                self.bone_pose_drag = None;
-                self.doc.undo(); // revert checkpoint
-                self.status("Pose cancelled");
             }
             return;
         }
@@ -2849,26 +3139,26 @@ impl App {
                                 self.measure_b = Some(hit);
                                 self.status("Measure: click second point");
                             } else {
-                                self.measure_b = Some(hit);
                                 let a = self.measure_a.unwrap();
-                                let dist = (hit - a).length();
-                                self.status(format!("Distance: {:.4} m", dist));
-                                // keep for overlay; next click starts new measure
-                                self.measure_a = Some(hit);
+                                self.measurements.push((a, hit));
+                                self.measure_a = None;
                                 self.measure_b = None;
+                                self.status(format!(
+                                    "Distance: {:.4} m · {} measurements",
+                                    (hit - a).length(), self.measurements.len()
+                                ));
                             }
                         }
                         return;
                     }
                     // --- Annotate tool ---
                     if self.ts.tool == Tool::Annotate {
+                        self.annotate_drag_active = false;
+                        self.annotate_stroke = None;
                         if let Some(hit) = self.raycast_ground_or_mesh() {
-                            if self.annotate_stroke.is_none() {
-                                self.annotate_stroke = Some(vec![hit]);
-                            } else if let Some(s) = self.annotate_stroke.as_mut() {
-                                s.push(hit);
-                            }
-                            self.status("Annotate: drag to draw, release to finish");
+                            self.annotate_stroke = Some(vec![hit]);
+                            self.annotate_drag_active = true;
+                            self.status("Annotate: drag while holding LMB; release to finish");
                         }
                         self.left = true;
                         self.press = self.cursor;
@@ -2876,17 +3166,40 @@ impl App {
                         return;
                     }
                     // --- Transform tool: use move gizmo ---
-                    if self.ts.tool == Tool::Transform {
+                    if self.ts.tool == Tool::Transform && !(self.doc.armature_edit || self.doc.pose_mode) {
                         self.ts.tool = Tool::Move;
                         if self.gizmo.begin(self.cursor, &self.camera, self.viewport, &mut self.doc, &self.ts) {
                             return;
                         }
                         self.ts.tool = Tool::Transform;
                     }
-                    if self.doc.active_armature().is_some() && self.doc.edit.is_none() {
-                        if self.try_pick_bone(shift) {
-                            return;
+                    if self.doc.armature_edit
+                        && matches!(self.ts.tool, Tool::Select | Tool::BoneExtrude)
+                        && self.try_start_bone_joint_extrude()
+                    {
+                        return;
+                    }
+                    if self.doc.armature_edit && self.ts.tool == Tool::BoneExtrude {
+                        if self.try_pick_bone(false) {
+                            self.start_bone_extrude();
+                            if self.bone_extrude_drag.is_some() { self.update_bone_extrude(); }
+                        } else {
+                            self.status("Click a bone to extrude it");
                         }
+                        return;
+                    }
+                    // In armature modes, gizmo handles take priority over bone picking.
+                    if (self.doc.armature_edit || self.doc.pose_mode)
+                        && self.ts.tool.is_gizmo()
+                        && self.gizmo.begin(self.cursor, &self.camera, self.viewport, &mut self.doc, &self.ts)
+                    {
+                        return;
+                    }
+                    if (self.doc.armature_edit || self.doc.pose_mode)
+                        && self.doc.active_armature().is_some()
+                        && matches!(self.ts.tool, Tool::Select | Tool::Move | Tool::Rotate | Tool::Scale | Tool::Transform)
+                    {
+                        if self.try_pick_bone(shift) { return; }
                     }
                     if self.doc.in_edit_mode() && self.doc.edit.is_some() {
                         // Ctrl+LMB: interactive edit tool (Extrude, Inset, Bevel, ...)
@@ -2909,6 +3222,7 @@ impl App {
                         return;
                     }
                     if self.ts.tool.is_gizmo()
+                        && !(self.doc.armature_edit || self.doc.pose_mode)
                         && self.gizmo.begin(self.cursor, &self.camera, self.viewport, &mut self.doc, &self.ts)
                     {
                         return;
@@ -2941,6 +3255,7 @@ impl App {
                     self.left = false;
                     // Finish annotate stroke
                     if self.ts.tool == Tool::Annotate {
+                        self.annotate_drag_active = false;
                         if let Some(stroke) = self.annotate_stroke.take() {
                             if stroke.len() >= 2 {
                                 self.annotations.push(stroke);
@@ -2954,6 +3269,16 @@ impl App {
             }
             MouseButton::Right => {
                 if down {
+                    // In Object Mode, a viewport right-click selects the object under
+                    // the pointer and is reserved for the shared Object context menu.
+                    // Keep RMB camera navigation for non-Object work modes / modifiers.
+                    if start && !self.doc.in_edit_mode() && !self.doc.pose_mode
+                        && !self.doc.sculpt_mode && !self.doc.uv_mode && !self.doc.paint_mode
+                        && !shift {
+                        self.pick(false);
+                        self.right = false;
+                        return;
+                    }
                     self.right = start;
                     self.right_press = self.cursor;
                     self.right_dragged = false;
@@ -2972,6 +3297,10 @@ impl App {
     fn cursor_moved(&mut self, x: f64, y: f64) {
         let (dx, dy) = ((x - self.cursor.0) as f32, (y - self.cursor.1) as f32);
         self.cursor = (x, y);
+        if self.annotate_drag_active && (!self.left || self.ts.tool != Tool::Annotate) {
+            self.annotate_drag_active = false;
+            self.annotate_stroke = None;
+        }
         let (shift, ctrl) = (self.mods.shift_key(), self.ctrl());
         // Texture painting is a continuous stroke, not a single click stamp.
         // Interpolate screen-space samples so fast pointer movement cannot leave gaps.
@@ -3002,7 +3331,7 @@ impl App {
             }
         }
         // Annotate stroke while dragging
-        if self.ts.tool == Tool::Annotate && self.left {
+        if self.annotate_drag_active && self.left && self.ts.tool == Tool::Annotate {
             if let Some(hit) = self.raycast_ground_or_mesh() {
                 if let Some(s) = self.annotate_stroke.as_mut() {
                     if s.last().map(|p| (*p - hit).length() > 0.02).unwrap_or(true) {
@@ -3010,6 +3339,9 @@ impl App {
                     }
                 }
             }
+            // Annotation owns this drag; do not also orbit the camera or
+            // feed the same mouse movement to another viewport interaction.
+            return;
         }
         if self.sculpt_stroke {
             self.sculpt_sample();
@@ -3023,13 +3355,8 @@ impl App {
             self.update_bone_extrude();
             return;
         }
-        if let Some(start) = self.bone_pose_drag {
-            let dx = (self.cursor.0 - start.0) as f32;
-            let dy = (self.cursor.1 - start.1) as f32;
-            // reset to checkpoint pose then apply? simpler: accumulate from start by restoring undo top then applying
-            // For smooth pose: store initial pose on start. For now apply delta from last frame:
-            self.pose_rotate_active_bone(dx * 0.15, dy * 0.15);
-            self.bone_pose_drag = Some(self.cursor);
+        if self.bone_xform_drag.is_some() {
+            self.update_bone_xform();
             return;
         }
         if self.edit_gizmo_drag.is_some() {
@@ -3044,7 +3371,7 @@ impl App {
             self.update_modal();
             return;
         }
-        if self.gizmo.dragging() && !self.doc.in_edit_mode() {
+        if self.gizmo.dragging() && self.doc.edit.is_none() {
             self.gizmo.update(self.cursor, &self.camera, self.viewport, &mut self.doc, &self.ts, ctrl);
             return;
         }
@@ -3053,7 +3380,7 @@ impl App {
             return;
         }
         if !self.left && !self.middle && !self.right {
-            if self.doc.in_edit_mode() {
+            if self.doc.edit.is_some() {
                 self.edit_gizmo_hover_test();
             } else {
                 self.gizmo.hover_test(self.cursor, &self.camera, self.viewport, &self.doc, &self.ts);
@@ -3134,7 +3461,7 @@ impl App {
         let out = self.egui_ctx.run(raw, |ctx| {
             let (a, r) = ui::draw(ctx, &mut self.doc, &mut self.settings, &mut self.ts, &mut self.ui, &self.bindings, &self.recent.paths);
             tools::draw_toolbar(ctx, r, &mut self.ts);
-            let measure = match (self.measure_a, self.measure_b) {
+            let measure_preview = match (self.measure_a, self.measure_b) {
                 (Some(a), Some(b)) => Some((a, b)),
                 _ => None,
             };
@@ -3142,12 +3469,13 @@ impl App {
                 shape: shape.as_ref(),
                 modal: modal_text.as_deref(),
                 circle,
-                measure,
+                measurements: &self.measurements,
+                measure_preview,
                 annotations: &self.annotations,
                 annotate_stroke: self.annotate_stroke.as_deref(),
             };
             overlay::draw(ctx, &self.camera, r, &self.doc, &extra);
-            if self.doc.in_edit_mode() {
+            if self.doc.edit.is_some() {
                 draw_edit_gizmo_ui(
                     ctx,
                     r,

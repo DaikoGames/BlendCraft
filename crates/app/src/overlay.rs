@@ -2,7 +2,7 @@
 //! selection shapes (box / lasso / circle) and the modal-transform status text.
 use crate::tools::{project_px, SelShape};
 use egui::{Color32, Stroke};
-use forge_core::{helper_lines, Document, EditDomain, OrbitCamera};
+use forge_core::{helper_lines, Document, EditDomain, ObjectKind, OrbitCamera};
 use glam::{Mat4, Vec2, Vec3, Vec4};
 
 pub struct Extra<'a> {
@@ -10,8 +10,10 @@ pub struct Extra<'a> {
     pub modal: Option<&'a str>,
     /// circle brush: center and radius in physical pixels
     pub circle: Option<(Vec2, f32)>,
-    /// Measure tool endpoints in world space
-    pub measure: Option<(Vec3, Vec3)>,
+    /// Completed measurements in world space.
+    pub measurements: &'a [(Vec3, Vec3)],
+    /// Live measurement preview, if one is being drawn.
+    pub measure_preview: Option<(Vec3, Vec3)>,
     /// Annotation strokes in world space
     pub annotations: &'a [Vec<Vec3>],
     pub annotate_stroke: Option<&'a [Vec3]>,
@@ -59,6 +61,47 @@ pub fn draw(ctx: &egui::Context, cam: &OrbitCamera, rect: egui::Rect, doc: &Docu
             } else {
                 Color32::from_rgb(190, 190, 205)
             };
+            if let ObjectKind::Armature(arm) = &o.kind {
+                if doc.active == Some(o.id) && (doc.armature_edit || doc.pose_mode) {
+                    for (bone_index, a, b) in arm.indexed_lines(doc.pose_mode) {
+                        let bone_selected = arm.selected.contains(&bone_index);
+                        let bone_active = arm.active == Some(bone_index) && bone_selected;
+                        let bone_color = if bone_active {
+                            Color32::from_rgb(255, 220, 70)
+                        } else if bone_selected {
+                            Color32::from_rgb(255, 150, 45)
+                        } else {
+                            Color32::from_rgb(185, 195, 215)
+                        };
+                        let bone_stroke = Stroke::new(if bone_selected { 2.8_f32 } else { 1.5_f32 }, bone_color);
+                        let a = worlds[i].transform_point3(a);
+                        let b = worlds[i].transform_point3(b);
+                        if let Some((p0, p1)) = clip_project(m, vp, a, b) {
+                            painter.line_segment([pt(p0), pt(p1)], bone_stroke);
+                        }
+                    }
+                    // In Armature Edit Mode, show draggable joint handles at
+                    // every bone head and tail. These are the extrusion points.
+                    if doc.armature_edit {
+                        for (bone_index, bone) in arm.bones.iter().enumerate() {
+                            let head = worlds[i].transform_point3(bone.head_v());
+                            let tail = worlds[i].transform_point3(bone.tail_v());
+                            for (point, is_tail) in [(head, false), (tail, true)] {
+                                if let Some(screen) = project_px(cam, vp, point) {
+                                    let center = pt(screen);
+                                    let fill = if is_tail { Color32::from_rgb(255, 175, 55) } else { Color32::from_rgb(90, 205, 255) };
+                                    painter.circle_filled(center, 5.0, Color32::from_black_alpha(210));
+                                    painter.circle_filled(center, 3.2, fill);
+                                    if arm.active == Some(bone_index as u32) {
+                                        painter.circle_stroke(center, 6.5, Stroke::new(1.0, Color32::WHITE));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    continue;
+                }
+            }
             let stroke = Stroke::new(if sel { 2.0_f32 } else { 1.4_f32 }, col);
             for (a, b) in helper_lines(o, &worlds[i]) {
                 if let Some((p0, p1)) = clip_project(m, vp, a, b) {
@@ -66,6 +109,15 @@ pub fn draw(ctx: &egui::Context, cam: &OrbitCamera, rect: egui::Rect, doc: &Docu
                 }
             }
         }
+    }
+
+    // Armature mode badge and per-bone selection feedback.
+    if (doc.armature_edit || doc.pose_mode) && doc.active_armature().is_some() {
+        let label = if doc.armature_edit { "Armature Edit Mode" } else { "Pose Mode" };
+        let galley = ctx.fonts(|f| f.layout_no_wrap(label.into(), egui::FontId::proportional(14.0), Color32::from_rgb(255, 210, 90)));
+        let pos = egui::pos2(rect.min.x + 12.0, rect.min.y + 12.0);
+        painter.rect_filled(egui::Rect::from_min_size(pos, galley.size()).expand(6.0), 4.0, Color32::from_black_alpha(180));
+        painter.galley(pos, galley, Color32::from_rgb(255, 210, 90));
     }
 
     // 3D cursor
@@ -97,24 +149,30 @@ pub fn draw(ctx: &egui::Context, cam: &OrbitCamera, rect: egui::Rect, doc: &Docu
         painter.circle_stroke(pt(c), r / ppp, sel_stroke);
     }
 
-    // Measure line
-    if let Some((a, b)) = extra.measure {
-        let m = cam.view_proj(vp[2] / vp[3].max(1.0));
+    // Completed measurements persist after the second click.
+    let m = cam.view_proj(vp[2] / vp[3].max(1.0));
+    let draw_measurement = |a: Vec3, b: Vec3, preview: bool| {
         if let Some((pa, pb)) = clip_project(m, vp, a, b) {
-            let stroke = Stroke::new(2.0_f32, Color32::from_rgb(255, 220, 50));
+            let color = if preview { Color32::from_rgb(255, 240, 130) } else { Color32::from_rgb(255, 205, 45) };
+            let stroke = Stroke::new(if preview { 2.5_f32 } else { 2.0_f32 }, color);
             painter.line_segment([pt(pa), pt(pb)], stroke);
-            painter.circle_filled(pt(pa), 4.0, Color32::from_rgb(255, 220, 50));
-            painter.circle_filled(pt(pb), 4.0, Color32::from_rgb(255, 220, 50));
+            painter.circle_filled(pt(pa), 4.0, color);
+            painter.circle_filled(pt(pb), 4.0, color);
             let mid = (pa + pb) * 0.5;
-            let dist = (b - a).length();
             painter.text(
                 pt(mid) + egui::vec2(0.0, -12.0),
                 egui::Align2::CENTER_BOTTOM,
-                format!("{:.3} m", dist),
+                format!("{:.3} m", (b - a).length()),
                 egui::FontId::proportional(13.0),
                 Color32::from_rgb(255, 240, 120),
             );
         }
+    };
+    for &(a, b) in extra.measurements {
+        draw_measurement(a, b, false);
+    }
+    if let Some((a, b)) = extra.measure_preview {
+        draw_measurement(a, b, true);
     }
 
     // Annotations

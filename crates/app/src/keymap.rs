@@ -125,6 +125,7 @@ pub enum Action {
     ToggleShortcuts,
     ShowAbout,
     ToggleEditMode,
+    TogglePoseMode,
     ToggleSculptMode,
     ToggleUvMode,
     TogglePaintMode,
@@ -229,6 +230,7 @@ pub fn bindings() -> Vec<Binding> {
     b("Animation", "Insert Keyframe (Loc/Rot/Scale)", "", K::KeyK, A::InsertKeyframeLocRotScale);
     b("Animation", "Delete Keyframe", "a", K::KeyI, A::DeleteKeyframe);
     b("Mode", "Toggle Edit Mode", "", K::Tab, A::ToggleEditMode);
+    b("Mode", "Toggle Pose Mode", "cs", K::KeyP, A::TogglePoseMode);
     b("Mode", "Toggle Sculpt Mode", "c", K::Tab, A::ToggleSculptMode);
     b("Mode", "Toggle UV Editing", "a", K::KeyU, A::ToggleUvMode);
     b("Mode", "Toggle Texture Paint", "s", K::Tab, A::TogglePaintMode);

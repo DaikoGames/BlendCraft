@@ -28,6 +28,9 @@ pub struct UiState {
     pub font_filter: String,
     pub font_status: String,
     pub show_move_popup: bool,
+    /// Position of the shared Object Mode context menu opened inside the 3D viewport.
+    pub viewport_context_menu: Option<egui::Pos2>,
+    pub viewport_context_menu_rect: Option<egui::Rect>,
     pub status: String,
     pub shortcut_filter: String,
     pub outliner_filter: String,
@@ -166,7 +169,9 @@ pub fn draw(
         visuals.widgets.active.bg_fill = egui::Color32::from_rgb(0x5c, 0x7a, 0xa0);
         visuals.selection.bg_fill = egui::Color32::from_rgb(0x4a, 0x70, 0xa0);
         visuals.selection.stroke.color = egui::Color32::from_rgb(0x6a, 0x9a, 0xd0);
-        visuals.override_text_color = Some(egui::Color32::from_rgb(0xe0, 0xe0, 0xe0));
+        // Keep egui's normal dark-theme text styling. A global override makes every
+        // label/menu item look forcibly highlighted instead of using widget states.
+        visuals.override_text_color = None;
         style.visuals = visuals;
         style.spacing.item_spacing = egui::vec2(4.0, 3.0);
         style.spacing.window_margin = egui::Margin::same(4.0);
@@ -187,6 +192,8 @@ pub fn draw(
     .show(ctx, |ui| {
         ui.horizontal(|ui| {
             let in_edit = doc.in_edit_mode();
+            let in_pose = doc.pose_mode && doc.active_armature().is_some();
+            let has_armature = doc.active_armature().is_some();
             let mesh_ok = doc.active_index().map(|i| doc.scene.objects[i].kind.is_mesh()).unwrap_or(false)
                 || doc.selection.iter().any(|id| {
                     doc.scene.objects.iter().any(|o| o.id == *id && o.kind.is_mesh())
@@ -194,10 +201,13 @@ pub fn draw(
 
             // Mode selector (Blender style)
             let in_sculpt = doc.sculpt_mode;
-            if ui.add_enabled(mesh_ok || in_edit || in_sculpt || doc.uv_mode || doc.paint_mode, egui::SelectableLabel::new(!in_edit && !in_sculpt && !doc.uv_mode && !doc.paint_mode && !st.shading_mode, "Object Mode")).clicked() {
+            if ui.add_enabled(mesh_ok || has_armature || in_edit || in_pose || in_sculpt || doc.uv_mode || doc.paint_mode, egui::SelectableLabel::new(!in_edit && !in_pose && !in_sculpt && !doc.uv_mode && !doc.paint_mode && !st.shading_mode, "Object Mode")).clicked() {
                 st.shading_mode = false;
                 if in_edit {
                     actions.push(Action::ToggleEditMode);
+                }
+                if in_pose {
+                    actions.push(Action::TogglePoseMode);
                 }
                 if in_sculpt {
                     actions.push(Action::ToggleSculptMode);
@@ -215,8 +225,19 @@ pub fn draw(
                 if in_sculpt {
                     actions.push(Action::ToggleSculptMode);
                 }
-                if !in_edit {
+                if in_pose {
+                    actions.push(Action::TogglePoseMode);
                     actions.push(Action::ToggleEditMode);
+                } else if !in_edit {
+                    actions.push(Action::ToggleEditMode);
+                }
+            }
+            if ui.add_enabled(has_armature, egui::SelectableLabel::new(in_pose, "Pose Mode")).clicked() {
+                st.shading_mode = false;
+                if in_edit && doc.armature_edit {
+                    actions.push(Action::TogglePoseMode);
+                } else if !in_pose {
+                    actions.push(Action::TogglePoseMode);
                 }
             }
             if ui.add_enabled(mesh_ok || in_sculpt, egui::SelectableLabel::new(in_sculpt, "Sculpt Mode")).clicked() {
@@ -346,6 +367,10 @@ pub fn draw(
                             &Tool::UV_MODE[..]
                         } else if doc.sculpt_mode {
                             &Tool::SCULPT_MODE[..]
+                        } else if doc.armature_edit && doc.active_armature().is_some() {
+                            &Tool::ARMATURE_EDIT_MODE[..]
+                        } else if doc.pose_mode && doc.active_armature().is_some() {
+                            &Tool::POSE_MODE[..]
                         } else if doc.in_edit_mode() {
                             &Tool::EDIT_MODE[..]
                         } else {
@@ -371,7 +396,7 @@ pub fn draw(
                             }
                             // icon
                             let icon_rect = egui::Rect::from_center_size(rect.center(), egui::vec2(btn * 0.72, btn * 0.72));
-                            draw_tool_icon(ui, tool, icon_rect, selected);
+                            draw_tool_icon(ui, tool, icon_rect, selected, doc.armature_edit, doc.pose_mode);
                             if resp.clicked() {
                                 ts.tool = tool;
                                 // Mesh ops are interactive via Ctrl+LMB in Edit Mode.
@@ -381,6 +406,10 @@ pub fn draw(
                                         actions.push(Action::Add(forge_core::Primitive::Cube { size: 1.0 }));
                                     }
                                     Tool::Cursor => actions.push(Action::SnapCursorToSel),
+                                    Tool::BoneAdd => actions.push(Action::ArmatureAddBone),
+                                    Tool::BoneExtrude => st.status = "Extrude Bone selected — click-drag from a selected bone tip in the viewport".into(),
+                                    Tool::BoneDelete => actions.push(Action::ArmatureDeleteBones),
+                                    Tool::PoseClear => actions.push(Action::ArmatureClearPose),
                                     Tool::UvUnwrapSmart => actions.push(Action::UvUnwrapSmart),
                                     Tool::UvUnwrapCube => actions.push(Action::UvUnwrapCube),
                                     Tool::UvUnwrapPlanar => actions.push(Action::UvUnwrapPlanar),
@@ -406,7 +435,20 @@ pub fn draw(
                                     _ => {}
                                 }
                             }
-                            resp.on_hover_text(tool.tooltip());
+                            let bone_mode = doc.armature_edit || doc.pose_mode;
+                            let tooltip = if bone_mode {
+                                match tool {
+                                    Tool::Select => "Select bones",
+                                    Tool::BoxSelect => "Box-select bones",
+                                    Tool::Circle => "Circle-select bones",
+                                    Tool::Lasso => "Lasso-select bones",
+                                    Tool::Move => "Move selected bones",
+                                    Tool::Rotate => "Rotate selected bones",
+                                    Tool::Scale => "Scale selected bones",
+                                    _ => tool.tooltip(),
+                                }
+                            } else { tool.tooltip() };
+                            resp.on_hover_text(tooltip);
                         }
                         ui.add_space(3.0);
                     });
@@ -470,6 +512,47 @@ pub fn draw(
     }
 
     // Texture Paint uses the 3D viewport as its canvas; no detached editor window.
+
+    // Right-clicking inside the 3D viewport opens the exact same Object Mode menu
+    // used by Outliner rows. The viewport is the remaining central area after panels.
+    let viewport_rect = ctx.available_rect();
+    if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+        st.viewport_context_menu = None;
+        st.viewport_context_menu_rect = None;
+    }
+    if ctx.input(|i| i.pointer.any_click()) && !ctx.input(|i| i.pointer.secondary_clicked()) {
+        if let Some(pointer) = ctx.input(|i| i.pointer.interact_pos()) {
+            if !st.viewport_context_menu_rect.map(|r| r.contains(pointer)).unwrap_or(false) {
+                st.viewport_context_menu = None;
+                st.viewport_context_menu_rect = None;
+            }
+        }
+    }
+    if ctx.input(|i| i.pointer.secondary_clicked()) {
+        if let Some(pos) = ctx.input(|i| i.pointer.interact_pos()) {
+            if viewport_rect.contains(pos) && doc.active_index().is_some()
+                && !doc.in_edit_mode() && !doc.pose_mode && !doc.sculpt_mode
+                && !doc.uv_mode && !doc.paint_mode {
+                st.viewport_context_menu = Some(pos);
+            }
+        }
+    }
+    if let Some(pos) = st.viewport_context_menu {
+        let response = egui::Area::new(egui::Id::new("viewport_object_context_menu"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(pos)
+            .show(ctx, |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    ui.set_min_width(190.0);
+                    object_context_menu(ui, doc, &mut actions);
+                });
+            });
+        st.viewport_context_menu_rect = Some(response.response.rect);
+        if !actions.is_empty() {
+            st.viewport_context_menu = None;
+            st.viewport_context_menu_rect = None;
+        }
+    }
 
     shortcuts_window(ctx, st, bindings);
     move_popup(ctx, doc, st, &mut actions);
@@ -1971,7 +2054,7 @@ fn draw_uv_editor(ui: &mut egui::Ui, doc: &mut Document, ts: &mut ToolState, act
     );
 }
 
-fn draw_tool_icon(ui: &mut egui::Ui, tool: Tool, rect: egui::Rect, selected: bool) {
+fn draw_tool_icon(ui: &mut egui::Ui, tool: Tool, rect: egui::Rect, selected: bool, armature_edit: bool, pose_mode: bool) {
     let painter = ui.painter_at(rect);
     let c = rect.center();
     let s = rect.width().min(rect.height()) * 0.38;
@@ -1983,7 +2066,85 @@ fn draw_tool_icon(ui: &mut egui::Ui, tool: Tool, rect: egui::Rect, selected: boo
     let stroke = egui::Stroke::new(1.4_f32, col);
     let thick = egui::Stroke::new(1.8_f32, col);
 
+    if armature_edit || pose_mode {
+        match tool {
+            Tool::Select => {
+                let tip = c + egui::vec2(-s * 0.65, -s * 0.7);
+                painter.add(egui::Shape::convex_polygon(vec![tip, tip + egui::vec2(s * 0.45, s * 0.75), tip + egui::vec2(s * 0.08, s * 0.62), tip + egui::vec2(-s * 0.12, s * 0.95)], col, egui::Stroke::NONE));
+                painter.line_segment([c + egui::vec2(-s * 0.25, s * 0.15), c + egui::vec2(s * 0.55, -s * 0.2)], thick);
+                painter.circle_filled(c + egui::vec2(-s * 0.25, s * 0.15), s * 0.14, col);
+                painter.circle_filled(c + egui::vec2(s * 0.55, -s * 0.2), s * 0.14, col);
+            }
+            Tool::BoxSelect => {
+                painter.rect_stroke(egui::Rect::from_center_size(c, egui::vec2(s * 1.55, s * 1.35)), 1.0, stroke);
+                painter.line_segment([c + egui::vec2(-s * 0.45, s * 0.2), c + egui::vec2(s * 0.45, -s * 0.2)], thick);
+                painter.circle_filled(c + egui::vec2(-s * 0.45, s * 0.2), s * 0.13, col);
+                painter.circle_filled(c + egui::vec2(s * 0.45, -s * 0.2), s * 0.13, col);
+            }
+            Tool::Lasso => {
+                let pts: Vec<_> = (0..14).map(|i| { let t = i as f32 / 14.0 * std::f32::consts::TAU; c + egui::vec2(s * 0.78 * t.cos(), s * 0.7 * t.sin()) }).collect();
+                painter.add(egui::Shape::closed_line(pts, stroke));
+                painter.line_segment([c + egui::vec2(-s * 0.35, s * 0.2), c + egui::vec2(s * 0.35, -s * 0.2)], thick);
+                painter.circle_filled(c + egui::vec2(-s * 0.35, s * 0.2), s * 0.12, col);
+                painter.circle_filled(c + egui::vec2(s * 0.35, -s * 0.2), s * 0.12, col);
+            }
+            Tool::Circle => {
+                painter.circle_stroke(c, s * 0.8, thick);
+                painter.line_segment([c + egui::vec2(-s * 0.35, s * 0.15), c + egui::vec2(s * 0.35, -s * 0.15)], stroke);
+                painter.circle_filled(c + egui::vec2(-s * 0.35, s * 0.15), s * 0.12, col);
+                painter.circle_filled(c + egui::vec2(s * 0.35, -s * 0.15), s * 0.12, col);
+            }
+            Tool::Move => {
+                // Bone plus four-way translation arrows.
+                painter.line_segment([c + egui::vec2(-s * 0.55, 0.0), c + egui::vec2(s * 0.55, 0.0)], thick);
+                painter.circle_filled(c + egui::vec2(-s * 0.58, 0.0), s * 0.16, col);
+                painter.circle_filled(c + egui::vec2(s * 0.58, 0.0), s * 0.16, col);
+                painter.line_segment([c + egui::vec2(0.0, -s * 0.8), c + egui::vec2(0.0, s * 0.8)], stroke);
+                for (sgn, y) in [(-1.0, -s * 0.8), (1.0, s * 0.8)] {
+                    let tip = c + egui::vec2(0.0, y);
+                    painter.line_segment([tip, tip + egui::vec2(-s * 0.2, sgn * s * 0.25)], stroke);
+                    painter.line_segment([tip, tip + egui::vec2(s * 0.2, sgn * s * 0.25)], stroke);
+                }
+            }
+            Tool::Rotate => {
+                painter.circle_stroke(c, s * 0.72, thick);
+                painter.line_segment([c + egui::vec2(-s * 0.45, 0.0), c + egui::vec2(s * 0.45, 0.0)], stroke);
+                painter.circle_filled(c + egui::vec2(-s * 0.45, 0.0), s * 0.14, col);
+                painter.circle_filled(c + egui::vec2(s * 0.45, 0.0), s * 0.14, col);
+            }
+            Tool::Scale => {
+                painter.line_segment([c + egui::vec2(-s * 0.62, 0.0), c + egui::vec2(s * 0.62, 0.0)], thick);
+                painter.circle_filled(c + egui::vec2(-s * 0.62, 0.0), s * 0.18, col);
+                painter.circle_filled(c + egui::vec2(s * 0.62, 0.0), s * 0.18, col);
+                painter.line_segment([c + egui::vec2(0.0, -s * 0.85), c + egui::vec2(0.0, s * 0.85)], stroke);
+                painter.circle_filled(c, s * 0.12, col);
+            }
+            _ => {}
+        }
+        if matches!(tool, Tool::Select | Tool::BoxSelect | Tool::Circle | Tool::Lasso | Tool::Move | Tool::Rotate | Tool::Scale) { return; }
+    }
+
     match tool {
+        Tool::BoneAdd => {
+            painter.line_segment([c + egui::vec2(-s * 0.7, 0.0), c + egui::vec2(s * 0.7, 0.0)], thick);
+            painter.line_segment([c + egui::vec2(0.0, -s * 0.7), c + egui::vec2(0.0, s * 0.7)], thick);
+            painter.circle_filled(c, s * 0.22, col);
+        }
+        Tool::BoneExtrude => {
+            painter.line_segment([c + egui::vec2(-s * 0.65, s * 0.55), c + egui::vec2(s * 0.45, -s * 0.35)], thick);
+            painter.circle_filled(c + egui::vec2(-s * 0.65, s * 0.55), s * 0.18, col);
+            let tip = c + egui::vec2(s * 0.72, -s * 0.62);
+            painter.add(egui::Shape::convex_polygon(vec![tip, tip + egui::vec2(-s * 0.5, s * 0.05), tip + egui::vec2(-s * 0.05, s * 0.5)], col, egui::Stroke::NONE));
+        }
+        Tool::BoneDelete => {
+            painter.line_segment([c + egui::vec2(-s * 0.7, -s * 0.7), c + egui::vec2(s * 0.7, s * 0.7)], thick);
+            painter.line_segment([c + egui::vec2(s * 0.7, -s * 0.7), c + egui::vec2(-s * 0.7, s * 0.7)], thick);
+        }
+        Tool::PoseClear => {
+            painter.circle_stroke(c, s * 0.72, stroke);
+            painter.line_segment([c + egui::vec2(0.0, -s * 0.95), c + egui::vec2(0.0, -s * 0.35)], thick);
+            painter.line_segment([c + egui::vec2(-s * 0.55, s * 0.25), c + egui::vec2(s * 0.55, s * 0.25)], thick);
+        }
         Tool::Select => {
             // Arrow pointer (northwest)
             let tip = c + egui::vec2(-s * 0.55, -s * 0.55);
@@ -3043,6 +3204,107 @@ fn rename_field(ui: &mut egui::Ui, doc: &mut Document, st: &mut UiState, apply: 
     }
 }
 
+
+/// Full Object Mode context menu shared by Outliner rows and the 3D viewport.
+fn object_context_menu(ui: &mut egui::Ui, doc: &mut Document, actions: &mut Vec<Action>) {
+
+        let mut push = |ui: &mut egui::Ui, label: &str, a: Action| {
+            if ui.button(label).clicked() {
+                actions.push(a);
+                ui.close_menu();
+            }
+        };
+        push(ui, "Rename", Action::Rename);
+        push(ui, "Duplicate", Action::Duplicate);
+        push(ui, "Duplicate Linked", Action::DuplicateLinked);
+        push(ui, "Delete", Action::Delete);
+        push(ui, "Make Single User", Action::MakeSingleUser);
+        ui.separator();
+        push(ui, "Select Children", Action::SelectChildren);
+        push(ui, "Select Parent", Action::SelectParent);
+        ui.separator();
+        ui.menu_button("Transform", |ui| {
+            push(ui, "Move", Action::ModalMove);
+            push(ui, "Rotate", Action::ModalRotate);
+            push(ui, "Scale", Action::ModalScale);
+            ui.separator();
+            push(ui, "Clear Location", Action::ClearLocation);
+            push(ui, "Clear Rotation", Action::ClearRotation);
+            push(ui, "Clear Scale", Action::ClearScale);
+            ui.separator();
+            ui.menu_button("Align Objects", |ui| {
+                for (axis, axis_name) in ["X", "Y", "Z"].iter().enumerate() {
+                    ui.menu_button(*axis_name, |ui| {
+                        for (label, mode) in [("Min", AlignMode::Min), ("Center", AlignMode::Center), ("Max", AlignMode::Max)] {
+                            for (target, to) in [("To Active", AlignTo::Active), ("To Selection", AlignTo::Selection), ("To 3D Cursor", AlignTo::Cursor)] {
+                                push(ui, &format!("{label} — {target}"), Action::Align(axis, mode, to));
+                            }
+                        }
+                    });
+                }
+            });
+        });
+        ui.menu_button("Apply", |ui| {
+            push(ui, "All Transforms", Action::Apply { loc: true, rot: true, scale: true });
+            push(ui, "Location", Action::Apply { loc: true, rot: false, scale: false });
+            push(ui, "Rotation", Action::Apply { loc: false, rot: true, scale: false });
+            push(ui, "Scale", Action::Apply { loc: false, rot: false, scale: true });
+        });
+        ui.menu_button("Set Origin", |ui| {
+            push(ui, "Origin to Geometry", Action::SetOrigin(OriginMode::Geometry));
+            push(ui, "Origin to Center of Mass", Action::SetOrigin(OriginMode::Median));
+            push(ui, "Origin to 3D Cursor", Action::SetOrigin(OriginMode::Cursor));
+            push(ui, "Geometry to Origin", Action::GeometryToOrigin);
+        });
+        ui.menu_button("Snap", |ui| {
+            push(ui, "Selection to Cursor", Action::SnapSelToCursor);
+            push(ui, "Selection to Active", Action::SnapSelToActive);
+            push(ui, "Cursor to Selected", Action::SnapCursorToSel);
+            push(ui, "Cursor to Active", Action::SnapCursorToActive);
+            push(ui, "Cursor to World Origin", Action::SnapCursorToOrigin);
+        });
+        ui.separator();
+        ui.menu_button("Parent", |ui| {
+            push(ui, "Set Parent (to Active)", Action::ParentSet);
+            push(ui, "Clear Parent (keep transform)", Action::ParentClearKeep);
+            push(ui, "Clear Parent", Action::ParentClear);
+        });
+        ui.menu_button("Collection", |ui| {
+            push(ui, "New Collection", Action::NewCollection);
+            ui.separator();
+            push(ui, "Move to Collection…", Action::OpenMoveToCollection);
+            push(ui, "Move to Scene Collection", Action::MoveToCollection(None));
+            for c in &doc.scene.collections {
+                push(ui, &format!("Move to {}", c.name), Action::MoveToCollection(Some(c.id)));
+            }
+        });
+        ui.menu_button("Constraints", |ui| {
+            for kind in ConstraintKind::all_defaults() {
+                push(ui, kind.name(), Action::AddConstraint(kind));
+            }
+            ui.separator();
+            push(ui, "Clear Constraints", Action::ClearConstraints);
+        });
+        ui.separator();
+        push(ui, "Join", Action::Join);
+        ui.menu_button("Separate", |ui| {
+            push(ui, "By Loose Parts", Action::SeparateLoose);
+            push(ui, "By Material", Action::SeparateMaterial);
+        });
+        ui.separator();
+        push(ui, "Shade Smooth", Action::ShadeSmooth);
+        push(ui, "Shade Flat", Action::ShadeFlat);
+        ui.separator();
+        push(ui, "Hide Selected", Action::Hide);
+        push(ui, "Hide Unselected", Action::HideUnselected);
+        push(ui, "Show All", Action::ShowAll);
+        ui.separator();
+        push(ui, "Select Same Type", Action::SelectSameType);
+        push(ui, "Select Same Collection", Action::SelectSameCollection);
+        push(ui, "Select Same Material", Action::SelectSameMaterial);
+        push(ui, "Select Linked", Action::SelectLinked);
+}
+
 fn object_row(ui: &mut egui::Ui, doc: &mut Document, st: &mut UiState, actions: &mut Vec<Action>, idx: usize) {
     let o = &doc.scene.objects[idx];
     let id = o.id;
@@ -3075,29 +3337,7 @@ fn object_row(ui: &mut egui::Ui, doc: &mut Document, st: &mut UiState, actions: 
     if resp.secondary_clicked() && !sel {
         doc.select_only(idx);
     }
-    resp.context_menu(|ui| {
-        let mut push = |ui: &mut egui::Ui, label: &str, a: Action| {
-            if ui.button(label).clicked() {
-                actions.push(a);
-                ui.close_menu();
-            }
-        };
-        push(ui, "Rename", Action::Rename);
-        push(ui, "Duplicate", Action::Duplicate);
-        push(ui, "Delete", Action::Delete);
-        push(ui, "Hide", Action::Hide);
-        ui.separator();
-        push(ui, "Select Children", Action::SelectChildren);
-        push(ui, "Select Parent", Action::SelectParent);
-        ui.separator();
-        // Parenting (Blender-style): make the active object the parent of the selection,
-        // or clear the parent relationship.
-        push(ui, "Set Parent (to Active)", Action::ParentSet);
-        push(ui, "Clear Parent (keep transform)", Action::ParentClearKeep);
-        push(ui, "Clear Parent", Action::ParentClear);
-        ui.separator();
-        push(ui, "Move to Collection…", Action::OpenMoveToCollection);
-    });
+    resp.context_menu(|ui| object_context_menu(ui, doc, actions));
 }
 
 fn move_popup(ctx: &egui::Context, doc: &Document, st: &mut UiState, actions: &mut Vec<Action>) {

@@ -63,6 +63,11 @@ pub enum Tool {
     // Texture Paint
     PaintBrush,
     PaintErase,
+    // Armature-specific toolbar actions
+    BoneAdd,
+    BoneExtrude,
+    BoneDelete,
+    PoseClear,
 }
 
 impl Tool {
@@ -82,6 +87,19 @@ impl Tool {
     ];
 
     /// Tools shown in Edit Mode (left toolbar) – matches the Blender list you provided
+    pub const ARMATURE_EDIT_MODE: [Tool; 13] = [
+        Tool::Select, Tool::BoxSelect, Tool::Circle, Tool::Lasso,
+        Tool::Move, Tool::Rotate, Tool::Scale,
+        Tool::BoneAdd, Tool::BoneExtrude, Tool::BoneDelete,
+        Tool::Annotate, Tool::Measure, Tool::Cursor,
+    ];
+
+    pub const POSE_MODE: [Tool; 11] = [
+        Tool::Select, Tool::BoxSelect, Tool::Circle, Tool::Lasso,
+        Tool::Move, Tool::Rotate, Tool::Scale,
+        Tool::PoseClear, Tool::Annotate, Tool::Measure, Tool::Cursor,
+    ];
+
     pub const PAINT_MODE: [Tool; 2] = [
         Tool::PaintBrush,
         Tool::PaintErase,
@@ -224,6 +242,10 @@ impl Tool {
             Tool::UvPack => "Pack Islands",
             Tool::PaintBrush => "Draw",
             Tool::PaintErase => "Erase",
+            Tool::BoneAdd => "Add Bone",
+            Tool::BoneExtrude => "Extrude Bone",
+            Tool::BoneDelete => "Delete Bones",
+            Tool::PoseClear => "Clear Pose",
         }
     }
 
@@ -282,6 +304,10 @@ impl Tool {
             Tool::UvPack => "Pack",
             Tool::PaintBrush => "Brsh",
             Tool::PaintErase => "Eras",
+            Tool::BoneAdd => "Add",
+            Tool::BoneExtrude => "Extr",
+            Tool::BoneDelete => "Del",
+            Tool::PoseClear => "Reset",
         }
     }
 
@@ -298,7 +324,7 @@ impl Tool {
             Tool::Scale => "Scale (S)",
             Tool::Transform => "Transform",
             Tool::Annotate => "Annotate – draw strokes",
-            Tool::Measure => "Measure – click two points",
+            Tool::Measure => "Measure – click two points; Delete clears all; Esc cancels current",
             Tool::AddCube => "Add Cube",
             Tool::ExtrudeRegion => "Extrude Region (E) – Ctrl+LMB drag",
             Tool::InsetFaces => "Inset Faces (I) – Ctrl+LMB drag",
@@ -340,6 +366,10 @@ impl Tool {
             Tool::UvPack => "Pack Islands",
             Tool::PaintBrush => "Draw",
             Tool::PaintErase => "Erase",
+            Tool::BoneAdd => "Add a bone to the active armature",
+            Tool::BoneExtrude => "Drag a bone head or tail joint to extrude a connected bone",
+            Tool::BoneDelete => "Delete selected bones (X)",
+            Tool::PoseClear => "Clear selected bone pose transforms",
         }
     }
 
