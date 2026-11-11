@@ -33,16 +33,19 @@ jobs:
           echo "nameserver 8.8.8.8" | sudo tee /etc/resolv.conf > /dev/null
           echo "nameserver 1.1.1.1" | sudo tee -a /etc/resolv.conf > /dev/null
 
-          # 2. Force APT to use the main Ubuntu archive instead of the Azure mirror list
+          # 2. Force APT to use IPv4 (GitHub Actions ARM64 runners have broken IPv6 routing)
+          echo 'Acquire::ForceIPv4 "true";' | sudo tee /etc/apt/apt.conf.d/99force-ipv4
+
+          # 3. Force APT to use the main Ubuntu archive instead of the Azure mirror list
           echo "http://archive.ubuntu.com/ubuntu/" | sudo tee /etc/apt/apt-mirrors.txt > /dev/null
           echo "http://security.ubuntu.com/ubuntu/" | sudo tee -a /etc/apt/apt-mirrors.txt > /dev/null
 
-          # 3. Retry loop for update
+          # 4. Retry loop for update
           for i in 1 2 3; do
             sudo apt-get update && break || sleep 3
           done
 
-          # 4. Install packages
+          # 5. Install packages
           sudo apt-get install -y pkg-config libx11-dev libxcursor-dev libxrandr-dev \
             libxi-dev libxkbcommon-dev libwayland-dev libgl1-mesa-dev libasound2-dev \
             libudev-dev
@@ -135,6 +138,7 @@ jobs:
         run: |
           echo "nameserver 8.8.8.8" | sudo tee /etc/resolv.conf > /dev/null
           echo "nameserver 1.1.1.1" | sudo tee -a /etc/resolv.conf > /dev/null
+          echo 'Acquire::ForceIPv4 "true";' | sudo tee /etc/apt/apt.conf.d/99force-ipv4
           echo "http://archive.ubuntu.com/ubuntu/" | sudo tee /etc/apt/apt-mirrors.txt > /dev/null
           echo "http://security.ubuntu.com/ubuntu/" | sudo tee -a /etc/apt/apt-mirrors.txt > /dev/null
           for i in 1 2 3; do
@@ -191,6 +195,7 @@ jobs:
           if ! command -v convert >/dev/null 2>&1; then
             echo "nameserver 8.8.8.8" | sudo tee /etc/resolv.conf > /dev/null
             echo "nameserver 1.1.1.1" | sudo tee -a /etc/resolv.conf > /dev/null
+            echo 'Acquire::ForceIPv4 "true";' | sudo tee /etc/apt/apt.conf.d/99force-ipv4
             echo "http://archive.ubuntu.com/ubuntu/" | sudo tee /etc/apt/apt-mirrors.txt > /dev/null
             echo "http://security.ubuntu.com/ubuntu/" | sudo tee -a /etc/apt/apt-mirrors.txt > /dev/null
             for i in 1 2 3; do sudo apt-get update -qq && break || sleep 3; done
@@ -377,6 +382,7 @@ jobs:
         run: |
           echo "nameserver 8.8.8.8" | sudo tee /etc/resolv.conf > /dev/null
           echo "nameserver 1.1.1.1" | sudo tee -a /etc/resolv.conf > /dev/null
+          echo 'Acquire::ForceIPv4 "true";' | sudo tee /etc/apt/apt.conf.d/99force-ipv4
           echo "http://archive.ubuntu.com/ubuntu/" | sudo tee /etc/apt/apt-mirrors.txt > /dev/null
           echo "http://security.ubuntu.com/ubuntu/" | sudo tee -a /etc/apt/apt-mirrors.txt > /dev/null
           for i in 1 2 3; do
@@ -437,16 +443,19 @@ jobs:
           echo "nameserver 8.8.8.8" | sudo tee /etc/resolv.conf > /dev/null
           echo "nameserver 1.1.1.1" | sudo tee -a /etc/resolv.conf > /dev/null
 
-          # 2. Force APT to use the main Ubuntu archive
+          # 2. Force APT to use IPv4 (GitHub Actions ARM64 runners have broken IPv6 routing)
+          echo 'Acquire::ForceIPv4 "true";' | sudo tee /etc/apt/apt.conf.d/99force-ipv4
+
+          # 3. Force APT to use the main Ubuntu archive
           echo "http://archive.ubuntu.com/ubuntu/" | sudo tee /etc/apt/apt-mirrors.txt > /dev/null
           echo "http://security.ubuntu.com/ubuntu/" | sudo tee -a /etc/apt/apt-mirrors.txt > /dev/null
 
-          # 3. Retry loop for update
+          # 4. Retry loop for update
           for i in 1 2 3; do
             sudo apt-get update && break || sleep 3
           done
 
-          # 4. Install packages.
+          # 5. Install packages.
           #    elfutils  -> eu-strip / eu-elfcompress, required by flatpak-builder
           #    (must be explicit because --no-install-recommends skips it)
           sudo apt-get install -y --no-install-recommends \
