@@ -58,6 +58,13 @@ pub struct UiState {
     pub shader_node_sizes: HashMap<u64, [f32; 2]>,
     pub shader_drag_from: Option<(u64, bool, u8)>,
     pub shader_socket_positions: HashMap<(u64, bool, u8), [f32; 2]>,
+    /// Node-editor view (Blender-style): pan = screen offset of graph origin from the
+    /// canvas top-left; zoom <= 0.0 means "unset" (treated as 1.0).
+    pub shader_pan: [f32; 2],
+    pub shader_zoom: f32,
+    /// Layer->screen transform [scale, tx, ty] of the node currently being drawn.
+    pub shader_cur_xform: [f32; 3],
+    pub shader_view_all_pending: bool,
     /// Cached egui textures for Image Texture node previews (keyed by texture index).
     pub shader_image_previews: HashMap<usize, egui::TextureHandle>,
     pub shader_image_preview_versions: HashMap<usize, u64>,
@@ -859,7 +866,10 @@ fn draw_shading_editor(ui: &mut egui::Ui, ctx: &egui::Context, doc: &mut Documen
                     });
                 }
             });
-            if ui.button("Fit View").on_hover_text("Reset node layout positions").clicked() {
+            if ui.button("View All").on_hover_text("Frame all nodes (Home)").clicked() {
+                st.shader_view_all_pending = true;
+            }
+            if ui.button("Reset Layout").on_hover_text("Reset node layout positions").clicked() {
                 for (i, node) in st.shader_nodes.iter_mut().enumerate() {
                     node.pos = match node.kind {
                         ShaderNodeKind::Principled => [330.0, 70.0],
@@ -874,6 +884,7 @@ fn draw_shading_editor(ui: &mut egui::Ui, ctx: &egui::Context, doc: &mut Documen
                         }
                     };
                 }
+                st.shader_view_all_pending = true;
             }
             if ui.button("Apply Graph").on_hover_text("Evaluate nodes into the material (textures & PBR slots)").clicked() {
                 // mi is not in scope here (header is above). Flag for apply after material is known.
@@ -883,7 +894,7 @@ fn draw_shading_editor(ui: &mut egui::Ui, ctx: &egui::Context, doc: &mut Documen
                 st.shader_bake_pending = true;
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.weak("Drag nodes · Click sockets · Apply Graph · Bake");
+                ui.weak("MMB pan · Wheel zoom · Ctrl+Wheel pan X · Shift+Wheel pan Y · Home view all");
             });
         });
     });
@@ -945,22 +956,89 @@ fn draw_shading_editor(ui: &mut egui::Ui, ctx: &egui::Context, doc: &mut Documen
     let canvas_size = egui::vec2(ui.available_width().max(600.0), ui.available_height().max(260.0));
     let (canvas_rect, _) = ui.allocate_exact_size(canvas_size, egui::Sense::hover());
     let painter = ui.painter_at(canvas_rect);
+
+    // ---- Blender-style view navigation -------------------------------------
+    //  MMB drag        : pan
+    //  Mouse wheel     : zoom towards the cursor
+    //  Ctrl + wheel    : pan horizontally
+    //  Shift + wheel   : pan vertically
+    //  Ctrl + MMB drag : zoom
+    //  Home            : view all
+    if st.shader_zoom <= 0.0 { st.shader_zoom = 1.0; }
+    let hover_pos = ctx.input(|i| i.pointer.hover_pos());
+    let canvas_hovered = hover_pos.map(|p| canvas_rect.contains(p)).unwrap_or(false)
+        && !ctx.memory(|m| m.any_popup_open());
+    if canvas_hovered {
+        let (mmb, delta, mods, raw_scroll, zoom_delta) = ctx.input(|i| (
+            i.pointer.middle_down(), i.pointer.delta(), i.modifiers, i.raw_scroll_delta, i.zoom_delta(),
+        ));
+        let cursor = hover_pos.unwrap_or(canvas_rect.center());
+        let mut zoom_by = 1.0f32;
+        if mmb {
+            if mods.ctrl {
+                zoom_by *= (-delta.y * 0.01).exp();
+            } else {
+                st.shader_pan[0] += delta.x;
+                st.shader_pan[1] += delta.y;
+                ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
+            }
+        }
+        // egui folds Ctrl+wheel into zoom_delta; undo that so we can use it for panning.
+        let wheel = raw_scroll.x + raw_scroll.y + if mods.ctrl { zoom_delta.ln() * 200.0 } else { 0.0 };
+        if wheel != 0.0 {
+            if mods.ctrl {
+                st.shader_pan[0] += wheel;
+            } else if mods.shift {
+                st.shader_pan[1] += wheel;
+            } else {
+                zoom_by *= (wheel * 0.002).exp();
+            }
+        } else if !mods.ctrl && zoom_delta != 1.0 {
+            zoom_by *= zoom_delta; // trackpad pinch
+        }
+        if zoom_by != 1.0 {
+            let old = st.shader_zoom;
+            let new = (old * zoom_by).clamp(0.2, 4.0);
+            let rel = cursor - canvas_rect.min;
+            let gx = (rel.x - st.shader_pan[0]) / old;
+            let gy = (rel.y - st.shader_pan[1]) / old;
+            st.shader_pan[0] = rel.x - gx * new;
+            st.shader_pan[1] = rel.y - gy * new;
+            st.shader_zoom = new;
+        }
+        if ctx.input(|i| i.key_pressed(egui::Key::Home)) {
+            st.shader_view_all_pending = true;
+        }
+    }
+    let zoom = st.shader_zoom;
+    let view_origin = canvas_rect.min + egui::vec2(st.shader_pan[0], st.shader_pan[1]);
+
     let bg = egui::Color32::from_rgb(0x22, 0x22, 0x22);
     painter.rect_filled(canvas_rect, 0.0, bg);
     let grid_minor = egui::Color32::from_gray(43);
     let grid_major = egui::Color32::from_gray(54);
-    let spacing = 22.0;
-    let mut x = canvas_rect.left();
-    let mut xi = 0;
-    while x <= canvas_rect.right() {
-        painter.line_segment([egui::pos2(x, canvas_rect.top()), egui::pos2(x, canvas_rect.bottom())], egui::Stroke::new(if xi % 5 == 0 { 1.0 } else { 0.5 }, if xi % 5 == 0 { grid_major } else { grid_minor }));
-        x += spacing; xi += 1;
-    }
-    let mut y = canvas_rect.top();
-    let mut yi = 0;
-    while y <= canvas_rect.bottom() {
-        painter.line_segment([egui::pos2(canvas_rect.left(), y), egui::pos2(canvas_rect.right(), y)], egui::Stroke::new(if yi % 5 == 0 { 1.0 } else { 0.5 }, if yi % 5 == 0 { grid_major } else { grid_minor }));
-        y += spacing; yi += 1;
+    let spacing = 22.0 * zoom;
+    if spacing >= 4.0 {
+        let n0 = ((canvas_rect.left() - view_origin.x) / spacing).floor() as i32;
+        let n1 = ((canvas_rect.right() - view_origin.x) / spacing).ceil() as i32;
+        for n in n0..=n1 {
+            let x = view_origin.x + n as f32 * spacing;
+            let major = n.rem_euclid(5) == 0;
+            painter.line_segment(
+                [egui::pos2(x, canvas_rect.top()), egui::pos2(x, canvas_rect.bottom())],
+                egui::Stroke::new(if major { 1.0 } else { 0.5 }, if major { grid_major } else { grid_minor }),
+            );
+        }
+        let m0 = ((canvas_rect.top() - view_origin.y) / spacing).floor() as i32;
+        let m1 = ((canvas_rect.bottom() - view_origin.y) / spacing).ceil() as i32;
+        for m in m0..=m1 {
+            let y = view_origin.y + m as f32 * spacing;
+            let major = m.rem_euclid(5) == 0;
+            painter.line_segment(
+                [egui::pos2(canvas_rect.left(), y), egui::pos2(canvas_rect.right(), y)],
+                egui::Stroke::new(if major { 1.0 } else { 0.5 }, if major { grid_major } else { grid_minor }),
+            );
+        }
     }
 
     // Fresh socket positions every frame — wires always hit the current controls.
@@ -969,35 +1047,41 @@ fn draw_shading_editor(ui: &mut egui::Ui, ctx: &egui::Context, doc: &mut Documen
     let mut node_rects: Vec<(u64, egui::Rect)> = Vec::new();
     let mut delete_node = None;
     for node in nodes {
-        let pos = canvas_rect.min + egui::vec2(node.pos[0], node.pos[1]);
-        // Keep every node inside the actual node-canvas, not merely inside the
-        // application window. Area::constrain(true) only knows the screen bounds.
-        let area = egui::Area::new(egui::Id::new(("shader_node", node.id)))
+        // Nodes are laid out at a fixed "design" size and scaled as a whole by the
+        // layer transform (view zoom x per-node scale). Text, sliders and buttons all
+        // scale together, so there is never any scrolling inside a node.
+        let default_width = if node.kind == ShaderNodeKind::Principled { 270.0 } else { 225.0 };
+        let node_scale = st.shader_node_sizes.get(&node.id)
+            .map(|sz| (sz[0] / default_width).clamp(0.4, 3.0))
+            .unwrap_or(1.0);
+        let total_scale = zoom * node_scale;
+        let tx = view_origin.x + zoom * node.pos[0] * (1.0 - node_scale);
+        let ty = view_origin.y + zoom * node.pos[1] * (1.0 - node_scale);
+        st.shader_cur_xform = [total_scale, tx, ty];
+        let xform = egui::emath::TSTransform::new(egui::vec2(tx, ty), total_scale);
+        let node_area_id = egui::Id::new(("shader_node", node.id));
+        ctx.set_transform_layer(egui::LayerId::new(egui::Order::Foreground, node_area_id), xform);
+        // Layer-local coordinates: the node's graph position.
+        let pos = egui::pos2(node.pos[0], node.pos[1]);
+        let area = egui::Area::new(node_area_id)
             .order(egui::Order::Foreground)
             .current_pos(pos)
+            .constrain(false)
             // Not movable via Area — title bar + edges handle move/resize so they
             // never fight each other for pointer input (window-like behaviour).
             .movable(false)
-            .constrain_to(canvas_rect.shrink(2.0))
             .show(ctx, |ui| {
+                // Clip to the node canvas (expressed in this layer's local space) so
+                // nodes never paint over the 3D viewport or other panels.
+                ui.set_clip_rect(xform.inverse() * canvas_rect);
                 egui::Frame::none()
                     .fill(egui::Color32::from_rgb(0x32, 0x32, 0x32))
                     .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(0x12, 0x12, 0x12)))
                     .rounding(egui::Rounding::same(7.0))
                     .inner_margin(egui::Margin::same(8.0))
                     .show(ui, |ui| {
-                        let default_width = if node.kind == ShaderNodeKind::Principled { 270.0 } else { 225.0 };
-                        let node_size = st.shader_node_sizes.get(&node.id).copied().unwrap_or([default_width, 290.0]);
-                        let bounded_width = node_size[0].min((canvas_rect.width() - 20.0).max(140.0));
-                        let bounded_height = node_size[1].min((canvas_rect.height() - 20.0).max(110.0));
-                        ui.set_min_width(bounded_width);
-                        ui.set_max_width(bounded_width);
-                        // Apply the stored height to the node itself, not only
-                        // to its scroll area. Otherwise the frame keeps its
-                        // content's natural height and vertical resizing appears
-                        // to do nothing.
-                        ui.set_min_height(bounded_height);
-                        ui.set_max_height(bounded_height);
+                        ui.set_min_width(default_width);
+                        ui.set_max_width(default_width);
                         // Title bar = move handle (window-like). Leave the × button free.
                         let title_response = ui.horizontal(|ui| {
                             let full = ui.available_rect_before_wrap();
@@ -1018,9 +1102,10 @@ fn draw_shading_editor(ui: &mut egui::Ui, ctx: &egui::Context, doc: &mut Documen
                         }).inner;
                         if title_response.dragged() {
                             if let Some(n) = st.shader_nodes.iter_mut().find(|n| n.id == node.id) {
-                                let d = title_response.drag_delta();
-                                n.pos[0] = (n.pos[0] + d.x).clamp(0.0, (canvas_rect.width() - 40.0).max(0.0));
-                                n.pos[1] = (n.pos[1] + d.y).clamp(0.0, (canvas_rect.height() - 40.0).max(0.0));
+                                // Pointer delta is in screen space; convert to graph space.
+                                let d = ui.ctx().input(|i| i.pointer.delta());
+                                n.pos[0] += d.x / zoom;
+                                n.pos[1] += d.y / zoom;
                             }
                             ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
                         } else if title_response.hovered() {
@@ -1028,9 +1113,7 @@ fn draw_shading_editor(ui: &mut egui::Ui, ctx: &egui::Context, doc: &mut Documen
                         }
                         ui.add_space(3.0);
                         ui.separator();
-                        egui::ScrollArea::vertical()
-                            .max_height((bounded_height - 70.0).max(35.0))
-                            .show(ui, |ui| {
+                        {
                         match node.kind {
                             ShaderNodeKind::Principled => {
                                 let mat = &doc.scene.materials[mi];
@@ -1182,7 +1265,7 @@ fn draw_shading_editor(ui: &mut egui::Ui, ctx: &egui::Context, doc: &mut Documen
                                             });
                                     });
                                 }
-                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
                                     shader_socket_control(ui, st, node.id, true, 0, "BSDF ◉");
                                 });
                             }
@@ -1370,7 +1453,7 @@ fn draw_shading_editor(ui: &mut egui::Ui, ctx: &egui::Context, doc: &mut Documen
                                     );
                                 }
 
-                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
                                     if shader_socket_control(ui, st, node.id, true, 0, "Color ◉").clicked() { }
                                 });
                                 // When linked into Principled, drive base_color_tex.
@@ -1429,7 +1512,7 @@ fn draw_shading_editor(ui: &mut egui::Ui, ctx: &egui::Context, doc: &mut Documen
                                         doc.touch();
                                     }
                                 }
-                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
                                     if shader_socket_control(ui, st, node.id, true, 0, "Color ◉").clicked() { }
                                 });
                             }
@@ -1440,7 +1523,7 @@ fn draw_shading_editor(ui: &mut egui::Ui, ctx: &egui::Context, doc: &mut Documen
                                         ui.label(label);
                                     });
                                 }
-                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
                                     if shader_socket_control(ui, st, node.id, true, 0, "UV ◉").clicked() { }
                                 });
                             }
@@ -1456,7 +1539,7 @@ fn draw_shading_editor(ui: &mut egui::Ui, ctx: &egui::Context, doc: &mut Documen
                                         n.value = v;
                                     }
                                 }
-                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
                                     shader_socket_control(ui, st, node.id, true, 0, "Value ◉");
                                 });
                             }
@@ -1480,7 +1563,7 @@ fn draw_shading_editor(ui: &mut egui::Ui, ctx: &egui::Context, doc: &mut Documen
                                         }
                                     }
                                 });
-                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
                                     shader_socket_control(ui, st, node.id, true, 0, "Vector ◉");
                                 });
                             }
@@ -1501,7 +1584,7 @@ fn draw_shading_editor(ui: &mut egui::Ui, ctx: &egui::Context, doc: &mut Documen
                                     }
                                 }
                                 ui.weak("Procedural · evaluation not wired yet");
-                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
                                     shader_socket_control(ui, st, node.id, true, 0, "Color ◉");
                                 });
                             }
@@ -1511,7 +1594,7 @@ fn draw_shading_editor(ui: &mut egui::Ui, ctx: &egui::Context, doc: &mut Documen
                                     ui.label("Factor");
                                 });
                                 ui.weak("Stops · evaluation not wired yet");
-                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
                                     shader_socket_control(ui, st, node.id, true, 0, "Color ◉");
                                 });
                             }
@@ -1529,7 +1612,7 @@ fn draw_shading_editor(ui: &mut egui::Ui, ctx: &egui::Context, doc: &mut Documen
                                     ui.label("Color B");
                                 });
                                 ui.weak("Mix · evaluation not wired yet");
-                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
                                     shader_socket_control(ui, st, node.id, true, 0, "Result ◉");
                                 });
                             }
@@ -1549,7 +1632,7 @@ fn draw_shading_editor(ui: &mut egui::Ui, ctx: &egui::Context, doc: &mut Documen
                                         n.value = str_;
                                     }
                                 }
-                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
                                     shader_socket_control(ui, st, node.id, true, 0, "Normal ◉");
                                 });
                             }
@@ -1571,7 +1654,7 @@ fn draw_shading_editor(ui: &mut egui::Ui, ctx: &egui::Context, doc: &mut Documen
                                     doc.scene.materials[mi].normal_scale = str_;
                                     doc.touch();
                                 }
-                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
                                     shader_socket_control(ui, st, node.id, true, 0, "Normal ◉");
                                 });
                             }
@@ -1600,7 +1683,7 @@ fn draw_shading_editor(ui: &mut egui::Ui, ctx: &egui::Context, doc: &mut Documen
                                         n.value = strength;
                                     }
                                 }
-                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
                                     shader_socket_control(ui, st, node.id, true, 0, "Emission ◉");
                                 });
                             }
@@ -1617,7 +1700,7 @@ fn draw_shading_editor(ui: &mut egui::Ui, ctx: &egui::Context, doc: &mut Documen
                                     }
                                 }
                                 ui.weak("Simplified · drives Principled fields when useful");
-                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
                                     shader_socket_control(ui, st, node.id, true, 0, "BSDF ◉");
                                 });
                             }
@@ -1638,25 +1721,25 @@ fn draw_shading_editor(ui: &mut egui::Ui, ctx: &egui::Context, doc: &mut Documen
                             // ---- Input nodes (Blender Input category) ----
                             ShaderNodeKind::AmbientOcclusion => {
                                 ui.weak("AO factor · Cycles/EEVEE style");
-                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
                                     shader_socket_control(ui, st, node.id, true, 0, "AO ◉");
                                 });
                             }
                             ShaderNodeKind::Attribute | ShaderNodeKind::ColorAttribute => {
                                 ui.weak("Named attribute / color layer");
-                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
                                     shader_socket_control(ui, st, node.id, true, 0, "Color ◉");
                                 });
                             }
                             ShaderNodeKind::Bevel => {
                                 ui.weak("Rounded normals");
-                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
                                     shader_socket_control(ui, st, node.id, true, 0, "Normal ◉");
                                 });
                             }
                             ShaderNodeKind::CameraData => {
                                 for (i, lab) in ["View Vector", "View Z Depth", "View Distance"].iter().enumerate() {
-                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
                                         shader_socket_control(ui, st, node.id, true, i as u8, &format!("{lab} ◉"));
                                     });
                                 }
@@ -1667,20 +1750,20 @@ fn draw_shading_editor(ui: &mut egui::Ui, ctx: &egui::Context, doc: &mut Documen
                                 if ui.add(egui::DragValue::new(&mut ior).range(1.0..=5.0).speed(0.01).prefix("IOR ")).changed() {
                                     if let Some(n) = st.shader_nodes.iter_mut().find(|n| n.id == node.id) { n.value = ior; }
                                 }
-                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
                                     shader_socket_control(ui, st, node.id, true, 0, "Fac ◉");
                                 });
                             }
                             ShaderNodeKind::Geometry => {
                                 for (i, lab) in ["Position", "Normal", "Tangent", "Backfacing"].iter().enumerate() {
-                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
                                         shader_socket_control(ui, st, node.id, true, i as u8, &format!("{lab} ◉"));
                                     });
                                 }
                             }
                             ShaderNodeKind::CurvesInfo => {
                                 for (i, lab) in ["Is Strand", "Intercept", "Length"].iter().enumerate() {
-                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
                                         shader_socket_control(ui, st, node.id, true, i as u8, &format!("{lab} ◉"));
                                     });
                                 }
@@ -1690,90 +1773,90 @@ fn draw_shading_editor(ui: &mut egui::Ui, ctx: &egui::Context, doc: &mut Documen
                                 if ui.add(egui::Slider::new(&mut blend, 0.0..=1.0).text("Blend")).changed() {
                                     if let Some(n) = st.shader_nodes.iter_mut().find(|n| n.id == node.id) { n.value = blend; }
                                 }
-                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
                                     shader_socket_control(ui, st, node.id, true, 0, "Fresnel ◉");
                                 });
-                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
                                     shader_socket_control(ui, st, node.id, true, 1, "Facing ◉");
                                 });
                             }
                             ShaderNodeKind::LightEvaluation | ShaderNodeKind::LightInfo => {
                                 ui.weak("Light data · bake defaults");
-                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
                                     shader_socket_control(ui, st, node.id, true, 0, "Color ◉");
                                 });
                             }
                             ShaderNodeKind::LightPath => {
                                 for (i, lab) in ["Is Camera Ray", "Is Shadow Ray", "Is Diffuse Ray"].iter().enumerate() {
-                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
                                         shader_socket_control(ui, st, node.id, true, i as u8, &format!("{lab} ◉"));
                                     });
                                 }
                             }
                             ShaderNodeKind::ObjectInfo => {
                                 for (i, lab) in ["Location", "Color", "Object Index", "Random"].iter().enumerate() {
-                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
                                         shader_socket_control(ui, st, node.id, true, i as u8, &format!("{lab} ◉"));
                                     });
                                 }
                             }
                             ShaderNodeKind::ParticleInfo => {
                                 for (i, lab) in ["Index", "Age", "Lifetime"].iter().enumerate() {
-                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
                                         shader_socket_control(ui, st, node.id, true, i as u8, &format!("{lab} ◉"));
                                     });
                                 }
                             }
                             ShaderNodeKind::PointInfo => {
                                 for (i, lab) in ["Position", "Radius", "Random"].iter().enumerate() {
-                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
                                         shader_socket_control(ui, st, node.id, true, i as u8, &format!("{lab} ◉"));
                                     });
                                 }
                             }
                             ShaderNodeKind::Raycast | ShaderNodeKind::ShadowRaycast => {
                                 for (i, lab) in ["Hit", "Position", "Normal", "Distance"].iter().enumerate() {
-                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
                                         shader_socket_control(ui, st, node.id, true, i as u8, &format!("{lab} ◉"));
                                     });
                                 }
                             }
                             ShaderNodeKind::SceneTime => {
-                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
                                     shader_socket_control(ui, st, node.id, true, 0, "Seconds ◉");
                                 });
-                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
                                     shader_socket_control(ui, st, node.id, true, 1, "Frame ◉");
                                 });
                             }
                             ShaderNodeKind::Tangent => {
                                 ui.weak("Tangent space");
-                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
                                     shader_socket_control(ui, st, node.id, true, 0, "Tangent ◉");
                                 });
                             }
                             ShaderNodeKind::UvMap => {
                                 ui.weak("Active UV map");
-                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
                                     shader_socket_control(ui, st, node.id, true, 0, "UV ◉");
                                 });
                             }
                             ShaderNodeKind::VolumeInfo => {
-                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
                                     shader_socket_control(ui, st, node.id, true, 0, "Color ◉");
                                 });
-                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
                                     shader_socket_control(ui, st, node.id, true, 1, "Density ◉");
                                 });
                             }
                             ShaderNodeKind::Wireframe => {
                                 ui.weak("Edge factor");
-                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
                                     shader_socket_control(ui, st, node.id, true, 0, "Fac ◉");
                                 });
                             }
                         }
-                            });
+                        }
                         ui.add_space(4.0);
                         // Window-style edge + corner resize. Accumulate frame deltas onto the
                         // current stored size so there is no lag and no jump-back to start size.
@@ -1806,44 +1889,52 @@ fn draw_shading_editor(ui: &mut egui::Ui, ctx: &egui::Context, doc: &mut Documen
                             egui::Id::new(("shader_node_resize_corner", node.id)),
                             egui::Sense::drag(),
                         );
-                        let max_width = (canvas_rect.width() - 24.0).clamp(160.0, 1200.0);
-                        let max_height = (canvas_rect.height() - 24.0).clamp(110.0, 1600.0);
+                        // Resizing scales the whole node uniformly (fixed aspect ratio), so
+                        // text and controls shrink/grow with it. Pointer delta is screen-space.
                         let mut next = st.shader_node_sizes.get(&node.id).copied().unwrap_or([default_width, 290.0]);
+                        let screen_delta = ui.ctx().input(|i| i.pointer.delta());
                         let mut resized = false;
+                        let mut dscreen = 0.0f32;
                         if width_handle.dragged() {
-                            next[0] = (next[0] + width_handle.drag_delta().x).clamp(160.0, max_width);
+                            dscreen = screen_delta.x;
                             resized = true;
                             ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
                         } else if width_handle.hovered() {
                             ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
                         }
                         if height_handle.dragged() {
-                            next[1] = (next[1] + height_handle.drag_delta().y).clamp(110.0, max_height);
+                            // Height drag also scales uniformly: convert to an equivalent width change.
+                            let ratio = node_rect.width() / node_rect.height().max(1.0);
+                            dscreen = screen_delta.y * ratio;
                             resized = true;
                             ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
                         } else if height_handle.hovered() {
                             ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
                         }
                         if corner_handle.dragged() {
-                            let d = corner_handle.drag_delta();
-                            next[0] = (next[0] + d.x).clamp(160.0, max_width);
-                            next[1] = (next[1] + d.y).clamp(110.0, max_height);
+                            dscreen = (screen_delta.x + screen_delta.y * node_rect.width() / node_rect.height().max(1.0)) * 0.5;
                             resized = true;
                             ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeNwSe);
                         } else if corner_handle.hovered() {
                             ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeNwSe);
                         }
                         if resized {
+                            // screen px -> design-width px for this node
+                            let new_w = next[0] + dscreen / zoom;
+                            next[0] = new_w.clamp(default_width * 0.4, default_width * 3.0);
                             st.shader_node_sizes.insert(node.id, next);
                         }
-                        width_handle.on_hover_text("Drag to change width");
-                        height_handle.on_hover_text("Drag to change height");
-                        corner_handle.on_hover_text("Drag to resize");
+                        width_handle.on_hover_text("Drag to scale node");
+                        height_handle.on_hover_text("Drag to scale node");
+                        corner_handle.on_hover_text("Drag to scale node");
                     });
             });
-        let rect = area.response.rect;
-        // Position is owned by the node (title-bar drag). Do not overwrite it from
-        // the Area rect — that would undo the drag applied earlier this frame.
+        // area rect is in layer-local (design) space; map to screen for wires / view-all.
+        let local = area.response.rect;
+        let rect = egui::Rect::from_min_size(
+            egui::pos2(local.min.x * total_scale + tx, local.min.y * total_scale + ty),
+            local.size() * total_scale,
+        );
         node_rects.push((node.id, rect));
     }
     if ctx.input(|i| i.pointer.any_released()) {
@@ -1857,6 +1948,27 @@ fn draw_shading_editor(ui: &mut egui::Ui, ctx: &egui::Context, doc: &mut Documen
         if st.shader_socket_pick.map(|p| p.0) == Some(id) { st.shader_socket_pick = None; }
         // also drop drag state for deleted node
         if st.shader_drag_from.map(|p| p.0) == Some(id) { st.shader_drag_from = None; }
+    }
+
+    if st.shader_view_all_pending {
+        st.shader_view_all_pending = false;
+        if !node_rects.is_empty() {
+            let mut bb = egui::Rect::NOTHING;
+            for (_, r) in &node_rects {
+                // back to graph space
+                let min = egui::pos2((r.min.x - view_origin.x) / zoom, (r.min.y - view_origin.y) / zoom);
+                let max = egui::pos2((r.max.x - view_origin.x) / zoom, (r.max.y - view_origin.y) / zoom);
+                bb = bb.union(egui::Rect::from_min_max(min, max));
+            }
+            let margin = 30.0;
+            let avail = canvas_rect.size() - egui::vec2(margin * 2.0, margin * 2.0);
+            let z = (avail.x / bb.width().max(1.0)).min(avail.y / bb.height().max(1.0)).clamp(0.2, 1.5);
+            st.shader_zoom = z;
+            let c = bb.center();
+            st.shader_pan[0] = canvas_rect.width() * 0.5 - c.x * z;
+            st.shader_pan[1] = canvas_rect.height() * 0.5 - c.y * z;
+            ctx.request_repaint();
+        }
     }
 
     // Draw Blender-style Bezier wires beneath the nodes.
@@ -1879,13 +1991,13 @@ fn draw_shading_editor(ui: &mut egui::Ui, ctx: &egui::Context, doc: &mut Documen
                 .get(&(link.to, false, link.to_socket))
                 .map(|p| egui::pos2(p[0], p[1]))
                 .unwrap_or_else(|| egui::pos2(to.left(), to.center().y));
-            let bend = ((b.x - a.x).abs() * 0.5).max(55.0);
+            let bend = ((b.x - a.x).abs() * 0.5).max(55.0 * zoom);
             let points = [a, egui::pos2(a.x + bend, a.y), egui::pos2(b.x - bend, b.y), b];
             wire_painter.add(egui::epaint::CubicBezierShape::from_points_stroke(
                 points,
                 false,
                 egui::Color32::TRANSPARENT,
-                egui::Stroke::new(3.0, egui::Color32::from_rgb(0xd5, 0xa0, 0x55)),
+                egui::Stroke::new((3.0 * zoom).clamp(1.0, 6.0), egui::Color32::from_rgb(0xd5, 0xa0, 0x55)),
             ));
         }
     }
@@ -1894,13 +2006,13 @@ fn draw_shading_editor(ui: &mut egui::Ui, ctx: &egui::Context, doc: &mut Documen
             if let Some(pointer) = ctx.pointer_interact_pos() {
                 let a = egui::pos2(start[0], start[1]);
                 let b = pointer;
-                let bend = ((b.x - a.x).abs() * 0.5).max(55.0);
+                let bend = ((b.x - a.x).abs() * 0.5).max(55.0 * zoom);
                 let points = [a, egui::pos2(a.x + bend, a.y), egui::pos2(b.x - bend, b.y), b];
                 wire_painter.add(egui::epaint::CubicBezierShape::from_points_stroke(
                     points,
                     false,
                     egui::Color32::TRANSPARENT,
-                    egui::Stroke::new(2.5, egui::Color32::LIGHT_BLUE),
+                    egui::Stroke::new((2.5 * zoom).clamp(1.0, 5.0), egui::Color32::LIGHT_BLUE),
                 ));
             }
         }
@@ -1949,8 +2061,11 @@ fn shader_socket_control(
 ) -> egui::Response {
     let response = ui.add(egui::Button::new(label).sense(egui::Sense::click_and_drag()));
     // Screen-space centre of the actual control — used for wire endpoints.
-    let center = response.rect.center();
-    st.shader_socket_positions.insert((node_id, is_output, socket), [center.x, center.y]);
+    // The node lives in a transformed layer, so map the local centre to screen space.
+    let local_center = response.rect.center();
+    let [sc, tx, ty] = st.shader_cur_xform;
+    let (cx, cy) = if sc > 0.0 { (local_center.x * sc + tx, local_center.y * sc + ty) } else { (local_center.x, local_center.y) };
+    st.shader_socket_positions.insert((node_id, is_output, socket), [cx, cy]);
     if response.drag_started() {
         st.shader_drag_from = Some((node_id, is_output, socket));
         st.shader_socket_pick = None;
