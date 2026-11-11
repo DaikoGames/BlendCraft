@@ -167,10 +167,16 @@ jobs:
           cp "target/${TARGET}/release/${BIN}" "$APPDIR/usr/bin/${BIN}"
           chmod +x "$APPDIR/usr/bin/${BIN}"
 
-          # Icon already in the repo
+          # Icon from repo (resize to 256 — Flatpak/AppImage expect ≤512)
           test -f crates/app/logo.png || { echo "missing crates/app/logo.png"; exit 1; }
-          cp crates/app/logo.png "$APPDIR/usr/share/icons/hicolor/256x256/apps/blendcraft.png"
-          cp crates/app/logo.png "$APPDIR/blendcraft.png"
+          if command -v convert >/dev/null 2>&1; then
+            convert crates/app/logo.png -resize 256x256 "$APPDIR/usr/share/icons/hicolor/256x256/apps/blendcraft.png"
+            convert crates/app/logo.png -resize 256x256 "$APPDIR/blendcraft.png"
+          else
+            sudo apt-get update -qq && sudo apt-get install -y -qq imagemagick
+            convert crates/app/logo.png -resize 256x256 "$APPDIR/usr/share/icons/hicolor/256x256/apps/blendcraft.png"
+            convert crates/app/logo.png -resize 256x256 "$APPDIR/blendcraft.png"
+          fi
 
           cat > "$APPDIR/blendcraft.desktop" <<EOF
           [Desktop Entry]
@@ -401,7 +407,7 @@ jobs:
       - name: Install flatpak tooling
         run: |
           sudo apt-get update
-          sudo apt-get install -y flatpak flatpak-builder
+          sudo apt-get install -y flatpak flatpak-builder imagemagick
           flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
 
       - name: Cache Flatpak runtimes
@@ -452,11 +458,11 @@ jobs:
           EOF
           sed -i 's/^[[:space:]]*//' "$APP_ID.metainfo.xml"
 
-          # Use logo already in the repo — no download, no conversion tools
+          # Logo from repo; Flatpak requires icons ≤ 512px (logo is 1254px)
           LOGO="../crates/app/logo.png"
           test -f "$LOGO" || { echo "ERROR: missing $LOGO"; exit 1; }
           mkdir -p "icons/hicolor/256x256/apps"
-          cp "$LOGO" "icons/hicolor/256x256/apps/$APP_ID.png"
+          convert "$LOGO" -resize 256x256 "icons/hicolor/256x256/apps/$APP_ID.png"
 
           cat > "$APP_ID.yml" <<EOF
           app-id: $APP_ID
