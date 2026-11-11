@@ -398,7 +398,8 @@ jobs:
                 - install -Dm755 $BIN /app/bin/$BIN
                 - install -Dm644 $APP_ID.desktop /app/share/applications/$APP_ID.desktop
                 - install -Dm644 $APP_ID.metainfo.xml /app/share/metainfo/$APP_ID.metainfo.xml
-                - cp -a icons /app/share/
+                - mkdir -p /app/share/icons
+                - if [ -d hicolor ]; then cp -a hicolor /app/share/icons/; elif [ -d icons/hicolor ]; then cp -a icons/hicolor /app/share/icons/; else echo "No icons found:" && ls -la && exit 1; fi
               sources:
                 - type: file
                   path: $BIN
