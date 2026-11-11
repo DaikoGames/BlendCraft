@@ -13,14 +13,7 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  # Package that contains the app. The binary name is detected automatically
-  # (see "Detect binary name" steps), so it no longer has to match this.
   APP_PACKAGE: forge-app
-
-# NOTE: OpenH264 and minimp4 were removed (video export is now the pure-Rust
-# `forge-video` crate), so no job below needs cmake, nasm, libclang or a C++
-# cross compiler any more. We now use cargo-zigbuild for Linux cross-compilation
-# to avoid dead Ubuntu 16.04 Docker images.
 
 jobs:
   # ---------------------------------------------------------------------------
@@ -36,11 +29,15 @@ jobs:
       
       - name: Install Linux build dependencies
         run: |
-          # Bypass broken Azure mirror DNS issues on GitHub runners
+          # 1. Force APT to use the main Ubuntu archive, bypassing the broken Azure mirror list (Ubuntu 24.04+)
+          echo "http://archive.ubuntu.com/ubuntu/" | sudo tee /etc/apt/apt-mirrors.txt > /dev/null
+          echo "http://security.ubuntu.com/ubuntu/" | sudo tee -a /etc/apt/apt-mirrors.txt > /dev/null
+          
+          # 2. Fallback: fix any legacy sources.list entries just in case
           sudo sed -i 's/azure\.archive\.ubuntu\.com/archive.ubuntu.com/g' /etc/apt/sources.list /etc/apt/sources.list.d/*.list 2>/dev/null || true
           sudo sed -i 's/security\.ubuntu\.com/archive.ubuntu.com/g' /etc/apt/sources.list /etc/apt/sources.list.d/*.list 2>/dev/null || true
           
-          # Retry loop to survive transient network blips
+          # 3. Retry loop to survive transient network blips
           for i in 1 2 3; do
             sudo apt-get update && break || sleep 3
           done
@@ -52,7 +49,7 @@ jobs:
       - run: cargo test -p forge-core -p forge-video
 
   # ---------------------------------------------------------------------------
-  # WebAssembly: library crates only (the full GUI app has no web entry yet)
+  # WebAssembly: library crates only
   # ---------------------------------------------------------------------------
   wasm:
     name: WebAssembly (check)
@@ -68,7 +65,6 @@ jobs:
 
   # ---------------------------------------------------------------------------
   # Linux / Windows / macOS
-  # "experimental" targets can fail without failing the whole workflow.
   # ---------------------------------------------------------------------------
   build:
     name: ${{ matrix.name }}
@@ -122,19 +118,23 @@ jobs:
         if: runner.os == 'Windows'
         shell: bash
         run: |
-          test -f crates/app/icon.ico || { echo "Missing crates/app/icon.ico — Windows exe will have no logo"; exit 1; }
-          test -f crates/app/build.rs || { echo "Missing crates/app/build.rs — icon will not be embedded"; exit 1; }
+          test -f crates/app/icon.ico || { echo "Missing crates/app/icon.ico"; exit 1; }
+          test -f crates/app/build.rs || { echo "Missing crates/app/build.rs"; exit 1; }
           test -f crates/app/logo.png || { echo "Missing crates/app/logo.png"; exit 1; }
           echo "Icon assets OK"
 
       - name: Install Linux build dependencies (native build only)
         if: runner.os == 'Linux' && !matrix.cross && !matrix.zig
         run: |
-          # Bypass broken Azure mirror DNS issues on GitHub runners
+          # 1. Force APT to use the main Ubuntu archive, bypassing the broken Azure mirror list
+          echo "http://archive.ubuntu.com/ubuntu/" | sudo tee /etc/apt/apt-mirrors.txt > /dev/null
+          echo "http://security.ubuntu.com/ubuntu/" | sudo tee -a /etc/apt/apt-mirrors.txt > /dev/null
+          
+          # 2. Fallback: fix legacy sources.list entries
           sudo sed -i 's/azure\.archive\.ubuntu\.com/archive.ubuntu.com/g' /etc/apt/sources.list /etc/apt/sources.list.d/*.list 2>/dev/null || true
           sudo sed -i 's/security\.ubuntu\.com/archive.ubuntu.com/g' /etc/apt/sources.list /etc/apt/sources.list.d/*.list 2>/dev/null || true
           
-          # Retry loop to survive transient network blips
+          # 3. Retry loop
           for i in 1 2 3; do
             sudo apt-get update && break || sleep 3
           done
@@ -189,8 +189,9 @@ jobs:
             convert crates/app/logo.png -resize 256x256 "$APPDIR/usr/share/icons/hicolor/256x256/apps/blendcraft.png"
             convert crates/app/logo.png -resize 256x256 "$APPDIR/blendcraft.png"
           else
-            # Bypass broken Azure mirror for imagemagick install
-            sudo sed -i 's/azure\.archive\.ubuntu\.com/archive.ubuntu.com/g' /etc/apt/sources.list /etc/apt/sources.list.d/*.list 2>/dev/null || true
+            # Bulletproof install for fallback imagemagick
+            echo "http://archive.ubuntu.com/ubuntu/" | sudo tee /etc/apt/apt-mirrors.txt > /dev/null
+            echo "http://security.ubuntu.com/ubuntu/" | sudo tee -a /etc/apt/apt-mirrors.txt > /dev/null
             for i in 1 2 3; do sudo apt-get update && break || sleep 3; done
             sudo apt-get install -y -qq imagemagick
             convert crates/app/logo.png -resize 256x256 "$APPDIR/usr/share/icons/hicolor/256x256/apps/blendcraft.png"
@@ -369,13 +370,17 @@ jobs:
           tar -xf base.txz -C "$HOME/sysroot" ./lib ./usr/lib ./usr/include
           rm base.txz
 
-      - name: Install clang + lld (with Azure mirror DNS bypass)
+      - name: Install clang + lld (Bulletproof Azure bypass)
         run: |
-          # Bypass broken Azure mirror DNS issues on GitHub runners
+          # 1. Force APT to use the main Ubuntu archive, bypassing the broken Azure mirror list
+          echo "http://archive.ubuntu.com/ubuntu/" | sudo tee /etc/apt/apt-mirrors.txt > /dev/null
+          echo "http://security.ubuntu.com/ubuntu/" | sudo tee -a /etc/apt/apt-mirrors.txt > /dev/null
+          
+          # 2. Fallback: fix legacy sources.list entries
           sudo sed -i 's/azure\.archive\.ubuntu\.com/archive.ubuntu.com/g' /etc/apt/sources.list /etc/apt/sources.list.d/*.list 2>/dev/null || true
           sudo sed -i 's/security\.ubuntu\.com/archive.ubuntu.com/g' /etc/apt/sources.list /etc/apt/sources.list.d/*.list 2>/dev/null || true
           
-          # Retry loop to survive transient network blips
+          # 3. Retry loop
           for i in 1 2 3; do
             sudo apt-get update && break || sleep 3
           done
@@ -403,7 +408,7 @@ jobs:
           if-no-files-found: error
 
   # ---------------------------------------------------------------------------
-  # Flatpak — uses the REAL logo.png (not the orange placeholder SVG)
+  # Flatpak
   # ---------------------------------------------------------------------------
   flatpak:
     name: flatpak-${{ matrix.name }}
@@ -430,11 +435,15 @@ jobs:
 
       - name: Install flatpak tooling
         run: |
-          # Bypass broken Azure mirror DNS issues on GitHub runners
+          # 1. Force APT to use the main Ubuntu archive, bypassing the broken Azure mirror list
+          echo "http://archive.ubuntu.com/ubuntu/" | sudo tee /etc/apt/apt-mirrors.txt > /dev/null
+          echo "http://security.ubuntu.com/ubuntu/" | sudo tee -a /etc/apt/apt-mirrors.txt > /dev/null
+          
+          # 2. Fallback: fix legacy sources.list entries
           sudo sed -i 's/azure\.archive\.ubuntu\.com/archive.ubuntu.com/g' /etc/apt/sources.list /etc/apt/sources.list.d/*.list 2>/dev/null || true
           sudo sed -i 's/security\.ubuntu\.com/archive.ubuntu.com/g' /etc/apt/sources.list /etc/apt/sources.list.d/*.list 2>/dev/null || true
           
-          # Retry loop to survive transient network blips
+          # 3. Retry loop
           for i in 1 2 3; do
             sudo apt-get update && break || sleep 3
           done
