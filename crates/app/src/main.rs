@@ -3568,8 +3568,10 @@ impl ApplicationHandler for App {
         let mut attrs = Window::default_attributes()
             .with_title("BlendCraft")
             .with_inner_size(LogicalSize::new(1400, 850));
-        // Window icon from the bundled logo (hand-eye OK mark)
+        // Window / taskbar icon from the project logo (hand-eye OK mark).
+        // Resize to 256² so every platform accepts it (raw 1254² can fail silently).
         if let Ok(img) = image::load_from_memory(include_bytes!("../logo.png")) {
+            let img = img.resize_exact(256, 256, image::imageops::FilterType::Lanczos3);
             let rgba = img.to_rgba8();
             let (w, h) = rgba.dimensions();
             if let Ok(icon) = winit::window::Icon::from_rgba(rgba.into_raw(), w, h) {

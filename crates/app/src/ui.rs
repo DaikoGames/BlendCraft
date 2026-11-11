@@ -42,6 +42,10 @@ pub struct UiState {
     pub paint_previews: HashMap<(usize, u32, u32), egui::TextureHandle>,
     pub paint_preview_versions: HashMap<(usize, u32, u32), u64>,
     pub paint_canvas_last_uv: Option<glam::Vec2>,
+    /// Animation workspace: Dope Sheet + Timeline focused layout (Blender-like).
+    pub animation_mode: bool,
+    /// Rendering workspace: full render/output settings (Blender Render + Output props).
+    pub rendering_mode: bool,
     /// Shading workspace visibility and editable node-graph session state.
     pub shading_mode: bool,
     pub shader_nodes: Vec<ShaderNode>,
@@ -201,27 +205,55 @@ pub fn draw(
 
             // Mode selector (Blender style)
             let in_sculpt = doc.sculpt_mode;
-            if ui.add_enabled(mesh_ok || has_armature || in_edit || in_pose || in_sculpt || doc.uv_mode || doc.paint_mode, egui::SelectableLabel::new(!in_edit && !in_pose && !in_sculpt && !doc.uv_mode && !doc.paint_mode && !st.shading_mode, "Object Mode")).clicked() {
+            // Object Mode: default transform workspace
+            let in_object = !in_edit && !in_pose && !in_sculpt && !doc.uv_mode && !doc.paint_mode
+                && !st.shading_mode && !st.animation_mode && !st.rendering_mode;
+            if ui.add_enabled(
+                mesh_ok || has_armature || in_edit || in_pose || in_sculpt || doc.uv_mode || doc.paint_mode
+                    || st.animation_mode || st.rendering_mode,
+                egui::SelectableLabel::new(in_object, "Object Mode"),
+            ).clicked() {
                 st.shading_mode = false;
-                if in_edit {
-                    actions.push(Action::ToggleEditMode);
-                }
-                if in_pose {
-                    actions.push(Action::TogglePoseMode);
-                }
-                if in_sculpt {
-                    actions.push(Action::ToggleSculptMode);
-                }
-                if doc.uv_mode {
-                    actions.push(Action::ToggleUvMode);
-                }
-                if doc.paint_mode {
-                    actions.push(Action::TogglePaintMode);
-                }
+                st.animation_mode = false;
+                st.rendering_mode = false;
+                if in_edit { actions.push(Action::ToggleEditMode); }
+                if in_pose { actions.push(Action::TogglePoseMode); }
+                if in_sculpt { actions.push(Action::ToggleSculptMode); }
+                if doc.uv_mode { actions.push(Action::ToggleUvMode); }
+                if doc.paint_mode { actions.push(Action::TogglePaintMode); }
             }
-            let edit_label = if doc.armature_edit { "Armature Edit" } else { "Edit Mode" };
-            if ui.add_enabled(mesh_ok || in_edit || doc.active_armature().is_some(), egui::SelectableLabel::new(in_edit, edit_label)).clicked() {
+            // Animation workspace (Blender Animation tab structure)
+            let in_anim = st.animation_mode && !in_edit && !in_pose && !in_sculpt
+                && !doc.uv_mode && !doc.paint_mode && !st.shading_mode && !st.rendering_mode;
+            if ui.selectable_label(in_anim, "Animation").clicked() {
                 st.shading_mode = false;
+                st.rendering_mode = false;
+                st.animation_mode = true;
+                if in_edit { actions.push(Action::ToggleEditMode); }
+                if in_pose { actions.push(Action::TogglePoseMode); }
+                if in_sculpt { actions.push(Action::ToggleSculptMode); }
+                if doc.uv_mode { actions.push(Action::ToggleUvMode); }
+                if doc.paint_mode { actions.push(Action::TogglePaintMode); }
+            }
+            // Rendering workspace (Blender Rendering tab)
+            let in_render_ws = st.rendering_mode && !in_edit && !in_pose && !in_sculpt
+                && !doc.uv_mode && !doc.paint_mode && !st.shading_mode && !st.animation_mode;
+            if ui.selectable_label(in_render_ws, "Rendering").clicked() {
+                st.shading_mode = false;
+                st.animation_mode = false;
+                st.rendering_mode = true;
+                st.properties_tab = PropertiesTab::Render;
+                if in_edit { actions.push(Action::ToggleEditMode); }
+                if in_pose { actions.push(Action::TogglePoseMode); }
+                if in_sculpt { actions.push(Action::ToggleSculptMode); }
+                if doc.uv_mode { actions.push(Action::ToggleUvMode); }
+                if doc.paint_mode { actions.push(Action::TogglePaintMode); }
+            }
+            // Always labeled "Edit Mode" (including when editing armatures)
+            if ui.add_enabled(mesh_ok || in_edit || doc.active_armature().is_some(), egui::SelectableLabel::new(in_edit, "Edit Mode")).clicked() {
+                st.shading_mode = false;
+                st.animation_mode = false;
+                st.rendering_mode = false;
                 if in_sculpt {
                     actions.push(Action::ToggleSculptMode);
                 }
@@ -234,6 +266,8 @@ pub fn draw(
             }
             if ui.add_enabled(has_armature, egui::SelectableLabel::new(in_pose, "Pose Mode")).clicked() {
                 st.shading_mode = false;
+                st.animation_mode = false;
+                st.rendering_mode = false;
                 if in_edit && doc.armature_edit {
                     actions.push(Action::TogglePoseMode);
                 } else if !in_pose {
@@ -242,6 +276,8 @@ pub fn draw(
             }
             if ui.add_enabled(mesh_ok || in_sculpt, egui::SelectableLabel::new(in_sculpt, "Sculpt Mode")).clicked() {
                 st.shading_mode = false;
+                st.animation_mode = false;
+                st.rendering_mode = false;
                 if in_edit {
                     actions.push(Action::ToggleEditMode);
                 }
@@ -255,6 +291,8 @@ pub fn draw(
             let in_uv = doc.uv_mode;
             if ui.add_enabled(mesh_ok || in_uv, egui::SelectableLabel::new(in_uv, "UV Editing")).clicked() {
                 st.shading_mode = false;
+                st.animation_mode = false;
+                st.rendering_mode = false;
                 if in_edit {
                     actions.push(Action::ToggleEditMode);
                 }
@@ -275,10 +313,14 @@ pub fn draw(
                 if in_uv { actions.push(Action::ToggleUvMode); }
                 if !in_paint { actions.push(Action::TogglePaintMode); }
                 st.shading_mode = false;
+                st.animation_mode = false;
+                st.rendering_mode = false;
             }
             if ui.selectable_label(st.shading_mode, "Shading").clicked() {
                 st.shading_mode = !st.shading_mode;
                 if st.shading_mode {
+                    st.animation_mode = false;
+                    st.rendering_mode = false;
                     if in_edit { actions.push(Action::ToggleEditMode); }
                     if in_sculpt { actions.push(Action::ToggleSculptMode); }
                     if in_uv { actions.push(Action::ToggleUvMode); }
@@ -308,13 +350,29 @@ pub fn draw(
         });
     });
 
-    // Timeline (Blender-style) — Object Mode animation of transforms
-    if !doc.uv_mode && !doc.paint_mode && !doc.sculpt_mode {
+    // Timeline / Dope Sheet (Blender Animation workspace style)
+    // Compact strip in Object Mode; full Dope Sheet layout in Animation tab.
+    if !doc.uv_mode && !doc.paint_mode && !doc.sculpt_mode && !st.rendering_mode {
+        let timeline_h = if st.animation_mode { 220.0 } else { 72.0 };
         egui::TopBottomPanel::bottom("timeline")
-            .exact_height(72.0)
+            .exact_height(timeline_h)
             .frame(egui::Frame::none().fill(egui::Color32::from_rgb(0x2a, 0x2a, 0x2a)).inner_margin(egui::Margin::symmetric(8.0, 4.0)))
             .show(ctx, |ui| {
-                draw_timeline(ui, doc, st, &mut actions);
+                if st.animation_mode {
+                    draw_animation_workspace(ui, doc, st, &mut actions);
+                } else {
+                    draw_timeline(ui, doc, st, &mut actions);
+                }
+            });
+    }
+
+    // Rendering workspace panel (Blender Render + Output properties)
+    if st.rendering_mode && !doc.uv_mode && !doc.paint_mode && !doc.sculpt_mode {
+        egui::TopBottomPanel::bottom("rendering_workspace")
+            .exact_height(280.0)
+            .frame(egui::Frame::none().fill(egui::Color32::from_rgb(0x28, 0x28, 0x28)).inner_margin(egui::Margin::symmetric(10.0, 6.0)))
+            .show(ctx, |ui| {
+                draw_rendering_workspace(ui, doc, st, &mut actions);
             });
     }
 
@@ -2598,7 +2656,339 @@ fn draw_tool_icon(ui: &mut egui::Ui, tool: Tool, rect: egui::Rect, selected: boo
 }
 
 
-// ------------------------------------------------------------------ menu bar
+// ------------------------------------------------------------------ animation & rendering workspaces
+
+/// Blender-like Animation workspace: transport + Dope Sheet channels + timeline ruler.
+fn draw_animation_workspace(ui: &mut egui::Ui, doc: &mut Document, st: &mut UiState, actions: &mut Vec<Action>) {
+    // Header: Playback Controls (shared with Timeline in Blender)
+    draw_timeline_transport(ui, doc, actions);
+
+    ui.add_space(4.0);
+    ui.separator();
+    ui.horizontal(|ui| {
+        ui.label(RichText::new("Dope Sheet").strong());
+        ui.weak("· channels = objects · diamonds = keyframes · click ruler to scrub");
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui.small_button("Only Selected").clicked() {
+                // visual hint only — filtering is already selection-aware in the channel list
+            }
+            ui.weak("Summary");
+        });
+    });
+
+    // Dope Sheet body: channel list (left) + keyframe lanes (right)
+    let anim = &doc.scene.animation;
+    let start = anim.frame_start as f32;
+    let end = anim.frame_end as f32;
+    let span = (end - start).max(1.0);
+    let current = anim.frame_current;
+
+    let available = ui.available_size();
+    let channel_w = 140.0;
+    let row_h = 22.0;
+
+    // Collect channels: selected objects first, then others that have keys
+    let mut channels: Vec<(u64, String, bool)> = Vec::new();
+    for o in &doc.scene.objects {
+        let has_keys = doc.scene.animation.objects.get(&o.id).map(|a| !a.keys.is_empty()).unwrap_or(false);
+        let selected = doc.selection.contains(&o.id);
+        if selected || has_keys {
+            channels.push((o.id, o.name.clone(), selected));
+        }
+    }
+    if channels.is_empty() {
+        for o in &doc.scene.objects {
+            channels.push((o.id, o.name.clone(), false));
+            if channels.len() >= 8 {
+                break;
+            }
+        }
+    }
+
+    let lanes_h = (channels.len() as f32 * row_h + 8.0).min(available.y - 4.0).max(row_h * 2.0);
+    let (body_rect, body_resp) = ui.allocate_exact_size(
+        egui::vec2(available.x, lanes_h),
+        egui::Sense::click_and_drag(),
+    );
+    let painter = ui.painter_at(body_rect);
+    painter.rect_filled(body_rect, 2.0, egui::Color32::from_rgb(0x1c, 0x1c, 0x1c));
+
+    let keys_rect = egui::Rect::from_min_max(
+        egui::pos2(body_rect.left() + channel_w, body_rect.top()),
+        body_rect.max,
+    );
+    let x_of = |f: f32| keys_rect.left() + ((f - start) / span) * keys_rect.width();
+
+    // Frame ticks on top of keys area
+    let step = if span > 200.0 { 20.0 } else if span > 80.0 { 10.0 } else { 5.0 };
+    let mut f = (start / step).floor() * step;
+    while f <= end {
+        let x = x_of(f);
+        let major = (f as i32) % (step as i32 * 2) == 0;
+        painter.line_segment(
+            [egui::pos2(x, keys_rect.top()), egui::pos2(x, keys_rect.bottom())],
+            egui::Stroke::new(1.0, egui::Color32::from_gray(if major { 55 } else { 40 })),
+        );
+        if major {
+            painter.text(
+                egui::pos2(x, keys_rect.top() + 1.0),
+                egui::Align2::CENTER_TOP,
+                format!("{}", f as i32),
+                egui::FontId::proportional(9.0),
+                egui::Color32::from_gray(140),
+            );
+        }
+        f += step;
+    }
+
+    // Channel rows + key diamonds
+    for (row, (id, name, selected)) in channels.iter().enumerate() {
+        let y0 = body_rect.top() + row as f32 * row_h;
+        let y1 = y0 + row_h;
+        let row_rect = egui::Rect::from_min_max(egui::pos2(body_rect.left(), y0), egui::pos2(body_rect.right(), y1));
+        if *selected {
+            painter.rect_filled(row_rect, 0.0, egui::Color32::from_rgba_unmultiplied(0x3a, 0x5a, 0x8a, 60));
+        } else if row % 2 == 1 {
+            painter.rect_filled(row_rect, 0.0, egui::Color32::from_rgba_unmultiplied(0xff, 0xff, 0xff, 8));
+        }
+        // Channel name
+        painter.text(
+            egui::pos2(body_rect.left() + 6.0, y0 + row_h * 0.5),
+            egui::Align2::LEFT_CENTER,
+            name,
+            egui::FontId::proportional(12.0),
+            if *selected { egui::Color32::WHITE } else { egui::Color32::from_gray(180) },
+        );
+        // Divider under channel column
+        painter.line_segment(
+            [egui::pos2(body_rect.left() + channel_w, y0), egui::pos2(body_rect.left() + channel_w, y1)],
+            egui::Stroke::new(1.0, egui::Color32::from_gray(50)),
+        );
+        // Keys
+        if let Some(oa) = doc.scene.animation.objects.get(id) {
+            for k in &oa.keys {
+                let x = x_of(k.frame as f32);
+                let col = if k.frame == current {
+                    egui::Color32::from_rgb(0xff, 0xcc, 0x33)
+                } else if *selected {
+                    egui::Color32::from_rgb(0x55, 0xaa, 0xff)
+                } else {
+                    egui::Color32::from_rgb(0x40, 0x80, 0xc0)
+                };
+                let c = egui::pos2(x, y0 + row_h * 0.5);
+                let s = 4.5;
+                let diamond = [
+                    egui::pos2(c.x, c.y - s),
+                    egui::pos2(c.x + s, c.y),
+                    egui::pos2(c.x, c.y + s),
+                    egui::pos2(c.x - s, c.y),
+                ];
+                painter.add(egui::Shape::convex_polygon(diamond.to_vec(), col, egui::Stroke::NONE));
+            }
+        }
+    }
+
+    // Playhead
+    let px = x_of(current as f32);
+    painter.line_segment(
+        [egui::pos2(px, body_rect.top()), egui::pos2(px, body_rect.bottom())],
+        egui::Stroke::new(2.0, egui::Color32::from_rgb(0xff, 0x66, 0x44)),
+    );
+
+    // Scrub on keys area
+    if body_resp.dragged() || body_resp.clicked() {
+        if let Some(pos) = body_resp.interact_pointer_pos() {
+            if pos.x >= keys_rect.left() {
+                let t = ((pos.x - keys_rect.left()) / keys_rect.width()).clamp(0.0, 1.0);
+                let frame = (start + t * span).round() as i32;
+                doc.scene.animation.frame_current = frame.clamp(doc.scene.animation.frame_start, doc.scene.animation.frame_end);
+                doc.scene.animation.playing = false;
+                actions.push(Action::AnimScrub);
+            }
+        }
+    }
+    let _ = st; // quiet unused if no extra state yet
+}
+
+fn draw_timeline_transport(ui: &mut egui::Ui, doc: &mut Document, actions: &mut Vec<Action>) {
+    let anim = &mut doc.scene.animation;
+    if anim.frame_end < anim.frame_start {
+        anim.frame_end = anim.frame_start;
+    }
+    anim.frame_current = anim.frame_current.clamp(anim.frame_start, anim.frame_end);
+
+    ui.horizontal(|ui| {
+        let play_label = if anim.playing { "⏸" } else { "▶" };
+        if ui.button(play_label).on_hover_text("Play / Pause").clicked() {
+            actions.push(Action::ToggleAnimationPlay);
+        }
+        if ui.button("⏮").on_hover_text("Jump to start").clicked() {
+            anim.frame_current = anim.frame_start;
+            anim.playing = false;
+            actions.push(Action::AnimScrub);
+        }
+        if ui.button("⏭").on_hover_text("Jump to end").clicked() {
+            anim.frame_current = anim.frame_end;
+            anim.playing = false;
+            actions.push(Action::AnimScrub);
+        }
+        ui.separator();
+        ui.label("Start");
+        let mut fs = anim.frame_start;
+        if ui.add(egui::DragValue::new(&mut fs).speed(1)).changed() {
+            anim.frame_start = fs.min(anim.frame_end);
+            actions.push(Action::AnimScrub);
+        }
+        ui.label("End");
+        let mut fe = anim.frame_end;
+        if ui.add(egui::DragValue::new(&mut fe).speed(1)).changed() {
+            anim.frame_end = fe.max(anim.frame_start);
+            actions.push(Action::AnimScrub);
+        }
+        ui.separator();
+        ui.label("Frame");
+        let mut fc = anim.frame_current;
+        if ui.add(egui::DragValue::new(&mut fc).speed(1)).changed() {
+            anim.frame_current = fc.clamp(anim.frame_start, anim.frame_end);
+            anim.playing = false;
+            actions.push(Action::AnimScrub);
+        }
+        ui.label(format!("/ {}", anim.frame_end));
+        ui.separator();
+        ui.label("FPS");
+        let mut fps = anim.fps;
+        if ui.add(egui::DragValue::new(&mut fps).range(1..=120).speed(1)).changed() {
+            anim.fps = fps.max(1);
+        }
+        ui.separator();
+        let auto = anim.auto_key;
+        if ui.selectable_label(auto, "● Auto Key").on_hover_text("Automatically insert keys when transforming").clicked() {
+            actions.push(Action::ToggleAutoKey);
+        }
+        if ui.button("Key LocRotScale").on_hover_text("Insert location, rotation & scale keys").clicked() {
+            actions.push(Action::InsertKeyframeLocRotScale);
+        }
+    });
+}
+
+/// Blender-like Rendering workspace: Render Properties + Output Properties.
+fn draw_rendering_workspace(ui: &mut egui::Ui, doc: &mut Document, st: &mut UiState, actions: &mut Vec<Action>) {
+    ui.horizontal(|ui| {
+        ui.label(RichText::new("Rendering").strong().size(16.0));
+        ui.weak("· Render Properties + Output Properties");
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui.button("Render Animation").on_hover_text("Render frame range to image sequence").clicked() {
+                actions.push(Action::RenderAnimation);
+            }
+            if ui.button("Render Image").on_hover_text("Render still at output resolution").clicked() {
+                actions.push(Action::RenderImage);
+            }
+        });
+    });
+    ui.separator();
+
+    egui::ScrollArea::vertical().show(ui, |ui| {
+        ui.columns(3, |cols| {
+            // --- Column 1: Render Engine / Sampling / Film ---
+            cols[0].label(RichText::new("Render Engine").strong());
+            cols[0].horizontal(|ui| {
+                ui.selectable_label(true, "Workbench");
+                ui.add_enabled(false, egui::Button::new("Cycles")).on_hover_text("Not available yet");
+                ui.add_enabled(false, egui::Button::new("EEVEE")).on_hover_text("Not available yet");
+            });
+            cols[0].add_space(6.0);
+            cols[0].label(RichText::new("Sampling").strong());
+            cols[0].weak("Realtime viewport path");
+            cols[0].weak("Offline capture: 1 sample");
+            cols[0].add_space(6.0);
+            cols[0].label(RichText::new("Film").strong());
+            cols[0].checkbox(&mut st.render_use_viewport, "Match viewport size");
+            cols[0].weak("When off, uses Resolution X/Y × %");
+
+            // --- Column 2: Dimensions (Output) ---
+            cols[1].label(RichText::new("Dimensions").strong());
+            if st.render_width < 64 { st.render_width = 1920; }
+            if st.render_height < 64 { st.render_height = 1080; }
+            if st.render_percent == 0 { st.render_percent = 100; }
+            cols[1].horizontal(|ui| {
+                ui.label("Resolution X");
+                ui.add(egui::DragValue::new(&mut st.render_width).range(64..=7680).speed(16));
+            });
+            cols[1].horizontal(|ui| {
+                ui.label("Resolution Y");
+                ui.add(egui::DragValue::new(&mut st.render_height).range(64..=4320).speed(16));
+            });
+            cols[1].horizontal(|ui| {
+                ui.label("%");
+                ui.add(egui::DragValue::new(&mut st.render_percent).range(1..=200).suffix("%"));
+            });
+            let (ew, eh) = effective_render_size(st);
+            cols[1].label(format!("Effective: {ew} × {eh} px"));
+            cols[1].horizontal(|ui| {
+                for (label, w, h) in [("720p", 1280u32, 720u32), ("1080p", 1920, 1080), ("1440p", 2560, 1440), ("4K", 3840, 2160)] {
+                    if ui.small_button(label).clicked() {
+                        st.render_width = w;
+                        st.render_height = h;
+                        st.render_use_viewport = false;
+                        st.render_percent = 100;
+                    }
+                }
+            });
+            cols[1].horizontal(|ui| {
+                if ui.small_button("16:9").clicked() {
+                    st.render_height = ((st.render_width as f32) * 9.0 / 16.0).round().max(64.0) as u32;
+                }
+                if ui.small_button("Square").clicked() {
+                    let s = st.render_width.max(st.render_height);
+                    st.render_width = s;
+                    st.render_height = s;
+                }
+                if ui.small_button("50%").clicked() { st.render_percent = 50; }
+                if ui.small_button("100%").clicked() { st.render_percent = 100; }
+            });
+
+            // --- Column 3: Frame Range + Output ---
+            let anim = &mut doc.scene.animation;
+            cols[2].label(RichText::new("Frame Range").strong());
+            cols[2].horizontal(|ui| {
+                ui.label("Start");
+                let mut fs = anim.frame_start;
+                if ui.add(egui::DragValue::new(&mut fs).speed(1)).changed() {
+                    anim.frame_start = fs.min(anim.frame_end);
+                }
+                ui.label("End");
+                let mut fe = anim.frame_end;
+                if ui.add(egui::DragValue::new(&mut fe).speed(1)).changed() {
+                    anim.frame_end = fe.max(anim.frame_start);
+                }
+            });
+            cols[2].horizontal(|ui| {
+                ui.label("Frame Rate");
+                let mut fps = anim.fps;
+                if ui.add(egui::DragValue::new(&mut fps).range(1..=120).suffix(" fps")).changed() {
+                    anim.fps = fps.max(1);
+                }
+            });
+            let nframes = (anim.frame_end - anim.frame_start + 1).max(1) as f32;
+            let secs = nframes / anim.fps.max(1) as f32;
+            cols[2].weak(format!("{nframes:.0} frames · ≈ {secs:.2}s at {} fps", anim.fps.max(1)));
+            cols[2].add_space(6.0);
+            cols[2].label(RichText::new("Output").strong());
+            cols[2].horizontal(|ui| {
+                ui.label("File Format");
+                ui.selectable_label(true, "PNG");
+                ui.add_enabled(false, egui::Button::new("JPEG"));
+                ui.add_enabled(false, egui::Button::new("EXR"));
+            });
+            cols[2].weak("Color: RGBA 8-bit · no grid · no UI");
+            cols[2].weak("Path: chosen when rendering (Save dialog)");
+            cols[2].add_space(4.0);
+            cols[2].label(RichText::new("Color Management").strong());
+            cols[2].weak("Follow Scene · sRGB display");
+            cols[2].weak("View Transform: Standard");
+        });
+    });
+}
 
 fn draw_timeline(ui: &mut egui::Ui, doc: &mut Document, st: &mut UiState, actions: &mut Vec<Action>) {
     let anim = &mut doc.scene.animation;
