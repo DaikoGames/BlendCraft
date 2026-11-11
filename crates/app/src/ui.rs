@@ -732,10 +732,17 @@ fn sync_graph_to_material(doc: &mut Document, mi: usize, st: &UiState) {
 
 fn shader_node_color(kind: ShaderNodeKind) -> egui::Color32 {
     match kind {
-        ShaderNodeKind::Output => egui::Color32::from_rgb(0x72, 0x91, 0x62),
+        ShaderNodeKind::Output
+        | ShaderNodeKind::LightOutput
+        | ShaderNodeKind::WorldOutput
+        | ShaderNodeKind::AovOutput => egui::Color32::from_rgb(0x72, 0x91, 0x62),
         ShaderNodeKind::Principled | ShaderNodeKind::Diffuse | ShaderNodeKind::Glossy | ShaderNodeKind::Emission => {
             egui::Color32::from_rgb(0x9a, 0x6b, 0x3c)
         }
+        _ if kind.is_shader_extra() => egui::Color32::from_rgb(0x9a, 0x6b, 0x3c),
+        _ if kind.is_vector_util() => egui::Color32::from_rgb(0x3e, 0x7b, 0x65),
+        _ if kind.is_color_extra() => egui::Color32::from_rgb(0x7d, 0x55, 0x86),
+        _ if kind.is_texture_extra() => egui::Color32::from_rgb(0x3e, 0x78, 0x91),
         ShaderNodeKind::ImageTexture | ShaderNodeKind::Noise | ShaderNodeKind::Voronoi => {
             egui::Color32::from_rgb(0x3e, 0x78, 0x91)
         }
@@ -823,25 +830,93 @@ fn draw_shading_editor(ui: &mut egui::Ui, ctx: &egui::Context, doc: &mut Documen
                         ("Wireframe", ShaderNodeKind::Wireframe),
                     ]),
                     ("Texture", &[
+                        ("Brick", ShaderNodeKind::Brick),
+                        ("Checker", ShaderNodeKind::Checker),
+                        ("Environment", ShaderNodeKind::Environment),
+                        ("Gabor", ShaderNodeKind::Gabor),
+                        ("Gradient", ShaderNodeKind::Gradient),
+                        ("IES", ShaderNodeKind::Ies),
                         ("Image Texture", ShaderNodeKind::ImageTexture),
+                        ("Magic", ShaderNodeKind::Magic),
                         ("Noise Texture", ShaderNodeKind::Noise),
+                        ("Sky", ShaderNodeKind::Sky),
                         ("Voronoi Texture", ShaderNodeKind::Voronoi),
+                        ("Wave", ShaderNodeKind::Wave),
+                        ("White Noise", ShaderNodeKind::WhiteNoise),
                     ]),
                     ("Color", &[
+                        ("Blackbody", ShaderNodeKind::Blackbody),
+                        ("Brightness/Contrast", ShaderNodeKind::BrightContrast),
                         ("Color Ramp", ShaderNodeKind::ColorRamp),
+                        ("Combine Color", ShaderNodeKind::CombineColor),
+                        ("Gamma", ShaderNodeKind::Gamma),
+                        ("Hue/Saturation/Value", ShaderNodeKind::HueSatVal),
+                        ("Invert Color", ShaderNodeKind::InvertColor),
+                        ("Light Falloff", ShaderNodeKind::LightFalloff),
                         ("Mix", ShaderNodeKind::Mix),
+                        ("RGB Curves", ShaderNodeKind::RgbCurves),
+                        ("RGB to BW", ShaderNodeKind::RgbToBw),
+                        ("Separate Color", ShaderNodeKind::SeparateColor),
+                        ("Shader to RGB", ShaderNodeKind::ShaderToRgb),
+                        ("Wavelength", ShaderNodeKind::Wavelength),
                     ]),
                     ("Vector", &[
-                        ("Mapping", ShaderNodeKind::Mapping),
                         ("Bump", ShaderNodeKind::Bump),
+                        ("Combine XYZ", ShaderNodeKind::CombineXyz),
+                        ("Displacement", ShaderNodeKind::Displacement),
+                        ("Mapping", ShaderNodeKind::Mapping),
+                        ("Normal", ShaderNodeKind::Normal),
                         ("Normal Map", ShaderNodeKind::NormalMap),
+                        ("Separate XYZ", ShaderNodeKind::SeparateXyz),
+                        ("Vector Curves", ShaderNodeKind::VectorCurves),
+                        ("Vector Displacement", ShaderNodeKind::VectorDisplacement),
+                        ("Vector Math", ShaderNodeKind::VectorMath),
+                        ("Vector Rotate", ShaderNodeKind::VectorRotate),
+                        ("Vector Transform", ShaderNodeKind::VectorTransform),
+                    ]),
+                    ("Utilities", &[
+                        ("Clamp", ShaderNodeKind::Clamp),
+                        ("Float Curve", ShaderNodeKind::FloatCurve),
+                        ("Group", ShaderNodeKind::Group),
+                        ("Index Switch", ShaderNodeKind::IndexSwitch),
+                        ("Map Range", ShaderNodeKind::MapRange),
+                        ("Math", ShaderNodeKind::Math),
+                        ("Menu Switch", ShaderNodeKind::MenuSwitch),
+                        ("Script", ShaderNodeKind::Script),
+                        ("Switch", ShaderNodeKind::Switch),
+                    ]),
+                    ("Output", &[
+                        ("Material Output", ShaderNodeKind::Output),
+                        ("Light Output", ShaderNodeKind::LightOutput),
+                        ("World Output", ShaderNodeKind::WorldOutput),
+                        ("AOV Output", ShaderNodeKind::AovOutput),
                     ]),
                     ("Shader", &[
                         ("Principled BSDF", ShaderNodeKind::Principled),
                         ("Diffuse BSDF", ShaderNodeKind::Diffuse),
                         ("Glossy BSDF", ShaderNodeKind::Glossy),
                         ("Emission", ShaderNodeKind::Emission),
-                        ("Material Output", ShaderNodeKind::Output),
+                        ("Add Shader", ShaderNodeKind::AddShader),
+                        ("Background", ShaderNodeKind::Background),
+                        ("Glass BSDF", ShaderNodeKind::GlassBsdf),
+                        ("Hair BSDF", ShaderNodeKind::HairBsdf),
+                        ("Holdout", ShaderNodeKind::Holdout),
+                        ("Light Accumulation", ShaderNodeKind::LightAccumulation),
+                        ("Metallic BSDF", ShaderNodeKind::MetallicBsdf),
+                        ("Mix Shader", ShaderNodeKind::MixShader),
+                        ("Principled Hair BSDF", ShaderNodeKind::PrincipledHair),
+                        ("Principled Volume", ShaderNodeKind::PrincipledVolume),
+                        ("Ray Portal BSDF", ShaderNodeKind::RayPortalBsdf),
+                        ("Refraction BSDF", ShaderNodeKind::RefractionBsdf),
+                        ("Sheen BSDF", ShaderNodeKind::SheenBsdf),
+                        ("Specular BSDF", ShaderNodeKind::SpecularBsdf),
+                        ("Subsurface Scattering", ShaderNodeKind::SubsurfaceScattering),
+                        ("Toon BSDF", ShaderNodeKind::ToonBsdf),
+                        ("Translucent BSDF", ShaderNodeKind::TranslucentBsdf),
+                        ("Transparent BSDF", ShaderNodeKind::TransparentBsdf),
+                        ("Volume Absorption", ShaderNodeKind::VolumeAbsorption),
+                        ("Volume Coefficients", ShaderNodeKind::VolumeCoefficients),
+                        ("Volume Scatter", ShaderNodeKind::VolumeScatter),
                     ]),
                 ];
                 for (group, items) in groups {
@@ -857,8 +932,10 @@ fn draw_shading_editor(ui: &mut egui::Ui, ctx: &egui::Context, doc: &mut Documen
                                     kind: *kind,
                                     pos: [col, row],
                                     image_index: None,
-                                    value: 0.5,
-                                    color: [0.8, 0.8, 0.8, 1.0],
+                                    value: kind.default_value(),
+                                    color: kind.default_color(),
+                                    params: kind.default_params(),
+                                    text: kind.default_text().to_string(),
                                 });
                                 ui.close_menu();
                             }
@@ -873,7 +950,10 @@ fn draw_shading_editor(ui: &mut egui::Ui, ctx: &egui::Context, doc: &mut Documen
                 for (i, node) in st.shader_nodes.iter_mut().enumerate() {
                     node.pos = match node.kind {
                         ShaderNodeKind::Principled => [330.0, 70.0],
-                        ShaderNodeKind::Output => [700.0, 105.0],
+                        ShaderNodeKind::Output
+                        | ShaderNodeKind::LightOutput
+                        | ShaderNodeKind::WorldOutput
+                        | ShaderNodeKind::AovOutput => [700.0, 105.0],
                         ShaderNodeKind::Rgb => [55.0, 90.0],
                         ShaderNodeKind::ImageTexture => [55.0, 300.0],
                         ShaderNodeKind::TexCoord => [55.0, 510.0],
@@ -1567,6 +1647,75 @@ fn draw_shading_editor(ui: &mut egui::Ui, ctx: &egui::Context, doc: &mut Documen
                                     shader_socket_control(ui, st, node.id, true, 0, "Vector ◉");
                                 });
                             }
+                            ShaderNodeKind::Brick |
+                            ShaderNodeKind::Checker |
+                            ShaderNodeKind::Environment |
+                            ShaderNodeKind::Gabor |
+                            ShaderNodeKind::Gradient |
+                            ShaderNodeKind::Ies |
+                            ShaderNodeKind::Magic |
+                            ShaderNodeKind::Sky |
+                            ShaderNodeKind::Wave |
+                            ShaderNodeKind::WhiteNoise => {
+                                let k = node.kind;
+                                ui.horizontal(|ui| {
+                                    if shader_socket_control(ui, st, node.id, false, 0, "● Vector").clicked() { }
+                                    ui.label("Vector");
+                                });
+                                if k == ShaderNodeKind::Environment {
+                                    let count = doc.scene.textures.len();
+                                    let cur = st
+                                        .shader_nodes
+                                        .iter()
+                                        .find(|n| n.id == node.id)
+                                        .and_then(|n| n.image_index)
+                                        .filter(|i| *i < count);
+                                    let text = cur
+                                        .map(|i| doc.scene.textures[i].name.clone())
+                                        .unwrap_or_else(|| "Procedural sky".to_string());
+                                    egui::ComboBox::from_id_source(("shader_env_image", node.id))
+                                        .selected_text(text)
+                                        .show_ui(ui, |ui| {
+                                            if ui.selectable_label(cur.is_none(), "Procedural sky").clicked() {
+                                                if let Some(n) = st.shader_nodes.iter_mut().find(|n| n.id == node.id) {
+                                                    n.image_index = None;
+                                                }
+                                                st.shader_apply_pending = true;
+                                            }
+                                            for (i, tex) in doc.scene.textures.iter().enumerate() {
+                                                if ui.selectable_label(cur == Some(i), &tex.name).clicked() {
+                                                    if let Some(n) = st.shader_nodes.iter_mut().find(|n| n.id == node.id) {
+                                                        n.image_index = Some(i);
+                                                    }
+                                                    st.shader_apply_pending = true;
+                                                }
+                                            }
+                                        });
+                                }
+                                if let Some(lbl) = k.value_label() {
+                                    let (lo, hi) = k.value_range();
+                                    let mut v = st
+                                        .shader_nodes
+                                        .iter()
+                                        .find(|n| n.id == node.id)
+                                        .map(|n| n.value)
+                                        .unwrap_or(node.value);
+                                    if ui.add(egui::Slider::new(&mut v, lo..=hi).text(lbl)).changed() {
+                                        if let Some(n) = st.shader_nodes.iter_mut().find(|n| n.id == node.id) {
+                                            n.value = v;
+                                        }
+                                        st.shader_apply_pending = true;
+                                    }
+                                }
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+                                    shader_socket_control(ui, st, node.id, true, 0, "Color ◉");
+                                });
+                                if k.has_fac_output() {
+                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+                                        shader_socket_control(ui, st, node.id, true, 1, "Fac ◉");
+                                    });
+                                }
+                            }
                             ShaderNodeKind::Noise | ShaderNodeKind::Voronoi => {
                                 ui.horizontal(|ui| {
                                     if shader_socket_control(ui, st, node.id, false, 0, "● Vector").clicked() { }
@@ -1597,6 +1746,141 @@ fn draw_shading_editor(ui: &mut egui::Ui, ctx: &egui::Context, doc: &mut Documen
                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
                                     shader_socket_control(ui, st, node.id, true, 0, "Color ◉");
                                 });
+                            }
+                            ShaderNodeKind::Blackbody |
+                            ShaderNodeKind::BrightContrast |
+                            ShaderNodeKind::Gamma |
+                            ShaderNodeKind::HueSatVal |
+                            ShaderNodeKind::InvertColor |
+                            ShaderNodeKind::LightFalloff |
+                            ShaderNodeKind::RgbCurves |
+                            ShaderNodeKind::Wavelength |
+                            ShaderNodeKind::CombineColor |
+                            ShaderNodeKind::SeparateColor |
+                            ShaderNodeKind::RgbToBw |
+                            ShaderNodeKind::ShaderToRgb => {
+                                let k = node.kind;
+                                let mode = st
+                                    .shader_nodes
+                                    .iter()
+                                    .find(|n| n.id == node.id)
+                                    .map(|n| n.value)
+                                    .unwrap_or(node.value);
+                                let is_mode = matches!(k, ShaderNodeKind::CombineColor | ShaderNodeKind::SeparateColor);
+                                let in_labels: &'static [&'static str] = if k == ShaderNodeKind::CombineColor {
+                                    k.param_labels(mode)
+                                } else {
+                                    k.extra_inputs()
+                                };
+                                for (i, label) in in_labels.iter().enumerate() {
+                                    ui.horizontal(|ui| {
+                                        if shader_socket_control(ui, st, node.id, false, i as u8, &format!("● {}", label)).clicked() { }
+                                        ui.label(*label);
+                                    });
+                                }
+                                if is_mode {
+                                    let names = ["RGB", "HSV", "HSL"];
+                                    let mi = (mode.round().max(0.0) as usize).min(2);
+                                    egui::ComboBox::from_id_source(("shader_color_mode", node.id))
+                                        .selected_text(names[mi])
+                                        .show_ui(ui, |ui| {
+                                            for (i, nm) in names.iter().enumerate() {
+                                                if ui.selectable_label(mi == i, *nm).clicked() {
+                                                    if let Some(n) = st.shader_nodes.iter_mut().find(|n| n.id == node.id) {
+                                                        n.value = i as f32;
+                                                    }
+                                                    st.shader_apply_pending = true;
+                                                }
+                                            }
+                                        });
+                                } else if let Some(lbl) = k.value_label() {
+                                    let (lo, hi) = k.value_range();
+                                    let mut v = mode;
+                                    if ui.add(egui::Slider::new(&mut v, lo..=hi).text(lbl)).changed() {
+                                        if let Some(n) = st.shader_nodes.iter_mut().find(|n| n.id == node.id) {
+                                            n.value = v;
+                                        }
+                                        st.shader_apply_pending = true;
+                                    }
+                                }
+                                if k != ShaderNodeKind::SeparateColor {
+                                    for (i, label) in k.param_labels(mode).iter().enumerate() {
+                                        let (lo, hi) = k.param_range(i);
+                                        let mut v = st
+                                            .shader_nodes
+                                            .iter()
+                                            .find(|n| n.id == node.id)
+                                            .map(|n| n.params[i])
+                                            .unwrap_or(0.0);
+                                        if ui.add(egui::Slider::new(&mut v, lo..=hi).text(*label)).changed() {
+                                            if let Some(n) = st.shader_nodes.iter_mut().find(|n| n.id == node.id) {
+                                                n.params[i] = v;
+                                            }
+                                            st.shader_apply_pending = true;
+                                        }
+                                    }
+                                }
+                                for (i, label) in k.color_outputs(mode).iter().enumerate() {
+                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+                                        shader_socket_control(ui, st, node.id, true, i as u8, &format!("{} ◉", label));
+                                    });
+                                }
+                            }
+                            ShaderNodeKind::CombineXyz |
+                            ShaderNodeKind::SeparateXyz |
+                            ShaderNodeKind::VectorMath |
+                            ShaderNodeKind::VectorRotate |
+                            ShaderNodeKind::VectorTransform |
+                            ShaderNodeKind::VectorCurves |
+                            ShaderNodeKind::Normal |
+                            ShaderNodeKind::Displacement |
+                            ShaderNodeKind::VectorDisplacement |
+                            ShaderNodeKind::Math |
+                            ShaderNodeKind::MapRange |
+                            ShaderNodeKind::Clamp |
+                            ShaderNodeKind::FloatCurve |
+                            ShaderNodeKind::Switch |
+                            ShaderNodeKind::IndexSwitch |
+                            ShaderNodeKind::MenuSwitch |
+                            ShaderNodeKind::Script |
+                            ShaderNodeKind::Group => {
+                                let k = node.kind;
+                                for (i, label) in k.vu_inputs().iter().enumerate() {
+                                    ui.horizontal(|ui| {
+                                        if shader_socket_control(ui, st, node.id, false, i as u8, &format!("● {}", label)).clicked() { }
+                                        ui.label(*label);
+                                    });
+                                }
+                                for (label, slot, names) in k.vu_choices().iter() {
+                                    shader_slot_choice(ui, st, node.id, label, *slot as usize, names);
+                                }
+                                for (label, slot) in k.vu_rows().iter() {
+                                    shader_slot_drag(ui, st, node.id, label, *slot as usize);
+                                }
+                                if matches!(k, ShaderNodeKind::Script | ShaderNodeKind::Group) {
+                                    let mut txt = st
+                                        .shader_nodes
+                                        .iter()
+                                        .find(|n| n.id == node.id)
+                                        .map(|n| n.text.clone())
+                                        .unwrap_or_default();
+                                    ui.label(if k == ShaderNodeKind::Script {
+                                        "Expression (a, b, c, u, v)"
+                                    } else {
+                                        "Group name"
+                                    });
+                                    if ui.text_edit_singleline(&mut txt).changed() {
+                                        if let Some(n) = st.shader_nodes.iter_mut().find(|n| n.id == node.id) {
+                                            n.text = txt;
+                                        }
+                                        st.shader_apply_pending = true;
+                                    }
+                                }
+                                for (i, label) in k.vu_outputs().iter().enumerate() {
+                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+                                        shader_socket_control(ui, st, node.id, true, i as u8, &format!("{} ◉", label));
+                                    });
+                                }
                             }
                             ShaderNodeKind::Mix => {
                                 ui.horizontal(|ui| {
@@ -1704,18 +1988,91 @@ fn draw_shading_editor(ui: &mut egui::Ui, ctx: &egui::Context, doc: &mut Documen
                                     shader_socket_control(ui, st, node.id, true, 0, "BSDF ◉");
                                 });
                             }
+                            ShaderNodeKind::AddShader |
+                            ShaderNodeKind::Background |
+                            ShaderNodeKind::GlassBsdf |
+                            ShaderNodeKind::HairBsdf |
+                            ShaderNodeKind::Holdout |
+                            ShaderNodeKind::LightAccumulation |
+                            ShaderNodeKind::MixShader |
+                            ShaderNodeKind::MetallicBsdf |
+                            ShaderNodeKind::PrincipledHair |
+                            ShaderNodeKind::PrincipledVolume |
+                            ShaderNodeKind::RayPortalBsdf |
+                            ShaderNodeKind::RefractionBsdf |
+                            ShaderNodeKind::SpecularBsdf |
+                            ShaderNodeKind::SubsurfaceScattering |
+                            ShaderNodeKind::ToonBsdf |
+                            ShaderNodeKind::TranslucentBsdf |
+                            ShaderNodeKind::TransparentBsdf |
+                            ShaderNodeKind::SheenBsdf |
+                            ShaderNodeKind::VolumeAbsorption |
+                            ShaderNodeKind::VolumeScatter |
+                            ShaderNodeKind::VolumeCoefficients => {
+                                let k = node.kind;
+                                for (i, label) in k.extra_inputs().iter().enumerate() {
+                                    ui.horizontal(|ui| {
+                                        if shader_socket_control(ui, st, node.id, false, i as u8, &format!("● {}", label)).clicked() { }
+                                        ui.label(*label);
+                                    });
+                                }
+                                if let Some(lbl) = k.value_label() {
+                                    let (lo, hi) = k.value_range();
+                                    let mut v = st
+                                        .shader_nodes
+                                        .iter()
+                                        .find(|n| n.id == node.id)
+                                        .map(|n| n.value)
+                                        .unwrap_or(node.value);
+                                    if ui.add(egui::Slider::new(&mut v, lo..=hi).text(lbl)).changed() {
+                                        if let Some(n) = st.shader_nodes.iter_mut().find(|n| n.id == node.id) {
+                                            n.value = v;
+                                        }
+                                        st.shader_apply_pending = true;
+                                    }
+                                }
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+                                    shader_socket_control(ui, st, node.id, true, 0, k.output_label());
+                                });
+                            }
                             ShaderNodeKind::Output => {
                                 ui.horizontal(|ui| {
                                     if shader_socket_control(ui, st, node.id, false, 0, "● Surface").clicked() { }
                                     ui.label("Material surface");
                                 });
                                 ui.horizontal(|ui| {
-                                    ui.label("● Volume");
+                                    if shader_socket_control(ui, st, node.id, false, 1, "● Volume").clicked() { }
                                     ui.label("Volume output");
                                 });
                                 ui.horizontal(|ui| {
-                                    ui.label("● Displacement");
-                                    ui.weak("not evaluated yet");
+                                    if shader_socket_control(ui, st, node.id, false, 2, "● Displacement").clicked() { }
+                                    ui.label("Displacement");
+                                });
+                            }
+                            ShaderNodeKind::LightOutput => {
+                                ui.horizontal(|ui| {
+                                    if shader_socket_control(ui, st, node.id, false, 0, "● Surface").clicked() { }
+                                    ui.label("Light emission");
+                                });
+                            }
+                            ShaderNodeKind::WorldOutput => {
+                                ui.horizontal(|ui| {
+                                    if shader_socket_control(ui, st, node.id, false, 0, "● Surface").clicked() { }
+                                    ui.label("World background");
+                                });
+                                ui.horizontal(|ui| {
+                                    if shader_socket_control(ui, st, node.id, false, 1, "● Volume").clicked() { }
+                                    ui.label("World volume");
+                                });
+                            }
+                            ShaderNodeKind::AovOutput => {
+                                ui.horizontal(|ui| {
+                                    if shader_socket_control(ui, st, node.id, false, 0, "● Color").clicked() { }
+                                    ui.label("AOV color");
+                                });
+                                ui.horizontal(|ui| {
+                                    if shader_socket_control(ui, st, node.id, false, 1, "● Value").clicked() { }
+                                    ui.label("AOV value");
                                 });
                             }
                             // ---- Input nodes (Blender Input category) ----
@@ -2030,6 +2387,76 @@ fn draw_shading_editor(ui: &mut egui::Ui, ctx: &egui::Context, doc: &mut Documen
             egui::Color32::from_rgb(0xf0, 0xc0, 0x75),
         );
     }
+}
+
+fn shader_slot_get(n: &ShaderNode, slot: usize) -> f32 {
+    match slot {
+        0..=3 => n.params[slot],
+        4..=6 => n.color[slot - 4],
+        _ => n.value,
+    }
+}
+
+fn shader_slot_set(n: &mut ShaderNode, slot: usize, v: f32) {
+    match slot {
+        0..=3 => n.params[slot] = v,
+        4..=6 => n.color[slot - 4] = v,
+        _ => n.value = v,
+    }
+}
+
+/// Drag-value row editing one of a node's numeric slots (0–3 params, 4–6 color xyz, 7 value).
+fn shader_slot_drag(ui: &mut egui::Ui, st: &mut UiState, node_id: u64, label: &str, slot: usize) {
+    let cur = st
+        .shader_nodes
+        .iter()
+        .find(|n| n.id == node_id)
+        .map(|n| shader_slot_get(n, slot))
+        .unwrap_or(0.0);
+    let mut v = cur;
+    ui.horizontal(|ui| {
+        ui.label(label);
+        ui.add(egui::DragValue::new(&mut v).speed(0.01));
+    });
+    if v != cur {
+        if let Some(n) = st.shader_nodes.iter_mut().find(|n| n.id == node_id) {
+            shader_slot_set(n, slot, v);
+        }
+        st.shader_apply_pending = true;
+    }
+}
+
+/// Drop-down row storing the chosen option index in one of a node's numeric slots.
+fn shader_slot_choice(
+    ui: &mut egui::Ui,
+    st: &mut UiState,
+    node_id: u64,
+    label: &str,
+    slot: usize,
+    names: &[&str],
+) {
+    let cur = st
+        .shader_nodes
+        .iter()
+        .find(|n| n.id == node_id)
+        .map(|n| shader_slot_get(n, slot))
+        .unwrap_or(0.0);
+    let idx = (cur.round().max(0.0) as usize).min(names.len().saturating_sub(1));
+    ui.horizontal(|ui| {
+        ui.label(label);
+        egui::ComboBox::from_id_source(("shader_slot_choice", node_id, slot))
+            .selected_text(names.get(idx).copied().unwrap_or(""))
+            .show_ui(ui, |ui| {
+                for (i, nm) in names.iter().enumerate() {
+                    if ui.selectable_label(idx == i, *nm).clicked() {
+                        if let Some(n) = st.shader_nodes.iter_mut().find(|n| n.id == node_id) {
+                            shader_slot_set(n, slot, i as f32);
+                        }
+                        st.shader_apply_pending = true;
+                    }
+                }
+            });
+    });
 }
 
 fn socket_click(st: &mut UiState, node_id: u64, is_output: bool, socket: u8) {

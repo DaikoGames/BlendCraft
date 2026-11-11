@@ -48,6 +48,62 @@ cargo test -p forge-core
 Vertex/edge/face edit mode, modifiers, UV editing, animation, video export, FBX / native .blend export.
 Point-light omnidirectional shadows, cascaded shadow maps for large scenes.
 
+## Shader editor: Output nodes
+| Node | In BlendCraft? |
+|------|----------------|
+| Material Output | Yes |
+| Light Output | Yes (Surface socket evaluated to a light color) |
+| World Output | Yes (Surface + Volume sockets evaluated) |
+| AOV Output | Yes (Color + Value sockets evaluated) |
+
+Add them from **Add > Output** in the Shader Editor. Light/World/AOV results are
+collected by the graph evaluator (`light_color`, `world_color`, `aovs`); they are not
+yet consumed by the real-time renderer.
+
+## Shader editor: Shader nodes
+All Shader-category nodes are now available under **Add > Shader**:
+Add Shader, Background, Diffuse BSDF, Emission, Glass BSDF, Glossy BSDF, Hair BSDF, Holdout,
+Light Accumulation, Metallic BSDF, Mix Shader, Principled BSDF, Principled Hair BSDF,
+Principled Volume, Ray Portal BSDF, Refraction BSDF, Sheen BSDF, Specular BSDF,
+Subsurface Scattering, Toon BSDF, Translucent BSDF, Transparent BSDF, Volume Absorption,
+Volume Coefficients, Volume Scatter.
+
+They are evaluated on the CPU into the PBR material slots (simplified): Glass / Refraction /
+Transparent lower base-color alpha (material switches to Blend), Metallic sets metallic = 1,
+Mix / Add Shader blend their inputs, and the volume nodes feed the Material Output Volume
+socket as a density. Material Output's Volume and Displacement sockets are now linkable.
+Hair, Toon, Sheen, Subsurface, Ray Portal and Light Accumulation have no dedicated real-time
+renderer support yet and fall back to an approximate PBR mapping.
+
+## Shader editor: Texture nodes
+All Texture-category nodes are available under **Add > Texture**: Brick, Checker, Environment,
+Gabor, Gradient, IES, Image Texture, Magic, Noise Texture, Sky, Voronoi Texture, Wave and
+White Noise. They are evaluated on the CPU (baked to a texture when plugged into Principled
+Base Color, or sampled per pixel by **Bake…**) and expose Color and Fac outputs. Environment
+can use any loaded image (or a procedural sky), Sky is a simple gradient sky, and IES is an
+approximate radial falloff profile (no .ies file loading yet).
+
+## Shader editor: Color nodes
+All Color-category nodes are available under **Add > Color**: Blackbody, Brightness/Contrast,
+Color Ramp, Combine Color, Gamma, Hue/Saturation/Value, Invert Color, Light Falloff, Mix,
+RGB Curves, RGB to BW, Separate Color, Shader to RGB and Wavelength. Combine / Separate Color
+support RGB, HSV and HSL modes. RGB Curves is simplified to one adjustable midpoint curve per
+channel plus a combined curve. Light Falloff has no light distance on the CPU, so its outputs
+resolve to Strength. Color nodes are applied per pixel by **Bake…**; plugging a texture through
+them into Principled Base Color uses the constant evaluation only.
+
+## Shader editor: Vector & Utilities nodes
+Under **Add > Vector**: Bump, Combine XYZ, Displacement, Mapping, Normal, Normal Map, Separate XYZ,
+Vector Curves, Vector Displacement, Vector Math (21 operations), Vector Rotate, Vector Transform.
+Under **Add > Utilities**: Clamp, Float Curve, Group, Index Switch, Map Range, Math (23 operations),
+Menu Switch, Script, Switch.
+
+Notes: Vector Transform and Group are simplified (no object/camera matrices or nested graphs on the
+CPU, so they pass values through). Script evaluates a single math expression using `a`, `b`, `c`, `u`, `v`
+(`sin cos tan abs sqrt floor ceil fract exp ln sign min max pow mod clamp mix pi tau e`).
+Map Range is linear + clamped; Vector/Float Curves use one adjustable midpoint curve.
+Vector Displacement feeds Material Output's Displacement socket as its length.
+
 ## Gizmo
 Select an object (Move tool is default), then drag the colored handles. Press G / R / S for modal move/rotate/scale, Q returns to select mode. Every drag is one undo step.
 
