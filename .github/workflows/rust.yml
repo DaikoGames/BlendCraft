@@ -19,7 +19,8 @@ env:
 
 # NOTE: OpenH264 and minimp4 were removed (video export is now the pure-Rust
 # `forge-video` crate), so no job below needs cmake, nasm, libclang or a C++
-# cross compiler any more, and there is no Cross.toml pre-build step.
+# cross compiler any more. We now use cargo-zigbuild for Linux cross-compilation
+# to avoid dead Ubuntu 16.04 Docker images.
 
 jobs:
   # ---------------------------------------------------------------------------
@@ -67,24 +68,28 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # ---- Linux ----
-          - { name: linux-x64,     os: ubuntu-24.04,   target: x86_64-unknown-linux-gnu,      cross: false, ext: "",     experimental: false }
-          - { name: linux-x86,     os: ubuntu-24.04,   target: i686-unknown-linux-gnu,        cross: true,  ext: "",     experimental: true  }
-          - { name: linux-arm64,   os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu,   cross: false, ext: "",     experimental: true  }
-          - { name: linux-armv7,   os: ubuntu-24.04,   target: armv7-unknown-linux-gnueabihf, cross: true,  ext: "",     experimental: true  }
-          - { name: linux-riscv64,      os: ubuntu-24.04, target: riscv64gc-unknown-linux-gnu,  cross: true, ext: "", experimental: true }
-          # No cross image exists for this target, so it is built with cargo-zigbuild (zig as C cross-compiler).
-          # NOTE: static musl binaries cannot dlopen the system GPU/windowing libraries,
-          # so this one compiles but is unlikely to open a window at runtime.
-          - { name: linux-riscv64-musl, os: ubuntu-24.04, target: riscv64gc-unknown-linux-musl, cross: false, zig: true, ext: "", experimental: true }
+          # ---- Linux (Native Runners) ----
+          - { name: linux-x64,     os: ubuntu-24.04,     target: x86_64-unknown-linux-gnu,      cross: false, zig: false, ext: "",     experimental: false }
+          - { name: linux-arm64,   os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu,     cross: false, zig: false, ext: "",     experimental: true  }
+          
+          # ---- Linux (Modern Zig Cross-Compilation) ----
+          # Replaces 'cross' to avoid dead Ubuntu 16.04 images. 
+          # Zig provides up-to-date, actively maintained toolchains for these targets.
+          - { name: linux-x86,     os: ubuntu-24.04,     target: i686-unknown-linux-gnu,        cross: false, zig: true,  ext: "",     experimental: true  }
+          - { name: linux-armv7,   os: ubuntu-24.04,     target: armv7-unknown-linux-gnueabihf, cross: false, zig: true,  ext: "",     experimental: true  }
+          - { name: linux-riscv64, os: ubuntu-24.04,     target: riscv64gc-unknown-linux-gnu,   cross: false, zig: true,  ext: "",     experimental: true  }
+          - { name: linux-riscv64-musl, os: ubuntu-24.04, target: riscv64gc-unknown-linux-musl, cross: false, zig: true,  ext: "",     experimental: true }
+          
           # ---- Windows ----
-          - { name: windows-x64,   os: windows-latest, target: x86_64-pc-windows-msvc,        cross: false, ext: ".exe", experimental: false }
-          - { name: windows-x86,   os: windows-latest, target: i686-pc-windows-msvc,          cross: false, ext: ".exe", experimental: true  }
-          - { name: windows-arm64, os: windows-latest, target: aarch64-pc-windows-msvc,       cross: false, ext: ".exe", experimental: true  }
+          - { name: windows-x64,   os: windows-latest, target: x86_64-pc-windows-msvc,        cross: false, zig: false, ext: ".exe", experimental: false }
+          - { name: windows-x86,   os: windows-latest, target: i686-pc-windows-msvc,          cross: false, zig: false, ext: ".exe", experimental: true  }
+          - { name: windows-arm64, os: windows-latest, target: aarch64-pc-windows-msvc,       cross: false, zig: false, ext: ".exe", experimental: true  }
+          
           # ---- macOS ----
           # macos-13 and macos-14 are retired. macos-15-intel = Intel, macos-15 = Apple Silicon.
-          - { name: macos-x64,     os: macos-15-intel, target: x86_64-apple-darwin,           cross: false, ext: "",     experimental: false }
-          - { name: macos-arm64,   os: macos-15,       target: aarch64-apple-darwin,          cross: false, ext: "",     experimental: false }
+          - { name: macos-x64,     os: macos-15-intel, target: x86_64-apple-darwin,           cross: false, zig: false, ext: "",     experimental: false }
+          - { name: macos-arm64,   os: macos-15,       target: aarch64-apple-darwin,          cross: false, zig: false, ext: "",     experimental: false }
+
     steps:
       - uses: actions/checkout@v5
 
@@ -117,7 +122,7 @@ jobs:
           echo "Icon assets OK"
 
       - name: Install Linux build dependencies (native build only)
-        if: runner.os == 'Linux' && !matrix.cross
+        if: runner.os == 'Linux' && !matrix.cross && !matrix.zig
         run: |
           sudo apt-get update
           sudo apt-get install -y pkg-config libx11-dev libxcursor-dev libxrandr-dev \
@@ -146,11 +151,10 @@ jobs:
         if: matrix.zig
         run: cargo zigbuild --release -p ${{ env.APP_PACKAGE }} --target ${{ matrix.target }}
 
-      # AppImage for native Linux builds (x86_64 / aarch64) with project logo as icon
-      # AppImage for Linux x86_64, arm64, and x86 (i686) — icon = crates/app/logo.png
+      # AppImage for native Linux builds and zig-built i686 with project logo as icon
       - name: Package AppImage
         if: >
-          runner.os == 'Linux' && !matrix.zig && (
+          runner.os == 'Linux' && (
             matrix.target == 'x86_64-unknown-linux-gnu' ||
             matrix.target == 'aarch64-unknown-linux-gnu' ||
             matrix.target == 'i686-unknown-linux-gnu'
@@ -229,7 +233,7 @@ jobs:
 
       - name: Upload artifact (AppImage)
         if: >
-          runner.os == 'Linux' && !matrix.zig && (
+          runner.os == 'Linux' && (
             matrix.target == 'x86_64-unknown-linux-gnu' ||
             matrix.target == 'aarch64-unknown-linux-gnu' ||
             matrix.target == 'i686-unknown-linux-gnu'
@@ -352,9 +356,18 @@ jobs:
           tar -xf base.txz -C "$HOME/sysroot" ./lib ./usr/lib ./usr/include
           rm base.txz
 
-      - name: Install clang + lld
+      - name: Install clang + lld (with Azure mirror DNS bypass)
         run: |
-          sudo apt-get update
+          # 1. Bypass broken Azure mirror DNS issues common on GitHub runners
+          sudo sed -i 's/azure\.archive\.ubuntu\.com/archive.ubuntu.com/g' /etc/apt/sources.list /etc/apt/sources.list.d/*.list 2>/dev/null || true
+          sudo sed -i 's/security\.ubuntu\.com/archive.ubuntu.com/g' /etc/apt/sources.list /etc/apt/sources.list.d/*.list 2>/dev/null || true
+          
+          # 2. Retry loop to survive transient network blips
+          for i in 1 2 3; do
+            sudo apt-get update && break || sleep 5
+          done
+          
+          # 3. Install packages
           sudo apt-get install -y clang lld
 
       - name: Create cross compiler wrapper
