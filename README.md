@@ -1,5 +1,5 @@
 # BlendCraft
-This project was made with the Help of Grok and Claude
+This project was made with the Help of Grok, Claude, ChatGPT, and Gemini
 BlendCraft is an open-source clone of Blender, written from scratch in Rust.
 It is an independent project: it contains no Blender source code or artwork, and it is
 not affiliated with or endorsed by the Blender Foundation. "Blender" is a trademark of
