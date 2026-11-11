@@ -29,22 +29,24 @@ jobs:
       
       - name: Install Linux build dependencies
         run: |
-          # 1. Force APT to use the main Ubuntu archive, bypassing the broken Azure mirror list (Ubuntu 24.04+)
+          # 1. Bypass GitHub Actions broken internal DNS/IPv6 by forcing public DNS
+          echo "nameserver 8.8.8.8" | sudo tee /etc/resolv.conf > /dev/null
+          echo "nameserver 1.1.1.1" | sudo tee -a /etc/resolv.conf > /dev/null
+          
+          # 2. Force APT to use the main Ubuntu archive, bypassing Azure mirror list
           echo "http://archive.ubuntu.com/ubuntu/" | sudo tee /etc/apt/apt-mirrors.txt > /dev/null
           echo "http://security.ubuntu.com/ubuntu/" | sudo tee -a /etc/apt/apt-mirrors.txt > /dev/null
           
-          # 2. Fallback: fix any legacy sources.list entries just in case
+          # 3. Fallback: fix legacy sources.list entries
           sudo sed -i 's/azure\.archive\.ubuntu\.com/archive.ubuntu.com/g' /etc/apt/sources.list /etc/apt/sources.list.d/*.list 2>/dev/null || true
-          sudo sed -i 's/security\.ubuntu\.com/archive.ubuntu.com/g' /etc/apt/sources.list /etc/apt/sources.list.d/*.list 2>/dev/null || true
           
-          # 3. Retry loop to survive transient network blips
+          # 4. Retry loop with forced IPv4 to bypass Azure DNS glitches
           for i in 1 2 3; do
-            sudo apt-get update && break || sleep 3
+            sudo apt-get -o Acquire::ForceIPv4=true update && break || sleep 3
           done
           
-          sudo apt-get install -y pkg-config libx11-dev libxcursor-dev libxrandr-dev \
-            libxi-dev libxkbcommon-dev libwayland-dev libgl1-mesa-dev libasound2-dev \
-            libudev-dev
+          sudo apt-get -o Acquire::ForceIPv4=true install -y pkg-config libx11-dev libxcursor-dev libxrandr-dev \
+            libxi-dev libxkbcommon-dev libwayland-dev libgl1-mesa-dev libasound2-dev libudev-dev
             
       - run: cargo test -p forge-core -p forge-video
 
@@ -126,22 +128,24 @@ jobs:
       - name: Install Linux build dependencies (native build only)
         if: runner.os == 'Linux' && !matrix.cross && !matrix.zig
         run: |
-          # 1. Force APT to use the main Ubuntu archive, bypassing the broken Azure mirror list
+          # 1. Bypass GitHub Actions broken internal DNS/IPv6 by forcing public DNS
+          echo "nameserver 8.8.8.8" | sudo tee /etc/resolv.conf > /dev/null
+          echo "nameserver 1.1.1.1" | sudo tee -a /etc/resolv.conf > /dev/null
+          
+          # 2. Force APT to use the main Ubuntu archive
           echo "http://archive.ubuntu.com/ubuntu/" | sudo tee /etc/apt/apt-mirrors.txt > /dev/null
           echo "http://security.ubuntu.com/ubuntu/" | sudo tee -a /etc/apt/apt-mirrors.txt > /dev/null
           
-          # 2. Fallback: fix legacy sources.list entries
+          # 3. Fallback: fix legacy sources.list entries
           sudo sed -i 's/azure\.archive\.ubuntu\.com/archive.ubuntu.com/g' /etc/apt/sources.list /etc/apt/sources.list.d/*.list 2>/dev/null || true
-          sudo sed -i 's/security\.ubuntu\.com/archive.ubuntu.com/g' /etc/apt/sources.list /etc/apt/sources.list.d/*.list 2>/dev/null || true
           
-          # 3. Retry loop
+          # 4. Retry loop with forced IPv4
           for i in 1 2 3; do
-            sudo apt-get update && break || sleep 3
+            sudo apt-get -o Acquire::ForceIPv4=true update && break || sleep 3
           done
           
-          sudo apt-get install -y pkg-config libx11-dev libxcursor-dev libxrandr-dev \
-            libxi-dev libxkbcommon-dev libwayland-dev libgl1-mesa-dev libasound2-dev \
-            libudev-dev
+          sudo apt-get -o Acquire::ForceIPv4=true install -y pkg-config libx11-dev libxcursor-dev libxrandr-dev \
+            libxi-dev libxkbcommon-dev libwayland-dev libgl1-mesa-dev libasound2-dev libudev-dev
 
       - name: Install cross
         if: matrix.cross
@@ -190,10 +194,11 @@ jobs:
             convert crates/app/logo.png -resize 256x256 "$APPDIR/blendcraft.png"
           else
             # Bulletproof install for fallback imagemagick
+            echo "nameserver 8.8.8.8" | sudo tee /etc/resolv.conf > /dev/null
+            echo "nameserver 1.1.1.1" | sudo tee -a /etc/resolv.conf > /dev/null
             echo "http://archive.ubuntu.com/ubuntu/" | sudo tee /etc/apt/apt-mirrors.txt > /dev/null
-            echo "http://security.ubuntu.com/ubuntu/" | sudo tee -a /etc/apt/apt-mirrors.txt > /dev/null
-            for i in 1 2 3; do sudo apt-get update && break || sleep 3; done
-            sudo apt-get install -y -qq imagemagick
+            for i in 1 2 3; do sudo apt-get -o Acquire::ForceIPv4=true update && break || sleep 3; done
+            sudo apt-get -o Acquire::ForceIPv4=true install -y -qq imagemagick
             convert crates/app/logo.png -resize 256x256 "$APPDIR/usr/share/icons/hicolor/256x256/apps/blendcraft.png"
             convert crates/app/logo.png -resize 256x256 "$APPDIR/blendcraft.png"
           fi
@@ -370,22 +375,25 @@ jobs:
           tar -xf base.txz -C "$HOME/sysroot" ./lib ./usr/lib ./usr/include
           rm base.txz
 
-      - name: Install clang + lld (Bulletproof Azure bypass)
+      - name: Install clang + lld (Bulletproof DNS/IPv4 bypass)
         run: |
-          # 1. Force APT to use the main Ubuntu archive, bypassing the broken Azure mirror list
+          # 1. Bypass GitHub Actions broken internal DNS/IPv6 by forcing public DNS
+          echo "nameserver 8.8.8.8" | sudo tee /etc/resolv.conf > /dev/null
+          echo "nameserver 1.1.1.1" | sudo tee -a /etc/resolv.conf > /dev/null
+          
+          # 2. Force APT to use the main Ubuntu archive
           echo "http://archive.ubuntu.com/ubuntu/" | sudo tee /etc/apt/apt-mirrors.txt > /dev/null
           echo "http://security.ubuntu.com/ubuntu/" | sudo tee -a /etc/apt/apt-mirrors.txt > /dev/null
           
-          # 2. Fallback: fix legacy sources.list entries
+          # 3. Fallback: fix legacy sources.list entries
           sudo sed -i 's/azure\.archive\.ubuntu\.com/archive.ubuntu.com/g' /etc/apt/sources.list /etc/apt/sources.list.d/*.list 2>/dev/null || true
-          sudo sed -i 's/security\.ubuntu\.com/archive.ubuntu.com/g' /etc/apt/sources.list /etc/apt/sources.list.d/*.list 2>/dev/null || true
           
-          # 3. Retry loop
+          # 4. Retry loop with forced IPv4
           for i in 1 2 3; do
-            sudo apt-get update && break || sleep 3
+            sudo apt-get -o Acquire::ForceIPv4=true update && break || sleep 3
           done
           
-          sudo apt-get install -y clang lld
+          sudo apt-get -o Acquire::ForceIPv4=true install -y clang lld
 
       - name: Create cross compiler wrapper
         run: |
@@ -435,20 +443,23 @@ jobs:
 
       - name: Install flatpak tooling
         run: |
-          # 1. Force APT to use the main Ubuntu archive, bypassing the broken Azure mirror list
+          # 1. Bypass GitHub Actions broken internal DNS/IPv6 by forcing public DNS
+          echo "nameserver 8.8.8.8" | sudo tee /etc/resolv.conf > /dev/null
+          echo "nameserver 1.1.1.1" | sudo tee -a /etc/resolv.conf > /dev/null
+          
+          # 2. Force APT to use the main Ubuntu archive
           echo "http://archive.ubuntu.com/ubuntu/" | sudo tee /etc/apt/apt-mirrors.txt > /dev/null
           echo "http://security.ubuntu.com/ubuntu/" | sudo tee -a /etc/apt/apt-mirrors.txt > /dev/null
           
-          # 2. Fallback: fix legacy sources.list entries
+          # 3. Fallback: fix legacy sources.list entries
           sudo sed -i 's/azure\.archive\.ubuntu\.com/archive.ubuntu.com/g' /etc/apt/sources.list /etc/apt/sources.list.d/*.list 2>/dev/null || true
-          sudo sed -i 's/security\.ubuntu\.com/archive.ubuntu.com/g' /etc/apt/sources.list /etc/apt/sources.list.d/*.list 2>/dev/null || true
           
-          # 3. Retry loop
+          # 4. Retry loop with forced IPv4
           for i in 1 2 3; do
-            sudo apt-get update && break || sleep 3
+            sudo apt-get -o Acquire::ForceIPv4=true update && break || sleep 3
           done
           
-          sudo apt-get install -y flatpak flatpak-builder imagemagick
+          sudo apt-get -o Acquire::ForceIPv4=true install -y flatpak flatpak-builder imagemagick
           flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
 
       - name: Cache Flatpak runtimes
