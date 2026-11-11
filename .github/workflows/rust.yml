@@ -70,7 +70,7 @@ jobs:
           # ---- Linux ----
           - { name: linux-x64,     os: ubuntu-24.04,   target: x86_64-unknown-linux-gnu,      cross: false, ext: "",     experimental: false }
           - { name: linux-x86,     os: ubuntu-24.04,   target: i686-unknown-linux-gnu,        cross: true,  ext: "",     experimental: true  }
-          - { name: linux-arm64,   os: ubuntu-24.04,   target: aarch64-unknown-linux-gnu,     cross: true,  ext: "",     experimental: true  }
+          - { name: linux-arm64,   os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu,   cross: false, ext: "",     experimental: true  }
           - { name: linux-armv7,   os: ubuntu-24.04,   target: armv7-unknown-linux-gnueabihf, cross: true,  ext: "",     experimental: true  }
           - { name: linux-riscv64,      os: ubuntu-24.04, target: riscv64gc-unknown-linux-gnu,  cross: true, ext: "", experimental: true }
           # No cross image exists for this target, so it is built with cargo-zigbuild (zig as C cross-compiler).
@@ -147,21 +147,27 @@ jobs:
         run: cargo zigbuild --release -p ${{ env.APP_PACKAGE }} --target ${{ matrix.target }}
 
       # AppImage for native Linux builds (x86_64 / aarch64) with project logo as icon
+      # AppImage for Linux x86_64, arm64, and x86 (i686) — icon = crates/app/logo.png
       - name: Package AppImage
-        if: runner.os == 'Linux' && !matrix.cross && !matrix.zig && (matrix.target == 'x86_64-unknown-linux-gnu' || matrix.target == 'aarch64-unknown-linux-gnu')
+        if: >
+          runner.os == 'Linux' && !matrix.zig && (
+            matrix.target == 'x86_64-unknown-linux-gnu' ||
+            matrix.target == 'aarch64-unknown-linux-gnu' ||
+            matrix.target == 'i686-unknown-linux-gnu'
+          )
         shell: bash
         run: |
           set -e
           BIN="${{ env.BIN }}"
           TARGET="${{ matrix.target }}"
           APPDIR="BlendCraft.AppDir"
-          rm -rf "$APPDIR"
+          rm -rf "$APPDIR" squashfs-root appimagetool
           mkdir -p "$APPDIR/usr/bin" "$APPDIR/usr/share/icons/hicolor/256x256/apps"
 
           cp "target/${TARGET}/release/${BIN}" "$APPDIR/usr/bin/${BIN}"
           chmod +x "$APPDIR/usr/bin/${BIN}"
 
-          # Icon from repo (your logo)
+          # Icon already in the repo
           test -f crates/app/logo.png || { echo "missing crates/app/logo.png"; exit 1; }
           cp crates/app/logo.png "$APPDIR/usr/share/icons/hicolor/256x256/apps/blendcraft.png"
           cp crates/app/logo.png "$APPDIR/blendcraft.png"
@@ -178,24 +184,25 @@ jobs:
           EOF
           sed -i 's/^[[:space:]]*//' "$APPDIR/blendcraft.desktop"
 
-          # AppRun launches the binary
-          cat > "$APPDIR/AppRun" <<EOF
-          #!/bin/sh
-          SELF=\$(readlink -f "\$0")
-          HERE=\${SELF%/*}
-          exec "\${HERE}/usr/bin/${BIN}" "\$@"
-          EOF
-          sed -i 's/^[[:space:]]*//' "$APPDIR/AppRun"
+          printf '%s\n' '#!/bin/sh' 'SELF=$(readlink -f "$0")' 'HERE=${SELF%/*}' "exec \"\${HERE}/usr/bin/${BIN}\" \"\$@\"" > "$APPDIR/AppRun"
           chmod +x "$APPDIR/AppRun"
 
-          # appimagetool (official continuous build)
-          ARCH_NAME=x86_64
+          # Target arch for the AppImage runtime
           case "$TARGET" in
+            x86_64-*)  ARCH_NAME=x86_64 ;;
             aarch64-*) ARCH_NAME=aarch64 ;;
+            i686-*)    ARCH_NAME=i686 ;;
+            *) echo "unsupported target $TARGET"; exit 1 ;;
           esac
-          curl -fsSL -o appimagetool             "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-${ARCH_NAME}.AppImage"
+
+          # appimagetool must match the *host* CPU so we can run it
+          case "$(uname -m)" in
+            aarch64|arm64) TOOL_ARCH=aarch64 ;;
+            *)             TOOL_ARCH=x86_64 ;;
+          esac
+          curl -fsSL -o appimagetool \
+            "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-${TOOL_ARCH}.AppImage"
           chmod +x appimagetool
-          # Extract if FUSE is unavailable on the runner
           ./appimagetool --appimage-extract >/dev/null 2>&1 || true
           if [ -x squashfs-root/AppRun ]; then
             TOOL=./squashfs-root/AppRun
@@ -215,7 +222,12 @@ jobs:
           if-no-files-found: error
 
       - name: Upload artifact (AppImage)
-        if: runner.os == 'Linux' && !matrix.cross && !matrix.zig && (matrix.target == 'x86_64-unknown-linux-gnu' || matrix.target == 'aarch64-unknown-linux-gnu')
+        if: >
+          runner.os == 'Linux' && !matrix.zig && (
+            matrix.target == 'x86_64-unknown-linux-gnu' ||
+            matrix.target == 'aarch64-unknown-linux-gnu' ||
+            matrix.target == 'i686-unknown-linux-gnu'
+          )
         uses: actions/upload-artifact@v5
         with:
           name: blendcraft-${{ matrix.name }}-appimage
@@ -547,6 +559,6 @@ jobs:
           body: |
             ${{ env.IS_TAG != 'true' && format('Automatic build of commit {0}. Not a stable release.', github.sha) || '' }}
             Experimental, untested builds: Linux x86 / ARM64 / ARMv7 / RISC-V 64 (glibc and musl), Windows x86 / ARM64,
-            FreeBSD x86 / ARM64. Flatpaks and AppImages (with project logo) are built for Linux x86_64. On Linux/macOS/FreeBSD run chmod +x on the downloaded file first. If one is missing from the assets, its build failed.
+            FreeBSD x86 / ARM64. Flatpaks are built for Linux x86_64 and aarch64. AppImages (with project logo) are built for Linux x86_64, arm64, and x86 (i686). On Linux/macOS/FreeBSD run chmod +x on the downloaded file first. If one is missing from the assets, its build failed.
             Animation export is written by a built-in pure-Rust encoder (Motion-JPEG in an .avi file); no ffmpeg or other external tool is needed.
           files: out/*
