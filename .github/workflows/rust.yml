@@ -26,30 +26,31 @@ jobs:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      
+
       - name: Install Linux build dependencies
         run: |
-          # 1. Bypass GitHub Actions broken internal DNS by forcing public DNS
+          # 1. Bypass flaky internal DNS on GitHub runners
           echo "nameserver 8.8.8.8" | sudo tee /etc/resolv.conf > /dev/null
           echo "nameserver 1.1.1.1" | sudo tee -a /etc/resolv.conf > /dev/null
-          
-          # 2. Force APT to use the main Ubuntu archive
+
+          # 2. Force APT to use the main Ubuntu archive instead of the Azure mirror list
           echo "http://archive.ubuntu.com/ubuntu/" | sudo tee /etc/apt/apt-mirrors.txt > /dev/null
           echo "http://security.ubuntu.com/ubuntu/" | sudo tee -a /etc/apt/apt-mirrors.txt > /dev/null
-          
+
           # 3. Retry loop for update
           for i in 1 2 3; do
             sudo apt-get update && break || sleep 3
           done
-          
-          # 4. Install packages (ForceIPv4 removed from install to prevent apt parallel download hangs)
+
+          # 4. Install packages
           sudo apt-get install -y pkg-config libx11-dev libxcursor-dev libxrandr-dev \
-            libxi-dev libxkbcommon-dev libwayland-dev libgl1-mesa-dev libasound2-dev libudev-dev
-            
+            libxi-dev libxkbcommon-dev libwayland-dev libgl1-mesa-dev libasound2-dev \
+            libudev-dev
+
       - run: cargo test -p forge-core -p forge-video
 
   # ---------------------------------------------------------------------------
-  # WebAssembly: library crates only
+  # WebAssembly: library crates only (the full GUI app has no web entry yet)
   # ---------------------------------------------------------------------------
   wasm:
     name: WebAssembly (check)
@@ -65,6 +66,7 @@ jobs:
 
   # ---------------------------------------------------------------------------
   # Linux / Windows / macOS
+  # "experimental" targets can fail without failing the whole workflow.
   # ---------------------------------------------------------------------------
   build:
     name: ${{ matrix.name }}
@@ -74,24 +76,28 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # ---- Linux (Native Runners) ----
-          - { name: linux-x64,     os: ubuntu-24.04,     target: x86_64-unknown-linux-gnu,      cross: false, zig: false, ext: "",     experimental: false }
-          - { name: linux-arm64,   os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu,     cross: false, zig: false, ext: "",     experimental: true  }
-          
-          # ---- Linux (Modern Zig Cross-Compilation) ----
-          - { name: linux-x86,     os: ubuntu-24.04,     target: i686-unknown-linux-gnu,        cross: false, zig: true,  ext: "",     experimental: true  }
-          - { name: linux-armv7,   os: ubuntu-24.04,     target: armv7-unknown-linux-gnueabihf, cross: false, zig: true,  ext: "",     experimental: true  }
-          - { name: linux-riscv64, os: ubuntu-24.04,     target: riscv64gc-unknown-linux-gnu,   cross: false, zig: true,  ext: "",     experimental: true  }
-          - { name: linux-riscv64-musl, os: ubuntu-24.04, target: riscv64gc-unknown-linux-musl, cross: false, zig: true,  ext: "",     experimental: true }
-          
+          # ---- Linux (native runners) ----
+          - { name: linux-x64,          os: ubuntu-24.04,     target: x86_64-unknown-linux-gnu,      cross: false, zig: false, ext: "",     experimental: false }
+          - { name: linux-arm64,        os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu,     cross: false, zig: false, ext: "",     experimental: true  }
+
+          # ---- Linux (cargo-zigbuild, no Docker, no EOL Ubuntu images) ----
+          - { name: linux-x86,          os: ubuntu-24.04,     target: i686-unknown-linux-gnu,        cross: false, zig: true,  ext: "",     experimental: true  }
+          - { name: linux-armv7,        os: ubuntu-24.04,     target: armv7-unknown-linux-gnueabihf, cross: false, zig: true,  ext: "",     experimental: true  }
+          - { name: linux-riscv64,      os: ubuntu-24.04,     target: riscv64gc-unknown-linux-gnu,   cross: false, zig: true,  ext: "",     experimental: true  }
+          # NOTE: static musl binaries cannot dlopen the system GPU/windowing libraries,
+          # so this one compiles but is unlikely to open a window at runtime.
+          - { name: linux-riscv64-musl, os: ubuntu-24.04,     target: riscv64gc-unknown-linux-musl,  cross: false, zig: true,  ext: "",     experimental: true  }
+
           # ---- Windows ----
-          - { name: windows-x64,   os: windows-latest, target: x86_64-pc-windows-msvc,        cross: false, zig: false, ext: ".exe", experimental: false }
-          - { name: windows-x86,   os: windows-latest, target: i686-pc-windows-msvc,          cross: false, zig: false, ext: ".exe", experimental: true  }
-          - { name: windows-arm64, os: windows-latest, target: aarch64-pc-windows-msvc,       cross: false, zig: false, ext: ".exe", experimental: true  }
-          
+          - { name: windows-x64,        os: windows-latest,   target: x86_64-pc-windows-msvc,        cross: false, zig: false, ext: ".exe", experimental: false }
+          - { name: windows-x86,        os: windows-latest,   target: i686-pc-windows-msvc,          cross: false, zig: false, ext: ".exe", experimental: true  }
+          - { name: windows-arm64,      os: windows-latest,   target: aarch64-pc-windows-msvc,       cross: false, zig: false, ext: ".exe", experimental: true  }
+
           # ---- macOS ----
-          - { name: macos-x64,     os: macos-15-intel, target: x86_64-apple-darwin,           cross: false, zig: false, ext: "",     experimental: false }
-          - { name: macos-arm64,   os: macos-latest,   target: aarch64-apple-darwin,          cross: false, zig: false, ext: "",     experimental: false }
+          # macos-13 / macos-14 are retired. macos-15-intel = Intel,
+          # macos-latest = Apple Silicon (largest runner pool, avoids queue backlog).
+          - { name: macos-x64,          os: macos-15-intel,   target: x86_64-apple-darwin,           cross: false, zig: false, ext: "",     experimental: false }
+          - { name: macos-arm64,        os: macos-latest,     target: aarch64-apple-darwin,          cross: false, zig: false, ext: "",     experimental: false }
 
     steps:
       - uses: actions/checkout@v5
@@ -114,34 +120,29 @@ jobs:
           echo "Binary name: $BIN"
           echo "BIN=$BIN" >> "$GITHUB_ENV"
 
+      # Fail early on Windows if the logo icon is missing (exe would ship with generic icon).
       - name: Verify Windows app icon assets
         if: runner.os == 'Windows'
         shell: bash
         run: |
-          test -f crates/app/icon.ico || { echo "Missing crates/app/icon.ico"; exit 1; }
-          test -f crates/app/build.rs || { echo "Missing crates/app/build.rs"; exit 1; }
+          test -f crates/app/icon.ico || { echo "Missing crates/app/icon.ico — Windows exe will have no logo"; exit 1; }
+          test -f crates/app/build.rs || { echo "Missing crates/app/build.rs — icon will not be embedded"; exit 1; }
           test -f crates/app/logo.png || { echo "Missing crates/app/logo.png"; exit 1; }
           echo "Icon assets OK"
 
       - name: Install Linux build dependencies (native build only)
         if: runner.os == 'Linux' && !matrix.cross && !matrix.zig
         run: |
-          # 1. Bypass GitHub Actions broken internal DNS by forcing public DNS
           echo "nameserver 8.8.8.8" | sudo tee /etc/resolv.conf > /dev/null
           echo "nameserver 1.1.1.1" | sudo tee -a /etc/resolv.conf > /dev/null
-          
-          # 2. Force APT to use the main Ubuntu archive
           echo "http://archive.ubuntu.com/ubuntu/" | sudo tee /etc/apt/apt-mirrors.txt > /dev/null
           echo "http://security.ubuntu.com/ubuntu/" | sudo tee -a /etc/apt/apt-mirrors.txt > /dev/null
-          
-          # 3. Retry loop for update
           for i in 1 2 3; do
             sudo apt-get update && break || sleep 3
           done
-          
-          # 4. Install packages
           sudo apt-get install -y pkg-config libx11-dev libxcursor-dev libxrandr-dev \
-            libxi-dev libxkbcommon-dev libwayland-dev libgl1-mesa-dev libasound2-dev libudev-dev
+            libxi-dev libxkbcommon-dev libwayland-dev libgl1-mesa-dev libasound2-dev \
+            libudev-dev
 
       - name: Install cross
         if: matrix.cross
@@ -165,6 +166,7 @@ jobs:
         if: matrix.zig
         run: cargo zigbuild --release -p ${{ env.APP_PACKAGE }} --target ${{ matrix.target }}
 
+      # AppImage for Linux x86_64, arm64 and x86 (i686) — icon = crates/app/logo.png
       - name: Package AppImage
         if: >
           runner.os == 'Linux' && (
@@ -184,20 +186,18 @@ jobs:
           cp "target/${TARGET}/release/${BIN}" "$APPDIR/usr/bin/${BIN}"
           chmod +x "$APPDIR/usr/bin/${BIN}"
 
+          # Icon from repo (resize to 256 — Flatpak/AppImage expect <= 512)
           test -f crates/app/logo.png || { echo "missing crates/app/logo.png"; exit 1; }
-          if command -v convert >/dev/null 2>&1; then
-            convert crates/app/logo.png -resize 256x256 "$APPDIR/usr/share/icons/hicolor/256x256/apps/blendcraft.png"
-            convert crates/app/logo.png -resize 256x256 "$APPDIR/blendcraft.png"
-          else
-            # Bulletproof install for fallback imagemagick
+          if ! command -v convert >/dev/null 2>&1; then
             echo "nameserver 8.8.8.8" | sudo tee /etc/resolv.conf > /dev/null
             echo "nameserver 1.1.1.1" | sudo tee -a /etc/resolv.conf > /dev/null
             echo "http://archive.ubuntu.com/ubuntu/" | sudo tee /etc/apt/apt-mirrors.txt > /dev/null
-            for i in 1 2 3; do sudo apt-get update && break || sleep 3; done
-            sudo apt-get install -y -qq imagemagick
-            convert crates/app/logo.png -resize 256x256 "$APPDIR/usr/share/icons/hicolor/256x256/apps/blendcraft.png"
-            convert crates/app/logo.png -resize 256x256 "$APPDIR/blendcraft.png"
+            echo "http://security.ubuntu.com/ubuntu/" | sudo tee -a /etc/apt/apt-mirrors.txt > /dev/null
+            for i in 1 2 3; do sudo apt-get update -qq && break || sleep 3; done
+            sudo apt-get install -y -qq --no-install-recommends imagemagick
           fi
+          convert crates/app/logo.png -resize 256x256 "$APPDIR/usr/share/icons/hicolor/256x256/apps/blendcraft.png"
+          convert crates/app/logo.png -resize 256x256 "$APPDIR/blendcraft.png"
 
           cat > "$APPDIR/blendcraft.desktop" <<EOF
           [Desktop Entry]
@@ -214,6 +214,7 @@ jobs:
           printf '%s\n' '#!/bin/sh' 'SELF=$(readlink -f "$0")' 'HERE=${SELF%/*}' "exec \"\${HERE}/usr/bin/${BIN}\" \"\$@\"" > "$APPDIR/AppRun"
           chmod +x "$APPDIR/AppRun"
 
+          # Target arch for the AppImage runtime
           case "$TARGET" in
             x86_64-*)  ARCH_NAME=x86_64 ;;
             aarch64-*) ARCH_NAME=aarch64 ;;
@@ -221,6 +222,7 @@ jobs:
             *) echo "unsupported target $TARGET"; exit 1 ;;
           esac
 
+          # appimagetool must match the *host* CPU so we can run it
           case "$(uname -m)" in
             aarch64|arm64) TOOL_ARCH=aarch64 ;;
             *)             TOOL_ARCH=x86_64 ;;
@@ -271,8 +273,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { name: freebsd-x64,   target: x86_64-unknown-freebsd, experimental: false }
-          - { name: freebsd-x86,   target: i686-unknown-freebsd,   experimental: true  }
+          - { name: freebsd-x64, target: x86_64-unknown-freebsd, experimental: false }
+          - { name: freebsd-x86, target: i686-unknown-freebsd,   experimental: true  }
     steps:
       - uses: actions/checkout@v5
 
@@ -319,7 +321,7 @@ jobs:
           if-no-files-found: error
 
   # ---------------------------------------------------------------------------
-  # FreeBSD ARM64
+  # FreeBSD ARM64 (cross-compiled from Linux against a FreeBSD sysroot)
   # ---------------------------------------------------------------------------
   freebsd-arm64:
     name: freebsd-arm64
@@ -371,23 +373,16 @@ jobs:
           tar -xf base.txz -C "$HOME/sysroot" ./lib ./usr/lib ./usr/include
           rm base.txz
 
-      - name: Install clang + lld (Bulletproof DNS bypass)
+      - name: Install clang + lld
         run: |
-          # 1. Bypass GitHub Actions broken internal DNS by forcing public DNS
           echo "nameserver 8.8.8.8" | sudo tee /etc/resolv.conf > /dev/null
           echo "nameserver 1.1.1.1" | sudo tee -a /etc/resolv.conf > /dev/null
-          
-          # 2. Force APT to use the main Ubuntu archive
           echo "http://archive.ubuntu.com/ubuntu/" | sudo tee /etc/apt/apt-mirrors.txt > /dev/null
           echo "http://security.ubuntu.com/ubuntu/" | sudo tee -a /etc/apt/apt-mirrors.txt > /dev/null
-          
-          # 3. Retry loop for update
           for i in 1 2 3; do
             sudo apt-get update && break || sleep 3
           done
-          
-          # 4. Install packages
-          sudo apt-get install -y clang lld
+          sudo apt-get install -y --no-install-recommends clang lld
 
       - name: Create cross compiler wrapper
         run: |
@@ -410,7 +405,7 @@ jobs:
           if-no-files-found: error
 
   # ---------------------------------------------------------------------------
-  # Flatpak
+  # Flatpak — uses the REAL logo.png (not the orange placeholder SVG)
   # ---------------------------------------------------------------------------
   flatpak:
     name: flatpak-${{ matrix.name }}
@@ -428,6 +423,7 @@ jobs:
     env:
       APP_ID: io.github.DaikoGames.BlendCraft
     steps:
+      # Checkout source so logo.png is available for the app icon.
       - uses: actions/checkout@v5
 
       - uses: actions/download-artifact@v5
@@ -437,21 +433,24 @@ jobs:
 
       - name: Install flatpak tooling
         run: |
-          # 1. Bypass GitHub Actions broken internal DNS by forcing public DNS
+          # 1. Bypass flaky internal DNS on GitHub runners
           echo "nameserver 8.8.8.8" | sudo tee /etc/resolv.conf > /dev/null
           echo "nameserver 1.1.1.1" | sudo tee -a /etc/resolv.conf > /dev/null
-          
+
           # 2. Force APT to use the main Ubuntu archive
           echo "http://archive.ubuntu.com/ubuntu/" | sudo tee /etc/apt/apt-mirrors.txt > /dev/null
           echo "http://security.ubuntu.com/ubuntu/" | sudo tee -a /etc/apt/apt-mirrors.txt > /dev/null
-          
+
           # 3. Retry loop for update
           for i in 1 2 3; do
             sudo apt-get update && break || sleep 3
           done
-          
-          # 4. Install packages (--no-install-recommends makes it faster and avoids the librsvg2-2 parallel download hang)
-          sudo apt-get install -y --no-install-recommends flatpak flatpak-builder imagemagick
+
+          # 4. Install packages.
+          #    elfutils  -> eu-strip / eu-elfcompress, required by flatpak-builder
+          #    (must be explicit because --no-install-recommends skips it)
+          sudo apt-get install -y --no-install-recommends \
+            flatpak flatpak-builder imagemagick elfutils binutils
           flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
 
       - name: Cache Flatpak runtimes
@@ -502,6 +501,7 @@ jobs:
           EOF
           sed -i 's/^[[:space:]]*//' "$APP_ID.metainfo.xml"
 
+          # Logo from repo; Flatpak requires icons <= 512px (logo is 1254px)
           LOGO="../crates/app/logo.png"
           test -f "$LOGO" || { echo "ERROR: missing $LOGO"; exit 1; }
           mkdir -p "icons/hicolor/256x256/apps"
