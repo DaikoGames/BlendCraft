@@ -900,10 +900,12 @@ fn vs_main(@location(0) pos: vec3<f32>) -> @builtin(position) vec4<f32> {
         overlay: &mut dyn FnMut(&wgpu::Device, &wgpu::Queue, &mut wgpu::CommandEncoder, &wgpu::TextureView) -> Vec<wgpu::CommandBuffer>,
     ) -> Result<(), wgpu::SurfaceError> {
         let (sw, sh) = (self.config.width as f32, self.config.height as f32);
+        // Zero-size viewport (e.g. Rendering workspace) → clear only, no 3D geometry.
+        let skip_3d = viewport[2] < 0.5 || viewport[3] < 0.5;
         let vx = viewport[0].clamp(0.0, (sw - 1.0).max(0.0));
         let vy = viewport[1].clamp(0.0, (sh - 1.0).max(0.0));
-        let vw = viewport[2].min(sw - vx).max(1.0);
-        let vh = viewport[3].min(sh - vy).max(1.0);
+        let vw = if skip_3d { 1.0 } else { viewport[2].min(sw - vx).max(1.0) };
+        let vh = if skip_3d { 1.0 } else { viewport[3].min(sh - vy).max(1.0) };
 
         let vp = camera.view_proj(vw / vh);
         let eye = camera.eye();
@@ -939,7 +941,7 @@ fn vs_main(@location(0) pos: vec3<f32>) -> @builtin(position) vec4<f32> {
 
         // ---- Shadow pass (depth from light) ----
         // HARD RULE: depth from the primary light — geometry blocks light.
-        if shadow_on {
+        if shadow_on && !skip_3d {
             let mut spass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("shadow pass"),
                 color_attachments: &[],
@@ -992,6 +994,7 @@ fn vs_main(@location(0) pos: vec3<f32>) -> @builtin(position) vec4<f32> {
             });
             pass.set_viewport(vx, vy, vw, vh, 0.0, 1.0);
             pass.set_scissor_rect(vx as u32, vy as u32, vw as u32, vh as u32);
+            if !skip_3d {
             pass.set_bind_group(0, &self.global_bg, &[]);
 
             if s.show_background {
@@ -1030,6 +1033,7 @@ fn vs_main(@location(0) pos: vec3<f32>) -> @builtin(position) vec4<f32> {
                 pass.set_index_buffer(o.buffers.wire_ib.slice(..), wgpu::IndexFormat::Uint32);
                 pass.draw_indexed(0..o.buffers.wire_count, 0, 0..1);
             }
+            } // !skip_3d
         }
         let extra = overlay(&self.device, &self.queue, &mut enc, &view);
         self.queue.submit(extra.into_iter().chain(std::iter::once(enc.finish())));

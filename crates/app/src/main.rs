@@ -3458,35 +3458,42 @@ impl App {
             .then(|| (Vec2::new(self.cursor.0 as f32, self.cursor.1 as f32), self.ts.circle_radius));
         let mut actions = Vec::new();
         let mut rect = egui::Rect::NOTHING;
+        let rendering_ws = self.ui.rendering_mode
+            && !self.doc.uv_mode
+            && !self.doc.paint_mode
+            && !self.doc.sculpt_mode;
         let out = self.egui_ctx.run(raw, |ctx| {
             let (a, r) = ui::draw(ctx, &mut self.doc, &mut self.settings, &mut self.ts, &mut self.ui, &self.bindings, &self.recent.paths);
-            tools::draw_toolbar(ctx, r, &mut self.ts);
-            let measure_preview = match (self.measure_a, self.measure_b) {
-                (Some(a), Some(b)) => Some((a, b)),
-                _ => None,
-            };
-            let extra = overlay::Extra {
-                shape: shape.as_ref(),
-                modal: modal_text.as_deref(),
-                circle,
-                measurements: &self.measurements,
-                measure_preview,
-                annotations: &self.annotations,
-                annotate_stroke: self.annotate_stroke.as_deref(),
-            };
-            overlay::draw(ctx, &self.camera, r, &self.doc, &extra);
-            if self.doc.edit.is_some() {
-                draw_edit_gizmo_ui(
-                    ctx,
-                    r,
-                    &self.camera,
-                    self.viewport,
-                    &self.doc,
-                    self.edit_gizmo_hover,
-                    self.edit_gizmo_drag.as_ref().map(|d| d.axis),
-                );
-            } else {
-                self.gizmo.draw(ctx, &self.camera, r, &self.doc, &self.ts);
+            // Rendering workspace: no 3D overlays / gizmos / tool HUD — only the Image editor UI.
+            if !rendering_ws {
+                tools::draw_toolbar(ctx, r, &mut self.ts);
+                let measure_preview = match (self.measure_a, self.measure_b) {
+                    (Some(a), Some(b)) => Some((a, b)),
+                    _ => None,
+                };
+                let extra = overlay::Extra {
+                    shape: shape.as_ref(),
+                    modal: modal_text.as_deref(),
+                    circle,
+                    measurements: &self.measurements,
+                    measure_preview,
+                    annotations: &self.annotations,
+                    annotate_stroke: self.annotate_stroke.as_deref(),
+                };
+                overlay::draw(ctx, &self.camera, r, &self.doc, &extra);
+                if self.doc.edit.is_some() {
+                    draw_edit_gizmo_ui(
+                        ctx,
+                        r,
+                        &self.camera,
+                        self.viewport,
+                        &self.doc,
+                        self.edit_gizmo_hover,
+                        self.edit_gizmo_drag.as_ref().map(|d| d.axis),
+                    );
+                } else {
+                    self.gizmo.draw(ctx, &self.camera, r, &self.doc, &self.ts);
+                }
             }
             actions = a;
             rect = r;
@@ -3495,7 +3502,12 @@ impl App {
             g.egui_state.handle_platform_output(&g.window, out.platform_output.clone());
         }
         let ppp = out.pixels_per_point;
-        self.viewport = [rect.min.x * ppp, rect.min.y * ppp, rect.width() * ppp, rect.height() * ppp];
+        // Zero viewport in Rendering mode so the GPU 3D pass draws nothing into the window.
+        if rendering_ws {
+            self.viewport = [0.0, 0.0, 0.0, 0.0];
+        } else {
+            self.viewport = [rect.min.x * ppp, rect.min.y * ppp, rect.width() * ppp, rect.height() * ppp];
+        }
 
         // 2) apply menu actions
         for a in actions {

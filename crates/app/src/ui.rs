@@ -73,6 +73,19 @@ pub struct UiState {
     pub render_use_viewport: bool,
     pub render_anim_frames: u32,
     pub render_fps: u32,
+    /// Blender-like render property UI state (Rendering workspace).
+    pub render_engine: u8, // 0 Workbench, 1 EEVEE, 2 Cycles (UI only where unsupported)
+    pub render_samples_viewport: u32,
+    pub render_samples: u32,
+    pub render_temporal_reprojection: bool,
+    pub render_jittered_shadows: bool,
+    pub render_shadows: bool,
+    pub render_raytracing: bool,
+    pub render_motion_blur: bool,
+    pub render_dof: bool,
+    pub render_film_transparent: bool,
+    pub render_simplify: bool,
+    pub render_format: u8, // 0 PNG, 1 JPEG, 2 EXR
     /// Properties editor context, Blender-like tabs.
     pub properties_tab: PropertiesTab,
 }
@@ -352,27 +365,18 @@ pub fn draw(
 
     // Timeline / Dope Sheet (Blender Animation workspace style)
     // Compact strip in Object Mode; full Dope Sheet layout in Animation tab.
-    if !doc.uv_mode && !doc.paint_mode && !doc.sculpt_mode && !st.rendering_mode {
-        let timeline_h = if st.animation_mode { 220.0 } else { 72.0 };
+    // Timeline at bottom (Blender Rendering workspace keeps the timeline)
+    if !doc.uv_mode && !doc.paint_mode && !doc.sculpt_mode {
+        let timeline_h = if st.animation_mode && !st.rendering_mode { 220.0 } else { 72.0 };
         egui::TopBottomPanel::bottom("timeline")
             .exact_height(timeline_h)
             .frame(egui::Frame::none().fill(egui::Color32::from_rgb(0x2a, 0x2a, 0x2a)).inner_margin(egui::Margin::symmetric(8.0, 4.0)))
             .show(ctx, |ui| {
-                if st.animation_mode {
+                if st.animation_mode && !st.rendering_mode {
                     draw_animation_workspace(ui, doc, st, &mut actions);
                 } else {
                     draw_timeline(ui, doc, st, &mut actions);
                 }
-            });
-    }
-
-    // Rendering workspace panel (Blender Render + Output properties)
-    if st.rendering_mode && !doc.uv_mode && !doc.paint_mode && !doc.sculpt_mode {
-        egui::TopBottomPanel::bottom("rendering_workspace")
-            .exact_height(280.0)
-            .frame(egui::Frame::none().fill(egui::Color32::from_rgb(0x28, 0x28, 0x28)).inner_margin(egui::Margin::symmetric(10.0, 6.0)))
-            .show(ctx, |ui| {
-                draw_rendering_workspace(ui, doc, st, &mut actions);
             });
     }
 
@@ -404,10 +408,11 @@ pub fn draw(
         });
     });
 
-        // Left: Toolbar – drawn icons, screen-aware height, scroll if needed
+        // Left: Toolbar (hidden in Rendering workspace — no 3D tools there)
     let screen_h = ctx.screen_rect().height();
     let toolbar_w = if screen_h < 700.0 { 36.0 } else { 40.0 };
     let btn = if screen_h < 700.0 { 26.0 } else { 30.0 };
+    if !st.rendering_mode {
     egui::SidePanel::left("toolbar")
         .exact_width(toolbar_w)
         .resizable(false)
@@ -512,6 +517,7 @@ pub fn draw(
                     });
                 });
         });
+    } // !rendering_mode toolbar
 
     // UV Editing workspace (Blender-style):
     // LEFT = UV Editor · RIGHT/CENTER = 3D Edit view (Outliner/Properties hidden)
@@ -549,8 +555,18 @@ pub fn draw(
             .show(ctx, |ui| { draw_shading_editor(ui, ctx, doc, st); });
     }
 
-    // Outliner + Properties only in the regular Object/Edit/Shading workspaces.
-    if !doc.uv_mode && !doc.paint_mode {
+    // Right panel:
+    // - Rendering workspace: Render / Output properties only (no 3D, no Outliner)
+    // - Other workspaces: Outliner + Properties
+    if st.rendering_mode && !doc.uv_mode && !doc.paint_mode {
+        egui::SidePanel::right("render_properties_panel")
+            .default_width(320.0)
+            .width_range(260.0..=480.0)
+            .frame(egui::Frame::none().fill(egui::Color32::from_rgb(0x2b, 0x2b, 0x2b)).inner_margin(egui::Margin::symmetric(8.0, 6.0)))
+            .show(ctx, |ui| {
+                draw_rendering_properties(ui, doc, st, &mut actions);
+            });
+    } else if !doc.uv_mode && !doc.paint_mode {
         egui::SidePanel::right("right_panel")
             .default_width(300.0)
             .width_range(220.0..=480.0)
@@ -570,6 +586,15 @@ pub fn draw(
     }
 
     // Texture Paint uses the 3D viewport as its canvas; no detached editor window.
+
+    // Rendering workspace (Blender): center = Render Result image only — no 3D view.
+    if st.rendering_mode && !doc.uv_mode && !doc.paint_mode && !doc.sculpt_mode {
+        egui::CentralPanel::default()
+            .frame(egui::Frame::none().fill(egui::Color32::from_rgb(0x1e, 0x1e, 0x1e)))
+            .show(ctx, |ui| {
+                draw_render_result_view(ui, st, &mut actions);
+            });
+    }
 
     // Right-clicking inside the 3D viewport opens the exact same Object Mode menu
     // used by Outliner rows. The viewport is the remaining central area after panels.
@@ -710,10 +735,22 @@ fn shader_node_color(kind: ShaderNodeKind) -> egui::Color32 {
         ShaderNodeKind::Rgb | ShaderNodeKind::ColorRamp | ShaderNodeKind::Mix => {
             egui::Color32::from_rgb(0x7d, 0x55, 0x86)
         }
-        ShaderNodeKind::TexCoord | ShaderNodeKind::Mapping | ShaderNodeKind::Bump | ShaderNodeKind::NormalMap => {
-            egui::Color32::from_rgb(0x3e, 0x7b, 0x65)
-        }
-        ShaderNodeKind::Value => egui::Color32::from_rgb(0x55, 0x55, 0x70),
+        ShaderNodeKind::TexCoord
+        | ShaderNodeKind::Mapping
+        | ShaderNodeKind::Bump
+        | ShaderNodeKind::NormalMap
+        | ShaderNodeKind::UvMap
+        | ShaderNodeKind::Tangent
+        | ShaderNodeKind::Geometry
+        | ShaderNodeKind::Bevel => egui::Color32::from_rgb(0x3e, 0x7b, 0x65),
+        ShaderNodeKind::Value
+        | ShaderNodeKind::Fresnel
+        | ShaderNodeKind::LayerWeight
+        | ShaderNodeKind::SceneTime
+        | ShaderNodeKind::Wireframe => egui::Color32::from_rgb(0x55, 0x55, 0x70),
+        // Remaining Input nodes — Blender-like dark teal/gray
+        _ if kind.is_input_extra() => egui::Color32::from_rgb(0x4a, 0x5a, 0x68),
+        _ => egui::Color32::from_rgb(0x55, 0x55, 0x60),
     }
 }
 
@@ -752,9 +789,31 @@ fn draw_shading_editor(ui: &mut egui::Ui, ctx: &egui::Context, doc: &mut Documen
             ui.menu_button("Add ▾", |ui| {
                 let groups: &[(&str, &[(&str, ShaderNodeKind)])] = &[
                     ("Input", &[
-                        ("Texture Coordinate", ShaderNodeKind::TexCoord),
+                        ("Ambient Occlusion", ShaderNodeKind::AmbientOcclusion),
+                        ("Attribute", ShaderNodeKind::Attribute),
+                        ("Bevel", ShaderNodeKind::Bevel),
+                        ("Camera Data", ShaderNodeKind::CameraData),
+                        ("Color Attribute", ShaderNodeKind::ColorAttribute),
+                        ("Curves Info", ShaderNodeKind::CurvesInfo),
+                        ("Fresnel", ShaderNodeKind::Fresnel),
+                        ("Geometry", ShaderNodeKind::Geometry),
+                        ("Layer Weight", ShaderNodeKind::LayerWeight),
+                        ("Light Evaluation", ShaderNodeKind::LightEvaluation),
+                        ("Light Info", ShaderNodeKind::LightInfo),
+                        ("Light Path", ShaderNodeKind::LightPath),
+                        ("Object Info", ShaderNodeKind::ObjectInfo),
+                        ("Particle Info", ShaderNodeKind::ParticleInfo),
+                        ("Point Info", ShaderNodeKind::PointInfo),
+                        ("Raycast", ShaderNodeKind::Raycast),
                         ("RGB", ShaderNodeKind::Rgb),
+                        ("Scene Time", ShaderNodeKind::SceneTime),
+                        ("Shadow Raycast", ShaderNodeKind::ShadowRaycast),
+                        ("Tangent", ShaderNodeKind::Tangent),
+                        ("Texture Coordinate", ShaderNodeKind::TexCoord),
+                        ("UV Map", ShaderNodeKind::UvMap),
                         ("Value", ShaderNodeKind::Value),
+                        ("Volume Info", ShaderNodeKind::VolumeInfo),
+                        ("Wireframe", ShaderNodeKind::Wireframe),
                     ]),
                     ("Texture", &[
                         ("Image Texture", ShaderNodeKind::ImageTexture),
@@ -1574,6 +1633,143 @@ fn draw_shading_editor(ui: &mut egui::Ui, ctx: &egui::Context, doc: &mut Documen
                                 ui.horizontal(|ui| {
                                     ui.label("● Displacement");
                                     ui.weak("not evaluated yet");
+                                });
+                            }
+                            // ---- Input nodes (Blender Input category) ----
+                            ShaderNodeKind::AmbientOcclusion => {
+                                ui.weak("AO factor · Cycles/EEVEE style");
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    shader_socket_control(ui, st, node.id, true, 0, "AO ◉");
+                                });
+                            }
+                            ShaderNodeKind::Attribute | ShaderNodeKind::ColorAttribute => {
+                                ui.weak("Named attribute / color layer");
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    shader_socket_control(ui, st, node.id, true, 0, "Color ◉");
+                                });
+                            }
+                            ShaderNodeKind::Bevel => {
+                                ui.weak("Rounded normals");
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    shader_socket_control(ui, st, node.id, true, 0, "Normal ◉");
+                                });
+                            }
+                            ShaderNodeKind::CameraData => {
+                                for (i, lab) in ["View Vector", "View Z Depth", "View Distance"].iter().enumerate() {
+                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                        shader_socket_control(ui, st, node.id, true, i as u8, &format!("{lab} ◉"));
+                                    });
+                                }
+                            }
+                            ShaderNodeKind::Fresnel => {
+                                let mut ior = st.shader_nodes.iter().find(|n| n.id == node.id).map(|n| n.value).unwrap_or(1.45);
+                                if ior < 1e-3 { ior = 1.45; }
+                                if ui.add(egui::DragValue::new(&mut ior).range(1.0..=5.0).speed(0.01).prefix("IOR ")).changed() {
+                                    if let Some(n) = st.shader_nodes.iter_mut().find(|n| n.id == node.id) { n.value = ior; }
+                                }
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    shader_socket_control(ui, st, node.id, true, 0, "Fac ◉");
+                                });
+                            }
+                            ShaderNodeKind::Geometry => {
+                                for (i, lab) in ["Position", "Normal", "Tangent", "Backfacing"].iter().enumerate() {
+                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                        shader_socket_control(ui, st, node.id, true, i as u8, &format!("{lab} ◉"));
+                                    });
+                                }
+                            }
+                            ShaderNodeKind::CurvesInfo => {
+                                for (i, lab) in ["Is Strand", "Intercept", "Length"].iter().enumerate() {
+                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                        shader_socket_control(ui, st, node.id, true, i as u8, &format!("{lab} ◉"));
+                                    });
+                                }
+                            }
+                            ShaderNodeKind::LayerWeight => {
+                                let mut blend = st.shader_nodes.iter().find(|n| n.id == node.id).map(|n| n.value).unwrap_or(0.5);
+                                if ui.add(egui::Slider::new(&mut blend, 0.0..=1.0).text("Blend")).changed() {
+                                    if let Some(n) = st.shader_nodes.iter_mut().find(|n| n.id == node.id) { n.value = blend; }
+                                }
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    shader_socket_control(ui, st, node.id, true, 0, "Fresnel ◉");
+                                });
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    shader_socket_control(ui, st, node.id, true, 1, "Facing ◉");
+                                });
+                            }
+                            ShaderNodeKind::LightEvaluation | ShaderNodeKind::LightInfo => {
+                                ui.weak("Light data · bake defaults");
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    shader_socket_control(ui, st, node.id, true, 0, "Color ◉");
+                                });
+                            }
+                            ShaderNodeKind::LightPath => {
+                                for (i, lab) in ["Is Camera Ray", "Is Shadow Ray", "Is Diffuse Ray"].iter().enumerate() {
+                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                        shader_socket_control(ui, st, node.id, true, i as u8, &format!("{lab} ◉"));
+                                    });
+                                }
+                            }
+                            ShaderNodeKind::ObjectInfo => {
+                                for (i, lab) in ["Location", "Color", "Object Index", "Random"].iter().enumerate() {
+                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                        shader_socket_control(ui, st, node.id, true, i as u8, &format!("{lab} ◉"));
+                                    });
+                                }
+                            }
+                            ShaderNodeKind::ParticleInfo => {
+                                for (i, lab) in ["Index", "Age", "Lifetime"].iter().enumerate() {
+                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                        shader_socket_control(ui, st, node.id, true, i as u8, &format!("{lab} ◉"));
+                                    });
+                                }
+                            }
+                            ShaderNodeKind::PointInfo => {
+                                for (i, lab) in ["Position", "Radius", "Random"].iter().enumerate() {
+                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                        shader_socket_control(ui, st, node.id, true, i as u8, &format!("{lab} ◉"));
+                                    });
+                                }
+                            }
+                            ShaderNodeKind::Raycast | ShaderNodeKind::ShadowRaycast => {
+                                for (i, lab) in ["Hit", "Position", "Normal", "Distance"].iter().enumerate() {
+                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                        shader_socket_control(ui, st, node.id, true, i as u8, &format!("{lab} ◉"));
+                                    });
+                                }
+                            }
+                            ShaderNodeKind::SceneTime => {
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    shader_socket_control(ui, st, node.id, true, 0, "Seconds ◉");
+                                });
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    shader_socket_control(ui, st, node.id, true, 1, "Frame ◉");
+                                });
+                            }
+                            ShaderNodeKind::Tangent => {
+                                ui.weak("Tangent space");
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    shader_socket_control(ui, st, node.id, true, 0, "Tangent ◉");
+                                });
+                            }
+                            ShaderNodeKind::UvMap => {
+                                ui.weak("Active UV map");
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    shader_socket_control(ui, st, node.id, true, 0, "UV ◉");
+                                });
+                            }
+                            ShaderNodeKind::VolumeInfo => {
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    shader_socket_control(ui, st, node.id, true, 0, "Color ◉");
+                                });
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    shader_socket_control(ui, st, node.id, true, 1, "Density ◉");
+                                });
+                            }
+                            ShaderNodeKind::Wireframe => {
+                                ui.weak("Edge factor");
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    shader_socket_control(ui, st, node.id, true, 0, "Fac ◉");
                                 });
                             }
                         }
@@ -2871,124 +3067,251 @@ fn draw_timeline_transport(ui: &mut egui::Ui, doc: &mut Document, actions: &mut 
     });
 }
 
-/// Blender-like Rendering workspace: Render Properties + Output Properties.
-fn draw_rendering_workspace(ui: &mut egui::Ui, doc: &mut Document, st: &mut UiState, actions: &mut Vec<Action>) {
+/// Right-side Render + Output properties (Blender Properties editor in Rendering workspace).
+fn draw_rendering_properties(ui: &mut egui::Ui, doc: &mut Document, st: &mut UiState, actions: &mut Vec<Action>) {
+    if st.render_width < 64 { st.render_width = 1920; }
+    if st.render_height < 64 { st.render_height = 1080; }
+    if st.render_percent == 0 { st.render_percent = 100; }
+    if st.render_samples_viewport == 0 { st.render_samples_viewport = 16; }
+    if st.render_samples == 0 { st.render_samples = 64; }
+
     ui.horizontal(|ui| {
-        ui.label(RichText::new("Rendering").strong().size(16.0));
-        ui.weak("· Render Properties + Output Properties");
+        ui.label(RichText::new("Render").strong().size(14.0));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ui.button("Render Animation").on_hover_text("Render frame range to image sequence").clicked() {
+            if ui.small_button("Anim").on_hover_text("Render Animation").clicked() {
                 actions.push(Action::RenderAnimation);
             }
-            if ui.button("Render Image").on_hover_text("Render still at output resolution").clicked() {
+            if ui.small_button("Image").on_hover_text("Render Image (F12)").clicked() {
                 actions.push(Action::RenderImage);
             }
         });
     });
-    ui.separator();
+    ui.add_space(2.0);
 
-    egui::ScrollArea::vertical().show(ui, |ui| {
-        ui.columns(3, |cols| {
-            // --- Column 1: Render Engine / Sampling / Film ---
-            cols[0].label(RichText::new("Render Engine").strong());
-            cols[0].horizontal(|ui| {
-                ui.selectable_label(true, "Workbench");
-                ui.add_enabled(false, egui::Button::new("Cycles")).on_hover_text("Not available yet");
-                ui.add_enabled(false, egui::Button::new("EEVEE")).on_hover_text("Not available yet");
-            });
-            cols[0].add_space(6.0);
-            cols[0].label(RichText::new("Sampling").strong());
-            cols[0].weak("Realtime viewport path");
-            cols[0].weak("Offline capture: 1 sample");
-            cols[0].add_space(6.0);
-            cols[0].label(RichText::new("Film").strong());
-            cols[0].checkbox(&mut st.render_use_viewport, "Match viewport size");
-            cols[0].weak("When off, uses Resolution X/Y × %");
+    // Engine
+    ui.label(RichText::new("Render Engine").strong());
+    ui.horizontal(|ui| {
+        for (i, name) in ["Workbench", "EEVEE", "Cycles"].iter().enumerate() {
+            if ui.selectable_label(st.render_engine as usize == i, *name).clicked() {
+                st.render_engine = i as u8;
+            }
+        }
+    });
+    ui.add_space(4.0);
 
-            // --- Column 2: Dimensions (Output) ---
-            cols[1].label(RichText::new("Dimensions").strong());
-            if st.render_width < 64 { st.render_width = 1920; }
-            if st.render_height < 64 { st.render_height = 1080; }
-            if st.render_percent == 0 { st.render_percent = 100; }
-            cols[1].horizontal(|ui| {
-                ui.label("Resolution X");
-                ui.add(egui::DragValue::new(&mut st.render_width).range(64..=7680).speed(16));
+    egui::ScrollArea::vertical().auto_shrink([false, true]).show(ui, |ui| {
+        egui::CollapsingHeader::new(RichText::new("Sampling").strong())
+            .default_open(true)
+            .show(ui, |ui| {
+                ui.label(RichText::new("Viewport").weak().size(11.0));
+                ui.horizontal(|ui| {
+                    ui.label("Samples");
+                    ui.add(egui::DragValue::new(&mut st.render_samples_viewport).range(1..=4096));
+                });
+                ui.checkbox(&mut st.render_temporal_reprojection, "Temporal Reprojection");
+                ui.checkbox(&mut st.render_jittered_shadows, "Jittered Shadows");
+                ui.separator();
+                ui.label(RichText::new("Render").weak().size(11.0));
+                ui.horizontal(|ui| {
+                    ui.label("Samples");
+                    ui.add(egui::DragValue::new(&mut st.render_samples).range(1..=4096));
+                });
             });
-            cols[1].horizontal(|ui| {
-                ui.label("Resolution Y");
-                ui.add(egui::DragValue::new(&mut st.render_height).range(64..=4320).speed(16));
+
+        egui::CollapsingHeader::new(RichText::new("Shadows").strong())
+            .default_open(true)
+            .show(ui, |ui| {
+                ui.checkbox(&mut st.render_shadows, "Shadows");
             });
-            cols[1].horizontal(|ui| {
-                ui.label("%");
-                ui.add(egui::DragValue::new(&mut st.render_percent).range(1..=200).suffix("%"));
+
+        egui::CollapsingHeader::new(RichText::new("Raytracing").strong())
+            .default_open(false)
+            .show(ui, |ui| {
+                ui.checkbox(&mut st.render_raytracing, "Raytracing");
             });
-            let (ew, eh) = effective_render_size(st);
-            cols[1].label(format!("Effective: {ew} × {eh} px"));
-            cols[1].horizontal(|ui| {
-                for (label, w, h) in [("720p", 1280u32, 720u32), ("1080p", 1920, 1080), ("1440p", 2560, 1440), ("4K", 3840, 2160)] {
-                    if ui.small_button(label).clicked() {
-                        st.render_width = w;
-                        st.render_height = h;
-                        st.render_use_viewport = false;
-                        st.render_percent = 100;
+
+        egui::CollapsingHeader::new(RichText::new("Film").strong())
+            .default_open(true)
+            .show(ui, |ui| {
+                ui.checkbox(&mut st.render_film_transparent, "Transparent");
+                ui.checkbox(&mut st.render_use_viewport, "Match viewport size");
+            });
+
+        egui::CollapsingHeader::new("Depth of Field")
+            .default_open(false)
+            .show(ui, |ui| {
+                ui.checkbox(&mut st.render_dof, "Depth of Field");
+            });
+
+        egui::CollapsingHeader::new("Motion Blur")
+            .default_open(false)
+            .show(ui, |ui| {
+                ui.checkbox(&mut st.render_motion_blur, "Motion Blur");
+            });
+
+        egui::CollapsingHeader::new("Simplify")
+            .default_open(false)
+            .show(ui, |ui| {
+                ui.checkbox(&mut st.render_simplify, "Simplify");
+            });
+
+        ui.add_space(8.0);
+        ui.label(RichText::new("Output").strong().size(14.0));
+        ui.add_space(2.0);
+
+        egui::CollapsingHeader::new(RichText::new("Format").strong())
+            .default_open(true)
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Resolution X");
+                    ui.add(egui::DragValue::new(&mut st.render_width).range(64..=7680).speed(16));
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Resolution Y");
+                    ui.add(egui::DragValue::new(&mut st.render_height).range(64..=4320).speed(16));
+                });
+                ui.horizontal(|ui| {
+                    ui.label("%");
+                    ui.add(egui::DragValue::new(&mut st.render_percent).range(1..=200).suffix("%"));
+                });
+                let (ew, eh) = effective_render_size(st);
+                ui.label(format!("Effective: {ew} × {eh}"));
+                ui.horizontal(|ui| {
+                    for (label, w, h) in [("720p", 1280u32, 720), ("1080p", 1920, 1080), ("4K", 3840, 2160)] {
+                        if ui.small_button(label).clicked() {
+                            st.render_width = w;
+                            st.render_height = h;
+                            st.render_use_viewport = false;
+                            st.render_percent = 100;
+                        }
                     }
-                }
-            });
-            cols[1].horizontal(|ui| {
-                if ui.small_button("16:9").clicked() {
-                    st.render_height = ((st.render_width as f32) * 9.0 / 16.0).round().max(64.0) as u32;
-                }
-                if ui.small_button("Square").clicked() {
-                    let s = st.render_width.max(st.render_height);
-                    st.render_width = s;
-                    st.render_height = s;
-                }
-                if ui.small_button("50%").clicked() { st.render_percent = 50; }
-                if ui.small_button("100%").clicked() { st.render_percent = 100; }
+                });
             });
 
-            // --- Column 3: Frame Range + Output ---
-            let anim = &mut doc.scene.animation;
-            cols[2].label(RichText::new("Frame Range").strong());
-            cols[2].horizontal(|ui| {
-                ui.label("Start");
-                let mut fs = anim.frame_start;
-                if ui.add(egui::DragValue::new(&mut fs).speed(1)).changed() {
-                    anim.frame_start = fs.min(anim.frame_end);
-                }
-                ui.label("End");
-                let mut fe = anim.frame_end;
-                if ui.add(egui::DragValue::new(&mut fe).speed(1)).changed() {
-                    anim.frame_end = fe.max(anim.frame_start);
-                }
+        egui::CollapsingHeader::new(RichText::new("Frame Range").strong())
+            .default_open(true)
+            .show(ui, |ui| {
+                let anim = &mut doc.scene.animation;
+                ui.horizontal(|ui| {
+                    ui.label("Start");
+                    let mut fs = anim.frame_start;
+                    if ui.add(egui::DragValue::new(&mut fs).speed(1)).changed() {
+                        anim.frame_start = fs.min(anim.frame_end);
+                    }
+                    ui.label("End");
+                    let mut fe = anim.frame_end;
+                    if ui.add(egui::DragValue::new(&mut fe).speed(1)).changed() {
+                        anim.frame_end = fe.max(anim.frame_start);
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Frame Rate");
+                    let mut fps = anim.fps;
+                    if ui.add(egui::DragValue::new(&mut fps).range(1..=120).suffix(" fps")).changed() {
+                        anim.fps = fps.max(1);
+                    }
+                });
             });
-            cols[2].horizontal(|ui| {
-                ui.label("Frame Rate");
-                let mut fps = anim.fps;
-                if ui.add(egui::DragValue::new(&mut fps).range(1..=120).suffix(" fps")).changed() {
-                    anim.fps = fps.max(1);
-                }
+
+        egui::CollapsingHeader::new(RichText::new("Output").strong())
+            .default_open(true)
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("File Format");
+                    for (i, name) in ["PNG", "JPEG", "EXR"].iter().enumerate() {
+                        if ui.selectable_label(st.render_format as usize == i, *name).clicked() {
+                            st.render_format = i as u8;
+                        }
+                    }
+                });
+                ui.weak("Path: chosen when rendering");
             });
-            let nframes = (anim.frame_end - anim.frame_start + 1).max(1) as f32;
-            let secs = nframes / anim.fps.max(1) as f32;
-            cols[2].weak(format!("{nframes:.0} frames · ≈ {secs:.2}s at {} fps", anim.fps.max(1)));
-            cols[2].add_space(6.0);
-            cols[2].label(RichText::new("Output").strong());
-            cols[2].horizontal(|ui| {
-                ui.label("File Format");
-                ui.selectable_label(true, "PNG");
-                ui.add_enabled(false, egui::Button::new("JPEG"));
-                ui.add_enabled(false, egui::Button::new("EXR"));
+
+        egui::CollapsingHeader::new(RichText::new("Color Management").strong())
+            .default_open(false)
+            .show(ui, |ui| {
+                ui.weak("Display Device: sRGB");
+                ui.weak("View Transform: Standard");
+                ui.weak("Look: None");
             });
-            cols[2].weak("Color: RGBA 8-bit · no grid · no UI");
-            cols[2].weak("Path: chosen when rendering (Save dialog)");
-            cols[2].add_space(4.0);
-            cols[2].label(RichText::new("Color Management").strong());
-            cols[2].weak("Follow Scene · sRGB display");
-            cols[2].weak("View Transform: Standard");
-        });
+
+        egui::CollapsingHeader::new("Performance")
+            .default_open(false)
+            .show(ui, |ui| {
+                ui.weak("Threads: Auto");
+            });
     });
 }
+
+/// Center editor: Blender Image / Render Result (no 3D viewport).
+fn draw_render_result_view(ui: &mut egui::Ui, st: &mut UiState, actions: &mut Vec<Action>) {
+    // Header like Blender Image editor
+    ui.horizontal(|ui| {
+        ui.label(RichText::new("View").weak());
+        ui.separator();
+        ui.label(RichText::new("Image").strong());
+        ui.separator();
+        ui.label(RichText::new("Render Result").strong());
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui.button("Render Animation").clicked() {
+                actions.push(Action::RenderAnimation);
+            }
+            if ui.button("Render Image").on_hover_text("F12").clicked() {
+                actions.push(Action::RenderImage);
+            }
+            let (ew, eh) = effective_render_size(st);
+            ui.weak(format!("{ew} × {eh}"));
+        });
+    });
+    ui.add_space(4.0);
+
+    // Fill remaining space with checkerboard "empty render"
+    let avail = ui.available_size();
+    let (rect, _resp) = ui.allocate_exact_size(avail, egui::Sense::hover());
+    let painter = ui.painter_at(rect);
+
+    painter.rect_filled(rect, 0.0, egui::Color32::from_rgb(0x18, 0x18, 0x18));
+
+    // Aspect-correct frame for output resolution
+    let (ew, eh) = effective_render_size(st);
+    let aspect = ew as f32 / eh.max(1) as f32;
+    let pad = 24.0;
+    let max_w = (rect.width() - pad * 2.0).max(32.0);
+    let max_h = (rect.height() - pad * 2.0).max(32.0);
+    let (fw, fh) = if max_w / max_h > aspect {
+        (max_h * aspect, max_h)
+    } else {
+        (max_w, max_w / aspect)
+    };
+    let frame = egui::Rect::from_center_size(rect.center(), egui::vec2(fw, fh));
+
+    // Checkerboard inside frame
+    let cell = 16.0;
+    let light = egui::Color32::from_rgb(0x3a, 0x3a, 0x3a);
+    let dark = egui::Color32::from_rgb(0x2c, 0x2c, 0x2c);
+    painter.rect_filled(frame, 2.0, dark);
+    let cols_n = (frame.width() / cell).ceil() as i32;
+    let rows_n = (frame.height() / cell).ceil() as i32;
+    for row in 0..rows_n {
+        for col in 0..cols_n {
+            if (row + col) % 2 == 0 {
+                let x0 = frame.left() + col as f32 * cell;
+                let y0 = frame.top() + row as f32 * cell;
+                let r = egui::Rect::from_min_size(egui::pos2(x0, y0), egui::vec2(cell, cell)).intersect(frame);
+                painter.rect_filled(r, 0.0, light);
+            }
+        }
+    }
+    painter.rect_stroke(frame, 2.0, egui::Stroke::new(1.5, egui::Color32::from_gray(70)));
+    painter.text(
+        frame.center(),
+        egui::Align2::CENTER_CENTER,
+        "Render Result\n(empty — press Render Image)",
+        egui::FontId::proportional(14.0),
+        egui::Color32::from_gray(170),
+    );
+}
+
 
 fn draw_timeline(ui: &mut egui::Ui, doc: &mut Document, st: &mut UiState, actions: &mut Vec<Action>) {
     let anim = &mut doc.scene.animation;

@@ -21,6 +21,29 @@ pub enum ShaderNodeKind {
     Emission,
     Glossy,
     Diffuse,
+    // ---- Input (Blender Shader Editor) ----
+    AmbientOcclusion,
+    Attribute,
+    Bevel,
+    CameraData,
+    Fresnel,
+    Geometry,
+    CurvesInfo,
+    LayerWeight,
+    LightEvaluation,
+    LightInfo,
+    LightPath,
+    ObjectInfo,
+    ParticleInfo,
+    PointInfo,
+    Raycast,
+    SceneTime,
+    ShadowRaycast,
+    Tangent,
+    UvMap,
+    ColorAttribute,
+    VolumeInfo,
+    Wireframe,
 }
 
 impl ShaderNodeKind {
@@ -42,7 +65,58 @@ impl ShaderNodeKind {
             Self::Emission => "Emission",
             Self::Glossy => "Glossy BSDF",
             Self::Diffuse => "Diffuse BSDF",
+            Self::AmbientOcclusion => "Ambient Occlusion",
+            Self::Attribute => "Attribute",
+            Self::Bevel => "Bevel",
+            Self::CameraData => "Camera Data",
+            Self::Fresnel => "Fresnel",
+            Self::Geometry => "Geometry",
+            Self::CurvesInfo => "Curves Info",
+            Self::LayerWeight => "Layer Weight",
+            Self::LightEvaluation => "Light Evaluation",
+            Self::LightInfo => "Light Info",
+            Self::LightPath => "Light Path",
+            Self::ObjectInfo => "Object Info",
+            Self::ParticleInfo => "Particle Info",
+            Self::PointInfo => "Point Info",
+            Self::Raycast => "Raycast",
+            Self::SceneTime => "Scene Time",
+            Self::ShadowRaycast => "Shadow Raycast",
+            Self::Tangent => "Tangent",
+            Self::UvMap => "UV Map",
+            Self::ColorAttribute => "Color Attribute",
+            Self::VolumeInfo => "Volume Info",
+            Self::Wireframe => "Wireframe",
         }
+    }
+
+    /// True for Blender-style Input category nodes (excluding RGB/Value/TexCoord handled above).
+    pub fn is_input_extra(self) -> bool {
+        matches!(
+            self,
+            Self::AmbientOcclusion
+                | Self::Attribute
+                | Self::Bevel
+                | Self::CameraData
+                | Self::Fresnel
+                | Self::Geometry
+                | Self::CurvesInfo
+                | Self::LayerWeight
+                | Self::LightEvaluation
+                | Self::LightInfo
+                | Self::LightPath
+                | Self::ObjectInfo
+                | Self::ParticleInfo
+                | Self::PointInfo
+                | Self::Raycast
+                | Self::SceneTime
+                | Self::ShadowRaycast
+                | Self::Tangent
+                | Self::UvMap
+                | Self::ColorAttribute
+                | Self::VolumeInfo
+                | Self::Wireframe
+        )
     }
 }
 
@@ -512,7 +586,87 @@ pub fn evaluate_graph(
                 }
                 cache.insert((id, 0), SocketVal::Color(result.base_color));
             }
-            ShaderNodeKind::Output => {
+                        // Input nodes: sensible CPU defaults for bake / graph apply (not full path tracing).
+            ShaderNodeKind::AmbientOcclusion => {
+                cache.insert((id, 0), SocketVal::Color([1.0, 1.0, 1.0, 1.0]));
+            }
+            ShaderNodeKind::Attribute | ShaderNodeKind::ColorAttribute => {
+                cache.insert((id, 0), SocketVal::Color(node.color));
+            }
+            ShaderNodeKind::Bevel | ShaderNodeKind::Tangent => {
+                cache.insert((id, 0), SocketVal::Vector([0.0, 0.0, 1.0]));
+            }
+            ShaderNodeKind::CameraData => {
+                cache.insert((id, 0), SocketVal::Vector([0.0, 0.0, 1.0])); // View Vector
+                cache.insert((id, 1), SocketVal::Scalar(1.0)); // View Z Depth
+                cache.insert((id, 2), SocketVal::Scalar(1.0)); // View Distance
+            }
+            ShaderNodeKind::Fresnel | ShaderNodeKind::LayerWeight => {
+                let ior = if node.value.abs() < 1e-6 { 1.45 } else { node.value };
+                // Schlick approx at facing angle ~0.5
+                let f0 = ((ior - 1.0) / (ior + 1.0)).powi(2);
+                let f = f0 + (1.0 - f0) * 0.5;
+                cache.insert((id, 0), SocketVal::Scalar(f.clamp(0.0, 1.0)));
+                cache.insert((id, 1), SocketVal::Scalar((1.0 - f).clamp(0.0, 1.0))); // Facing for Layer Weight
+            }
+            ShaderNodeKind::Geometry => {
+                cache.insert((id, 0), SocketVal::Vector([0.0, 0.0, 0.0])); // Position
+                cache.insert((id, 1), SocketVal::Vector([0.0, 0.0, 1.0])); // Normal
+                cache.insert((id, 2), SocketVal::Vector([1.0, 0.0, 0.0])); // Tangent
+                cache.insert((id, 3), SocketVal::Scalar(0.0)); // Backfacing
+            }
+            ShaderNodeKind::CurvesInfo => {
+                cache.insert((id, 0), SocketVal::Scalar(0.0)); // Is Strand
+                cache.insert((id, 1), SocketVal::Scalar(0.5)); // Intercept
+                cache.insert((id, 2), SocketVal::Scalar(1.0)); // Length
+            }
+            ShaderNodeKind::LightEvaluation | ShaderNodeKind::LightInfo => {
+                cache.insert((id, 0), SocketVal::Color([1.0, 1.0, 1.0, 1.0]));
+                cache.insert((id, 1), SocketVal::Scalar(1.0));
+            }
+            ShaderNodeKind::LightPath => {
+                // Camera ray = 1 for surface shading approximation
+                cache.insert((id, 0), SocketVal::Scalar(1.0)); // Is Camera Ray
+                cache.insert((id, 1), SocketVal::Scalar(0.0)); // Is Shadow Ray
+                cache.insert((id, 2), SocketVal::Scalar(0.0)); // Is Diffuse Ray
+            }
+            ShaderNodeKind::ObjectInfo => {
+                cache.insert((id, 0), SocketVal::Vector([0.0, 0.0, 0.0])); // Location
+                cache.insert((id, 1), SocketVal::Color(node.color)); // Color
+                cache.insert((id, 2), SocketVal::Scalar(0.0)); // Object Index
+                cache.insert((id, 3), SocketVal::Scalar(node.value)); // Random
+            }
+            ShaderNodeKind::ParticleInfo => {
+                cache.insert((id, 0), SocketVal::Scalar(0.0)); // Index
+                cache.insert((id, 1), SocketVal::Scalar(0.0)); // Age
+                cache.insert((id, 2), SocketVal::Scalar(1.0)); // Lifetime
+            }
+            ShaderNodeKind::PointInfo => {
+                cache.insert((id, 0), SocketVal::Vector([0.0, 0.0, 0.0]));
+                cache.insert((id, 1), SocketVal::Scalar(1.0)); // Radius
+                cache.insert((id, 2), SocketVal::Scalar(node.value)); // Random
+            }
+            ShaderNodeKind::Raycast | ShaderNodeKind::ShadowRaycast => {
+                cache.insert((id, 0), SocketVal::Scalar(0.0)); // Hit
+                cache.insert((id, 1), SocketVal::Vector([0.0, 0.0, 0.0])); // Position
+                cache.insert((id, 2), SocketVal::Vector([0.0, 0.0, 1.0])); // Normal
+                cache.insert((id, 3), SocketVal::Scalar(0.0)); // Distance
+            }
+            ShaderNodeKind::SceneTime => {
+                cache.insert((id, 0), SocketVal::Scalar(0.0)); // Seconds
+                cache.insert((id, 1), SocketVal::Scalar(1.0)); // Frame
+            }
+            ShaderNodeKind::UvMap => {
+                cache.insert((id, 0), SocketVal::Vector([0.5, 0.5, 0.0]));
+            }
+            ShaderNodeKind::VolumeInfo => {
+                cache.insert((id, 0), SocketVal::Color(node.color));
+                cache.insert((id, 1), SocketVal::Scalar(node.value)); // Density
+            }
+            ShaderNodeKind::Wireframe => {
+                cache.insert((id, 0), SocketVal::Scalar(0.0));
+            }
+ShaderNodeKind::Output => {
                 // Surface (socket 0)
                 if let Some(s) = find_input(graph, id, 0, &cache) {
                     let c = s.as_color();
