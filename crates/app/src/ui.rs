@@ -698,7 +698,13 @@ fn sync_graph_to_material(doc: &mut Document, mi: usize, st: &UiState) {
     // Full evaluation + bake procedural textures into the material (what you see on the mesh).
     let g = graph_from_ui(st);
     doc.scene.materials[mi].shader_graph = Some(g.clone());
-    let mut textures = (*doc.scene.textures).clone();
+    let mut textures: Vec<_> = doc
+        .scene
+        .textures
+        .iter()
+        .filter(|t| !t.name.starts_with("__sg_"))
+        .cloned()
+        .collect();
     let eval = evaluate_graph(&g, &doc.scene.materials[mi], &textures, 256);
     apply_eval_to_material(&mut doc.scene.materials[mi], &mut textures, eval);
     // Ensure solid colors win when no base texture was produced by the graph.
@@ -725,61 +731,26 @@ fn sync_graph_live(doc: &mut Document, mi: usize, st: &UiState) {
     let frame = doc.scene.animation.frame_current as f32;
     let fps = doc.scene.animation.fps.max(1) as f32;
     let time_sec = frame / fps;
-    let textures = (*doc.scene.textures).clone();
-
-    // Live path: cheap single-point samples for immediate color feedback.
+    // Drop previous graph-baked images so we do not leak a texture every frame.
+    let mut textures: Vec<_> = doc
+        .scene
+        .textures
+        .iter()
+        .filter(|t| !t.name.starts_with("__sg_"))
+        .cloned()
+        .collect();
+    // Full eval with 128px procedural bake so texture nodes show on the mesh.
     let eval = evaluate_graph_ex(
         &g,
         &doc.scene.materials[mi],
         &textures,
-        64,
-        true,
+        128,
+        false,
         frame,
         time_sec,
     );
-    let mat = &mut doc.scene.materials[mi];
-    mat.base_color = eval.base_color;
-    mat.metallic = eval.metallic;
-    mat.roughness = eval.roughness;
-    mat.emissive = eval.emissive;
-    mat.normal_scale = eval.normal_scale;
-    mat.occlusion_strength = eval.occlusion_strength;
-    mat.displacement_scale = eval.displacement_scale;
-    mat.volume_density = eval.volume_density;
-
-    // If Base Color comes from RGB / Value / Mix / Math / a procedural texture
-    // without a real image, CLEAR the base texture so the solid color is visible
-    // (shader does: base_color * texture; a leftover texture would hide the color).
-    match principled_base_source(&g) {
-        Some(ShaderNodeKind::ImageTexture) | Some(ShaderNodeKind::Environment) => {
-            if let Some(i) = eval.base_color_tex {
-                mat.base_color_tex = Some(i);
-            }
-            // keep existing image index from ImageTexture node if eval had none
-            if mat.base_color_tex.is_none() {
-                if let Some(n) = g.nodes.iter().find(|n| {
-                    matches!(n.kind, ShaderNodeKind::ImageTexture | ShaderNodeKind::Environment)
-                }) {
-                    if let Some(idx) = n.image_index {
-                        mat.base_color_tex = Some(idx);
-                    }
-                }
-            }
-        }
-        Some(_) | None => {
-            // Procedural / solid / unlinked: show evaluated color, not an old texture
-            mat.base_color_tex = None;
-        }
-    }
-    if let Some(i) = eval.normal_tex {
-        mat.normal_tex = Some(i);
-    }
-    if let Some(i) = eval.emissive_tex {
-        mat.emissive_tex = Some(i);
-    }
-    if let Some(i) = eval.occlusion_tex {
-        mat.occlusion_tex = Some(i);
-    }
+    apply_eval_to_material(&mut doc.scene.materials[mi], &mut textures, eval);
+    doc.scene.textures = std::sync::Arc::new(textures);
     doc.touch();
 }
 
@@ -961,7 +932,7 @@ fn draw_shading_editor(ui: &mut egui::Ui, ctx: &egui::Context, doc: &mut Documen
     if st.shader_zoom < 0.2 {
         st.shader_zoom = 1.0;
     }
-    let zoom = st.shader_zoom.clamp(0.35, 2.0);
+    let zoom = st.shader_zoom.clamp(0.25, 3.0);
     let canvas_size = egui::vec2(
         ui.available_width().max(280.0),
         ui.available_height().max(160.0),
@@ -983,11 +954,15 @@ fn draw_shading_editor(ui: &mut egui::Ui, ctx: &egui::Context, doc: &mut Documen
         st.shader_pan[0] += d.x;
         st.shader_pan[1] += d.y;
     }
-    if canvas_resp.hovered() {
-        let scroll = ui.input(|i| i.smooth_scroll_delta.y);
+    // Zoom only on empty canvas (never while pointer is over a node — no "scroll inside node").
+    // Wheel: zoom view so zoom-out makes nodes SMALLER (Blender node editor).
+    if canvas_resp.hovered() && !over_node {
+        let scroll = ui.input(|i| i.smooth_scroll_delta.y + i.raw_scroll_delta.y);
         if scroll.abs() > 0.1 {
             let before = zoom;
-            let after = (before * (1.0 + scroll * 0.0012).clamp(0.88, 1.14)).clamp(0.35, 2.0);
+            // On many systems "scroll out/down" is positive Y → zoom OUT (smaller nodes)
+            let factor = (1.0 - scroll * 0.0015).clamp(0.82, 1.22);
+            let after = (before * factor).clamp(0.25, 3.0);
             if let Some(p) = pointer.or(ui.ctx().pointer_hover_pos()) {
                 let local = p - canvas_rect.min;
                 let gx = (local.x - st.shader_pan[0]) / before;
@@ -1000,7 +975,7 @@ fn draw_shading_editor(ui: &mut egui::Ui, ctx: &egui::Context, doc: &mut Documen
             }
         }
     }
-    let zoom = st.shader_zoom.clamp(0.35, 2.0);
+    let zoom = st.shader_zoom.clamp(0.25, 3.0);
     let pan0 = st.shader_pan[0];
     let pan1 = st.shader_pan[1];
 
@@ -1053,33 +1028,43 @@ fn draw_shading_editor(ui: &mut egui::Ui, ctx: &egui::Context, doc: &mut Documen
     let mut delete_node: Option<u64> = None;
 
     for node in nodes {
-        let sock_rows = node.kind.inputs().len().max(node.kind.outputs().len()).max(1);
+        let n_in = node.kind.inputs().len();
+        let n_out = node.kind.outputs().len();
+        let sock_rows = n_in.max(n_out).max(1);
+        // Extra rows for built-in controls (color ramp, rgb, math…)
+        let extra = match node.kind {
+            ShaderNodeKind::ColorRamp => 6,
+            ShaderNodeKind::Rgb | ShaderNodeKind::Value | ShaderNodeKind::Math => 1,
+            ShaderNodeKind::ImageTexture => 1,
+            _ => 0,
+        };
         let default_w = match node.kind {
             ShaderNodeKind::Principled => 230.0,
+            ShaderNodeKind::ColorRamp => 220.0,
             _ if node.kind.category() == "Texture" => 210.0,
             ShaderNodeKind::Output | ShaderNodeKind::WorldOutput | ShaderNodeKind::LightOutput => 160.0,
             _ => 170.0,
         };
-        // Blender nodes grow with sockets — fixed formula, never runaway
-        let default_h = (28.0 + sock_rows as f32 * 18.0 + 10.0).clamp(56.0, 280.0);
-        let stored = st
+        // FIXED height from content formula — not user-resizable, no inner scroll
+        let fixed_h = (26.0 + (sock_rows + extra) as f32 * 18.0 + 12.0).clamp(56.0, 340.0);
+        let stored_w = st
             .shader_node_sizes
             .get(&node.id)
-            .copied()
-            .unwrap_or([default_w, default_h]);
-        let gw = stored[0].clamp(130.0, 320.0);
-        let gh = stored[1].clamp(52.0, 300.0);
+            .map(|s| s[0])
+            .unwrap_or(default_w);
+        let gw = stored_w.clamp(120.0, 400.0);
+        let gh = fixed_h; // height locked
 
-        // graph → screen (do not scale node size by zoom — Blender scales the view as a whole;
-        // we approximate by scaling positions only, mild size scale for readability)
+        // Blender-like zoom: positions *and* node size scale together.
+        // Inner style (fonts, spacing) is scaled by the same zoom so content matches the frame.
         let screen_pos = egui::pos2(
             canvas_rect.min.x + pan0 + node.pos[0] * zoom,
             canvas_rect.min.y + pan1 + node.pos[1] * zoom,
         );
-        let sw = gw * zoom.clamp(0.85, 1.15);
-        let sh = gh * zoom.clamp(0.85, 1.15);
+        let sw = (gw * zoom).max(36.0);
+        let sh = (gh * zoom).max(28.0);
         let approx = egui::Rect::from_min_size(screen_pos, egui::vec2(sw, sh));
-        if !approx.intersects(canvas_rect.expand(4.0)) {
+        if !approx.intersects(canvas_rect.expand(8.0)) {
             continue;
         }
 
@@ -1090,17 +1075,30 @@ fn draw_shading_editor(ui: &mut egui::Ui, ctx: &egui::Context, doc: &mut Documen
             .movable(false)
             .constrain_to(canvas_rect)
             .show(ctx, |ui| {
+                // Scale fonts + spacing with view zoom (so zoom-out = smaller, cramped nodes)
+                {
+                    let mut style = (*ui.ctx().style()).clone();
+                    let z = zoom.clamp(0.35, 2.5);
+                    style.spacing.item_spacing = egui::vec2(4.0 * z, 2.0 * z);
+                    style.spacing.button_padding = egui::vec2(3.0 * z, 1.5 * z);
+                    style.spacing.indent = 8.0 * z;
+                    for ts in style.text_styles.values_mut() {
+                        ts.size = (ts.size * z).clamp(7.0, 18.0);
+                    }
+                    ui.set_style(style);
+                }
                 let frame = egui::Frame::none()
                     .fill(egui::Color32::from_rgb(0x2b, 0x2b, 0x2b))
                     .stroke(egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(0x14, 0x14, 0x14)))
-                    .rounding(egui::Rounding::same(4.0))
-                    .inner_margin(0.0);
+                    .rounding(egui::Rounding::same((4.0 * zoom).clamp(2.0, 6.0)))
+                    .inner_margin(egui::Margin::same(0.0));
                 frame.show(ui, |ui| {
                     ui.set_width(sw);
                     ui.set_max_width(sw);
+                    ui.set_min_width(sw);
 
                     // ---- Title bar (only move handle) ----
-                    let title_h = 22.0_f32;
+                    let title_h = (22.0 * zoom).clamp(14.0, 28.0);
                     let (title_rect, title_resp) =
                         ui.allocate_exact_size(egui::vec2(sw, title_h), egui::Sense::drag());
                     ui.painter().rect_filled(
@@ -1125,7 +1123,7 @@ fn draw_shading_editor(ui: &mut egui::Ui, ctx: &egui::Context, doc: &mut Documen
                         title_rect.left_center() + egui::vec2(8.0, 0.0),
                         egui::Align2::LEFT_CENTER,
                         node.kind.title(),
-                        egui::FontId::proportional(12.0),
+                        egui::FontId::proportional((12.0 * zoom).clamp(8.0, 16.0)),
                         egui::Color32::WHITE,
                     );
                     let close_r = egui::Rect::from_center_size(
@@ -1174,36 +1172,21 @@ fn draw_shading_editor(ui: &mut egui::Ui, ctx: &egui::Context, doc: &mut Documen
                             // Compact property controls
                             match node.kind {
                                 ShaderNodeKind::ColorRamp => {
-                                    // Blender Color Ramp widget (approx):
-                                    // Fac in → Color + Alpha out; multi-stop gradient;
-                                    // Linear / Ease / Constant / Cardinal / B-Spline.
                                     use forge_core::{
-                                        color_ramp_eval_stops, ramp_get_stops, ramp_stop_count,
-                                        COLOR_RAMP_MAX_STOPS,
+                                        color_ramp_eval_stops, ramp_get_stops, COLOR_RAMP_MAX_STOPS,
                                     };
                                     let (cols, poss, interp, _cm) = ramp_get_stops(&node);
                                     let n_stops = cols.len();
-                                    let active = st
-                                        .shader_node_sizes
-                                        .get(&node.id)
-                                        .map(|s| s[1] as usize) // reuse height slot as active stop index storage hack — better use mode high
-                                        .unwrap_or(0)
-                                        .min(n_stops.saturating_sub(1));
-                                    // Prefer storing active stop in unused high part of mode… but mode holds interp.
-                                    // Use a side channel: props doesn't have room. Keep local via drag on markers.
-                                    // Active index: encode in name_prop as digit if empty-ish
                                     let active = {
                                         let a = node.name_prop.parse::<usize>().unwrap_or(0);
                                         a.min(n_stops.saturating_sub(1))
                                     };
-
-                                    // Gradient preview
-                                    let bar_h = 16.0_f32;
-                                    let (bar_rect, bar_resp) = ui.allocate_exact_size(
-                                        egui::vec2(ui.available_width().max(80.0), bar_h),
-                                        egui::Sense::click_and_drag(),
+                                    let bar_h = (14.0 * zoom).clamp(10.0, 18.0);
+                                    let (bar_rect, _) = ui.allocate_exact_size(
+                                        egui::vec2(ui.available_width().max(60.0), bar_h),
+                                        egui::Sense::hover(),
                                     );
-                                    let segs = 48;
+                                    let segs = 40;
                                     for i in 0..segs {
                                         let t0 = i as f32 / segs as f32;
                                         let t1 = (i + 1) as f32 / segs as f32;
@@ -1225,212 +1208,58 @@ fn draw_shading_editor(ui: &mut egui::Ui, ctx: &egui::Context, doc: &mut Documen
                                             ),
                                         );
                                     }
-                                    ui.painter().rect_stroke(
-                                        bar_rect,
-                                        0.0,
-                                        egui::Stroke::new(1.0_f32, egui::Color32::from_gray(70)),
-                                    );
-                                    // Stop markers
-                                    for (si, &p) in poss.iter().enumerate() {
-                                        let x = bar_rect.left() + bar_rect.width() * p.clamp(0.0, 1.0);
-                                        let marker = egui::Rect::from_center_size(
-                                            egui::pos2(x, bar_rect.bottom() + 4.0),
-                                            egui::vec2(8.0, 8.0),
-                                        );
-                                        let selected = si == active;
-                                        ui.painter().rect_filled(
-                                            marker,
-                                            1.0,
-                                            if selected {
-                                                egui::Color32::from_rgb(0xf0, 0xc0, 0x60)
-                                            } else {
-                                                egui::Color32::from_gray(180)
-                                            },
-                                        );
-                                        let mresp = ui.interact(
-                                            marker.expand(2.0),
-                                            ui.id().with(("stop", node.id, si)),
-                                            egui::Sense::click_and_drag(),
-                                        );
-                                        if mresp.clicked() {
-                                            if let Some(n) =
-                                                st.shader_nodes.iter_mut().find(|n| n.id == node.id)
-                                            {
-                                                n.name_prop = si.to_string();
-                                            }
-                                        }
-                                        if mresp.dragged() {
-                                            let dx = mresp.drag_delta().x / bar_rect.width().max(1.0);
-                                            if let Some(n) =
-                                                st.shader_nodes.iter_mut().find(|n| n.id == node.id)
-                                            {
-                                                let idx = 12 + si;
-                                                if idx < 16 {
-                                                    n.props[idx] =
-                                                        (n.props[idx] + dx).clamp(0.0, 1.0);
-                                                    // if still default zeros for pos1, set
-                                                    if si == 1 && n.props[13].abs() < 1e-8 && dx != 0.0 {
-                                                        n.props[13] = (p + dx).clamp(0.0, 1.0);
+                                    let interps = ["Linear", "Ease", "Constant", "Cardinal", "B-Spline"];
+                                    let m = (interp as usize).min(interps.len() - 1);
+                                    egui::ComboBox::from_id_salt(("ramp_interp", node.id))
+                                        .selected_text(interps[m])
+                                        .width((90.0 * zoom).clamp(60.0, 120.0))
+                                        .show_ui(ui, |ui| {
+                                            for (i, name) in interps.iter().enumerate() {
+                                                if ui.selectable_label(m == i, *name).clicked() {
+                                                    if let Some(n) = st.shader_nodes.iter_mut().find(|n| n.id == node.id) {
+                                                        n.mode = (n.mode & !0x0f) | (i as u8);
                                                     }
-                                                    n.name_prop = si.to_string();
                                                 }
                                             }
-                                        }
-                                    }
-
-                                    // Active stop color + position (Blender: selected stop controls)
+                                        });
                                     ui.horizontal(|ui| {
-                                        ui.label(format!("Stop {}", active + 1));
-                                        let mut rgb = [
-                                            lin_to_srgb8(cols[active][0]),
-                                            lin_to_srgb8(cols[active][1]),
-                                            lin_to_srgb8(cols[active][2]),
-                                        ];
-                                        let mut alpha = cols[active][3];
-                                        if ui.color_edit_button_srgb(&mut rgb).changed() {
-                                            if let Some(n) =
-                                                st.shader_nodes.iter_mut().find(|n| n.id == node.id)
-                                            {
-                                                let lin = [
-                                                    srgb8_to_lin(rgb[0]),
-                                                    srgb8_to_lin(rgb[1]),
-                                                    srgb8_to_lin(rgb[2]),
-                                                    alpha,
-                                                ];
-                                                if active == 0 {
-                                                    n.color = lin;
-                                                } else {
-                                                    let base = (active - 1) * 4;
-                                                    n.props[base] = lin[0];
-                                                    n.props[base + 1] = lin[1];
-                                                    n.props[base + 2] = lin[2];
-                                                    n.props[base + 3] = lin[3];
-                                                }
-                                            }
-                                        }
-                                        ui.label("A");
-                                        if ui
-                                            .add(
-                                                egui::DragValue::new(&mut alpha)
-                                                    .speed(0.01)
-                                                    .clamp_range(0.0..=1.0),
-                                            )
-                                            .changed()
-                                        {
-                                            if let Some(n) =
-                                                st.shader_nodes.iter_mut().find(|n| n.id == node.id)
-                                            {
-                                                if active == 0 {
-                                                    n.color[3] = alpha;
-                                                } else {
-                                                    n.props[(active - 1) * 4 + 3] = alpha;
-                                                }
-                                            }
-                                        }
-                                    });
-                                    let mut pos = poss[active];
-                                    ui.horizontal(|ui| {
-                                        ui.label("Pos");
-                                        if ui
-                                            .add(
-                                                egui::DragValue::new(&mut pos)
-                                                    .speed(0.01)
-                                                    .clamp_range(0.0..=1.0),
-                                            )
-                                            .changed()
-                                        {
-                                            if let Some(n) =
-                                                st.shader_nodes.iter_mut().find(|n| n.id == node.id)
-                                            {
-                                                n.props[12 + active] = pos;
-                                                if active == 0 && n.props[12].abs() < 1e-8 {
-                                                    n.props[12] = pos;
-                                                }
-                                            }
-                                        }
-                                    });
-
-                                    // + / − stops (Blender: add/remove elements)
-                                    ui.horizontal(|ui| {
-                                        if ui.small_button("+").on_hover_text("Add stop").clicked()
-                                            && n_stops < COLOR_RAMP_MAX_STOPS
-                                        {
-                                            if let Some(n) =
-                                                st.shader_nodes.iter_mut().find(|n| n.id == node.id)
-                                            {
+                                        if ui.small_button("+").clicked() && n_stops < COLOR_RAMP_MAX_STOPS {
+                                            if let Some(n) = st.shader_nodes.iter_mut().find(|n| n.id == node.id) {
                                                 let new_n = n_stops + 1;
                                                 n.value = new_n as f32;
                                                 let i = new_n - 1;
-                                                // mid gray default for new stop
-                                                let base = (i - 1) * 4;
+                                                let base = (i.saturating_sub(1)) * 4;
                                                 if base + 3 < 16 {
                                                     n.props[base] = 0.5;
                                                     n.props[base + 1] = 0.5;
                                                     n.props[base + 2] = 0.5;
                                                     n.props[base + 3] = 1.0;
                                                 }
-                                                n.props[12 + i] = (i as f32) / ((new_n - 1) as f32);
-                                                n.name_prop = i.to_string();
+                                                n.props[12 + i] = (i as f32) / ((new_n - 1) as f32).max(1.0);
                                             }
                                         }
-                                        if ui.small_button("−").on_hover_text("Remove stop").clicked()
-                                            && n_stops > 2
-                                        {
-                                            if let Some(n) =
-                                                st.shader_nodes.iter_mut().find(|n| n.id == node.id)
-                                            {
+                                        if ui.small_button("−").clicked() && n_stops > 2 {
+                                            if let Some(n) = st.shader_nodes.iter_mut().find(|n| n.id == node.id) {
                                                 n.value = (n_stops - 1) as f32;
-                                                let a = active.min(n_stops - 2);
-                                                n.name_prop = a.to_string();
                                             }
                                         }
                                     });
-
-                                    // Interpolation (Blender: Linear, Ease, Constant, Cardinal, B-Spline)
-                                    let interps = [
-                                        "Linear",
-                                        "Ease",
-                                        "Constant",
-                                        "Cardinal",
-                                        "B-Spline",
+                                    // Active stop color
+                                    let mut rgb = [
+                                        lin_to_srgb8(cols[active][0]),
+                                        lin_to_srgb8(cols[active][1]),
+                                        lin_to_srgb8(cols[active][2]),
                                     ];
-                                    let m = (interp as usize).min(interps.len() - 1);
-                                    egui::ComboBox::from_id_salt(("ramp_interp", node.id))
-                                        .selected_text(interps[m])
-                                        .width(100.0)
-                                        .show_ui(ui, |ui| {
-                                            for (i, name) in interps.iter().enumerate() {
-                                                if ui.selectable_label(m == i, *name).clicked() {
-                                                    if let Some(n) = st
-                                                        .shader_nodes
-                                                        .iter_mut()
-                                                        .find(|n| n.id == node.id)
-                                                    {
-                                                        n.mode = (n.mode & !0x0f) | (i as u8);
-                                                    }
-                                                }
+                                    if ui.color_edit_button_srgb(&mut rgb).changed() {
+                                        if let Some(n) = st.shader_nodes.iter_mut().find(|n| n.id == node.id) {
+                                            let lin = [srgb8_to_lin(rgb[0]), srgb8_to_lin(rgb[1]), srgb8_to_lin(rgb[2]), cols[active][3]];
+                                            if active == 0 { n.color = lin; }
+                                            else {
+                                                let b = (active - 1) * 4;
+                                                n.props[b] = lin[0]; n.props[b+1] = lin[1]; n.props[b+2] = lin[2]; n.props[b+3] = lin[3];
                                             }
-                                        });
-                                    // Color mode (stored; eval currently RGB blend)
-                                    let modes = ["RGB", "HSV", "HSL"];
-                                    let cm = ((_cm as usize).min(2));
-                                    egui::ComboBox::from_id_salt(("ramp_cm", node.id))
-                                        .selected_text(modes[cm])
-                                        .width(70.0)
-                                        .show_ui(ui, |ui| {
-                                            for (i, name) in modes.iter().enumerate() {
-                                                if ui.selectable_label(cm == i, *name).clicked() {
-                                                    if let Some(n) = st
-                                                        .shader_nodes
-                                                        .iter_mut()
-                                                        .find(|n| n.id == node.id)
-                                                    {
-                                                        n.mode = (n.mode & !0x30) | ((i as u8) << 4);
-                                                    }
-                                                }
-                                            }
-                                        });
-                                    let _ = bar_resp;
+                                        }
+                                    }
                                 }
                                 ShaderNodeKind::Rgb => {
                                     let mut rgb = [
@@ -1439,119 +1268,319 @@ fn draw_shading_editor(ui: &mut egui::Ui, ctx: &egui::Context, doc: &mut Documen
                                         lin_to_srgb8(node.color[2]),
                                     ];
                                     if ui.color_edit_button_srgb(&mut rgb).changed() {
-                                        if let Some(n) =
-                                            st.shader_nodes.iter_mut().find(|n| n.id == node.id)
-                                        {
-                                            n.color = [
-                                                srgb8_to_lin(rgb[0]),
-                                                srgb8_to_lin(rgb[1]),
-                                                srgb8_to_lin(rgb[2]),
-                                                n.color[3],
-                                            ];
-                                        }
-                                    }
-                                }
-                                ShaderNodeKind::Value => {
-                                    let mut v = node.value;
-                                    if ui
-                                        .add(
-                                            egui::DragValue::new(&mut v)
-                                                .speed(0.01)
-                                                .clamp_range(0.0..=100.0),
-                                        )
-                                        .changed()
-                                    {
-                                        if let Some(n) =
-                                            st.shader_nodes.iter_mut().find(|n| n.id == node.id)
-                                        {
-                                            n.value = v;
+                                        if let Some(n) = st.shader_nodes.iter_mut().find(|n| n.id == node.id) {
+                                            n.color = [srgb8_to_lin(rgb[0]), srgb8_to_lin(rgb[1]), srgb8_to_lin(rgb[2]), n.color[3]];
                                         }
                                     }
                                 }
                                 ShaderNodeKind::Math => {
-                                    let ops = [
-                                        "Add", "Sub", "Mul", "Div", "Pow", "Sin", "Cos", "Clamp",
-                                    ];
-                                    let m = (node.mode as usize).min(ops.len() - 1);
+                                    let ops = ["Add","Subtract","Multiply","Divide","Power","Logarithm","Sqrt","Inverse Sqrt",
+                                        "Absolute","Exponent","Minimum","Maximum","Less Than","Greater Than","Sign","Compare",
+                                        "Smooth Min","Smooth Max","Round","Floor","Ceil","Truncate","Fraction","Modulo",
+                                        "Wrap","Snap","Ping-Pong","Sine","Cosine","Tangent","Arcsine","Arccosine","Arctangent",
+                                        "Arctan2","Sinh","Cosh","Tanh","To Radians","To Degrees"];
+                                    let mode = (node.mode as usize).min(ops.len() - 1);
                                     egui::ComboBox::from_id_salt(("math", node.id))
-                                        .selected_text(ops[m])
-                                        .width(90.0)
+                                        .selected_text(ops[mode])
+                                        .width((100.0 * zoom).clamp(70.0, 140.0))
                                         .show_ui(ui, |ui| {
-                                            for (i, o) in ops.iter().enumerate() {
-                                                if ui.selectable_label(m == i, *o).clicked() {
-                                                    if let Some(n) = st
-                                                        .shader_nodes
-                                                        .iter_mut()
-                                                        .find(|n| n.id == node.id)
-                                                    {
+                                            for (i, name) in ops.iter().enumerate() {
+                                                if ui.selectable_label(mode == i, *name).clicked() {
+                                                    if let Some(n) = st.shader_nodes.iter_mut().find(|n| n.id == node.id) {
                                                         n.mode = i as u8;
                                                     }
                                                 }
                                             }
                                         });
                                 }
-                                ShaderNodeKind::ImageTexture => {
-                                    let ntex = doc.scene.textures.len();
-                                    if ntex > 0 {
-                                        egui::ComboBox::from_id_salt(("img", node.id))
-                                            .selected_text(
-                                                node.image_index
-                                                    .and_then(|i| doc.scene.textures.get(i))
-                                                    .map(|t| t.name.as_str())
-                                                    .unwrap_or("(none)"),
-                                            )
-                                            .width(120.0)
-                                            .show_ui(ui, |ui| {
-                                                if ui
-                                                    .selectable_label(
-                                                        node.image_index.is_none(),
-                                                        "(none)",
-                                                    )
-                                                    .clicked()
-                                                {
-                                                    if let Some(n) = st
-                                                        .shader_nodes
-                                                        .iter_mut()
-                                                        .find(|n| n.id == node.id)
-                                                    {
-                                                        n.image_index = None;
+                                ShaderNodeKind::Mix | ShaderNodeKind::MixShader => {
+                                    let modes = ["Mix","Darken","Multiply","Lighten","Screen","Overlay","Soft Light","Linear Light","Difference","Exclusion","Add","Subtract","Divide"];
+                                    let m = (node.mode as usize).min(modes.len() - 1);
+                                    egui::ComboBox::from_id_salt(("mix", node.id))
+                                        .selected_text(modes[m])
+                                        .width((90.0 * zoom).clamp(60.0, 120.0))
+                                        .show_ui(ui, |ui| {
+                                            for (i, name) in modes.iter().enumerate() {
+                                                if ui.selectable_label(m == i, *name).clicked() {
+                                                    if let Some(n) = st.shader_nodes.iter_mut().find(|n| n.id == node.id) {
+                                                        n.mode = i as u8;
                                                     }
                                                 }
-                                                for i in 0..ntex {
-                                                    if ui
-                                                        .selectable_label(
-                                                            node.image_index == Some(i),
-                                                            &doc.scene.textures[i].name,
-                                                        )
-                                                        .clicked()
-                                                    {
-                                                        if let Some(n) = st
-                                                            .shader_nodes
-                                                            .iter_mut()
-                                                            .find(|n| n.id == node.id)
-                                                        {
-                                                            n.image_index = Some(i);
+                                            }
+                                        });
+                                }
+                                ShaderNodeKind::ImageTexture | ShaderNodeKind::Environment => {
+                                    let ntex = doc.scene.textures.len();
+                                    egui::ComboBox::from_id_salt(("img", node.id))
+                                        .selected_text(
+                                            node.image_index.and_then(|i| doc.scene.textures.get(i)).map(|t| t.name.as_str()).unwrap_or("(none)")
+                                        )
+                                        .width((110.0 * zoom).clamp(70.0, 150.0))
+                                        .show_ui(ui, |ui| {
+                                            if ui.selectable_label(node.image_index.is_none(), "(none)").clicked() {
+                                                if let Some(n) = st.shader_nodes.iter_mut().find(|n| n.id == node.id) { n.image_index = None; }
+                                            }
+                                            for i in 0..ntex {
+                                                if ui.selectable_label(node.image_index == Some(i), &doc.scene.textures[i].name).clicked() {
+                                                    if let Some(n) = st.shader_nodes.iter_mut().find(|n| n.id == node.id) { n.image_index = Some(i); }
+                                                }
+                                            }
+                                        });
+                                    let interp = ["Linear", "Closest", "Cubic", "Smart"];
+                                    let m = (node.mode as usize).min(3);
+                                    egui::ComboBox::from_id_salt(("imgi", node.id))
+                                        .selected_text(interp[m])
+                                        .width((80.0 * zoom).clamp(50.0, 110.0))
+                                        .show_ui(ui, |ui| {
+                                            for (i, name) in interp.iter().enumerate() {
+                                                if ui.selectable_label(m == i, *name).clicked() {
+                                                    if let Some(n) = st.shader_nodes.iter_mut().find(|n| n.id == node.id) { n.mode = i as u8; }
+                                                }
+                                            }
+                                        });
+                                }
+                                ShaderNodeKind::Noise | ShaderNodeKind::Wave | ShaderNodeKind::Voronoi
+                                | ShaderNodeKind::Magic | ShaderNodeKind::Gabor
+                                | ShaderNodeKind::Gradient | ShaderNodeKind::WhiteNoise => {
+                                    // Dimensions / type mode
+                                    let labels = match node.kind {
+                                        ShaderNodeKind::Noise => &["1D","2D","3D","4D"][..],
+                                        ShaderNodeKind::Wave => &["Bands","Rings"][..],
+                                        ShaderNodeKind::Voronoi => &["F1","F2","Smooth F1","Distance to Edge","N-Sphere"][..],
+                                        ShaderNodeKind::Gradient => &["Linear","Quadratic","Easing","Diagonal","Spherical","Quadratic Sphere","Radial"][..],
+                                        ShaderNodeKind::Gabor => &["2D","3D"][..],
+                                        _ => &["Default"][..],
+                                    };
+                                    if labels.len() > 1 {
+                                        let m = (node.mode as usize).min(labels.len() - 1);
+                                        egui::ComboBox::from_id_salt(("texmode", node.id))
+                                            .selected_text(labels[m])
+                                            .width((100.0 * zoom).clamp(60.0, 130.0))
+                                            .show_ui(ui, |ui| {
+                                                for (i, name) in labels.iter().enumerate() {
+                                                    if ui.selectable_label(m == i, *name).clicked() {
+                                                        if let Some(n) = st.shader_nodes.iter_mut().find(|n| n.id == node.id) {
+                                                            n.mode = i as u8;
                                                         }
                                                     }
                                                 }
                                             });
                                     }
                                 }
+                                ShaderNodeKind::Script => {
+                                    let mut expr = node.name_prop.clone();
+                                    if ui.text_edit_singleline(&mut expr).changed() {
+                                        if let Some(n) = st.shader_nodes.iter_mut().find(|n| n.id == node.id) {
+                                            n.name_prop = expr;
+                                        }
+                                    }
+                                }
+                                ShaderNodeKind::Attribute | ShaderNodeKind::UvMap | ShaderNodeKind::ColorAttribute => {
+                                    let mut name = node.name_prop.clone();
+                                    if ui.text_edit_singleline(&mut name).changed() {
+                                        if let Some(n) = st.shader_nodes.iter_mut().find(|n| n.id == node.id) {
+                                            n.name_prop = name;
+                                        }
+                                    }
+                                }
                                 _ => {}
                             }
 
-                            // Inputs
-                            for (i, sock) in node.kind.inputs().iter().enumerate() {
-                                let _ = shader_socket_control(
-                                    ui,
-                                    st,
-                                    node.id,
-                                    false,
-                                    i as u8,
-                                    &format!("●  {}", sock.name),
-                                );
+                            // Blender: each INPUT is connectable (●) AND has a default value
+                            // you can drag when nothing is linked. Linked value overrides.
+                            {
+                                let inputs = node.kind.inputs();
+                                let mut float_i = 0usize;
+                                for (i, sock) in inputs.iter().enumerate() {
+                                    ui.horizontal(|ui| {
+                                        let _ = shader_socket_control(
+                                            ui,
+                                            st,
+                                            node.id,
+                                            false,
+                                            i as u8,
+                                            "●",
+                                        );
+                                        ui.label(sock.name);
+                                        match sock.ty {
+                                            forge_core::SocketType::Float => {
+                                                let mut v = if sock.name == "Scale" {
+                                                    if node.value.abs() < 1e-8 { 5.0 } else { node.value }
+                                                } else if sock.name == "Detail" {
+                                                    if node.props[0].abs() < 1e-8 { 2.0 } else { node.props[0] }
+                                                } else if sock.name == "W" {
+                                                    node.props[5]
+                                                } else if float_i == 0 {
+                                                    node.value
+                                                } else {
+                                                    node.props
+                                                        .get(float_i.saturating_sub(1))
+                                                        .copied()
+                                                        .unwrap_or(0.0)
+                                                };
+                                                if matches!(node.kind, ShaderNodeKind::Principled) {
+                                                    v = match sock.name {
+                                                        "Metallic" => node.props[0],
+                                                        "Roughness" => {
+                                                            if node.props[1].abs() < 1e-8 {
+                                                                0.5
+                                                            } else {
+                                                                node.props[1]
+                                                            }
+                                                        }
+                                                        "IOR" => {
+                                                            if node.props[2].abs() < 1e-8 {
+                                                                1.45
+                                                            } else {
+                                                                node.props[2]
+                                                            }
+                                                        }
+                                                        "Alpha" => {
+                                                            if node.props[3].abs() < 1e-8 {
+                                                                1.0
+                                                            } else {
+                                                                node.props[3]
+                                                            }
+                                                        }
+                                                        _ => v,
+                                                    };
+                                                }
+                                                let (speed, range) = match sock.name {
+                                                    "Scale" | "Detail" | "Distortion" | "Lacunarity" => {
+                                                        (0.05, 0.0..=50.0)
+                                                    }
+                                                    "Fac" | "Factor" | "Metallic" | "Roughness"
+                                                    | "Alpha" | "Saturation" | "Hue" | "Value" => {
+                                                        (0.01, 0.0..=1.0)
+                                                    }
+                                                    "Strength" | "Emission Strength" | "Coat Weight"
+                                                    | "Sheen Weight" | "Subsurface Weight"
+                                                    | "Transmission Weight" => (0.02, 0.0..=10.0),
+                                                    "IOR" => (0.01, 1.0..=3.0),
+                                                    "Gamma" | "Bright" | "Contrast" => {
+                                                        (0.02, -2.0..=4.0)
+                                                    }
+                                                    "Temperature" => (10.0, 800.0..=12000.0),
+                                                    "Distance" | "Randomness" | "Smoothness" => {
+                                                        (0.01, 0.0..=1.0)
+                                                    }
+                                                    "W" => (0.01, -10.0..=10.0),
+                                                    _ => (0.02, -100.0..=100.0),
+                                                };
+                                                if ui
+                                                    .add(
+                                                        egui::DragValue::new(&mut v)
+                                                            .speed(speed)
+                                                            .clamp_range(range)
+                                                            .min_decimals(2)
+                                                            .max_decimals(3),
+                                                    )
+                                                    .changed()
+                                                {
+                                                    if let Some(n) = st
+                                                        .shader_nodes
+                                                        .iter_mut()
+                                                        .find(|n| n.id == node.id)
+                                                    {
+                                                        // Scale is the primary texture control → always node.value
+                                                        if sock.name == "Scale" {
+                                                            n.value = v;
+                                                        } else if float_i == 0 {
+                                                            n.value = v;
+                                                        } else if float_i - 1 < 16 {
+                                                            n.props[float_i - 1] = v;
+                                                        }
+                                                        // Named props for common texture fields
+                                                        match sock.name {
+                                                            "Detail" => n.props[0] = v,
+                                                            "Lacunarity" => n.props[2] = v,
+                                                            "Distortion" | "Randomness" => n.props[3] = v,
+                                                            "Smoothness" => n.props[4] = v,
+                                                            "W" => n.props[5] = v,
+                                                            "Metallic" => n.props[0] = v,
+                                                            "Roughness" => n.props[1] = v,
+                                                            "IOR" => n.props[2] = v,
+                                                            "Alpha" => n.props[3] = v,
+                                                            _ => {}
+                                                        }
+                                                    }
+                                                }
+                                                float_i += 1;
+                                            }
+                                            forge_core::SocketType::Color
+                                            | forge_core::SocketType::Shader => {
+                                                // Default color when unlinked (still connectable via ●)
+                                                let mut rgb = [
+                                                    lin_to_srgb8(node.color[0]),
+                                                    lin_to_srgb8(node.color[1]),
+                                                    lin_to_srgb8(node.color[2]),
+                                                ];
+                                                if ui.color_edit_button_srgb(&mut rgb).changed() {
+                                                    if let Some(n) = st
+                                                        .shader_nodes
+                                                        .iter_mut()
+                                                        .find(|n| n.id == node.id)
+                                                    {
+                                                        n.color = [
+                                                            srgb8_to_lin(rgb[0]),
+                                                            srgb8_to_lin(rgb[1]),
+                                                            srgb8_to_lin(rgb[2]),
+                                                            n.color[3],
+                                                        ];
+                                                    }
+                                                }
+                                            }
+                                            forge_core::SocketType::Vector => {
+                                                // Compact XYZ defaults in props when useful
+                                                let base = float_i.min(13);
+                                                let mut x = node.props.get(base).copied().unwrap_or(0.0);
+                                                let mut y =
+                                                    node.props.get(base + 1).copied().unwrap_or(0.0);
+                                                let mut z =
+                                                    node.props.get(base + 2).copied().unwrap_or(0.0);
+                                                let mut changed = false;
+                                                changed |= ui
+                                                    .add(
+                                                        egui::DragValue::new(&mut x)
+                                                            .speed(0.01)
+                                                            .prefix("X "),
+                                                    )
+                                                    .changed();
+                                                changed |= ui
+                                                    .add(
+                                                        egui::DragValue::new(&mut y)
+                                                            .speed(0.01)
+                                                            .prefix("Y "),
+                                                    )
+                                                    .changed();
+                                                changed |= ui
+                                                    .add(
+                                                        egui::DragValue::new(&mut z)
+                                                            .speed(0.01)
+                                                            .prefix("Z "),
+                                                    )
+                                                    .changed();
+                                                if changed {
+                                                    if let Some(n) = st
+                                                        .shader_nodes
+                                                        .iter_mut()
+                                                        .find(|n| n.id == node.id)
+                                                    {
+                                                        if base + 2 < 16 {
+                                                            n.props[base] = x;
+                                                            n.props[base + 1] = y;
+                                                            n.props[base + 2] = z;
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            _ => {}
+                                        }
+                                    });
+                                }
                             }
-                            // Outputs
+
+                            // Outputs: connectable only (right side)
                             for (i, sock) in node.kind.outputs().iter().enumerate() {
                                 ui.with_layout(
                                     egui::Layout::right_to_left(egui::Align::Center),
@@ -1562,31 +1591,69 @@ fn draw_shading_editor(ui: &mut egui::Ui, ctx: &egui::Context, doc: &mut Documen
                                             node.id,
                                             true,
                                             i as u8,
-                                            &format!("{}  ◉", sock.name),
+                                            "◉",
                                         );
+                                        ui.label(sock.name);
                                     },
                                 );
                             }
+
                         });
                         ui.add_space(6.0);
                     });
                     ui.add_space(4.0);
 
-                    // Width resize on right edge only (simple, stable)
+                    // Blender: resize width by dragging left or right border
                     let node_r = ui.min_rect();
-                    let edge = egui::Rect::from_min_max(
-                        egui::pos2(node_r.right() - 4.0, node_r.top() + title_h),
-                        egui::pos2(node_r.right() + 4.0, node_r.bottom()),
+                    let grip = 8.0_f32; // hit target in screen px (easy to grab)
+                    let right_grip = egui::Rect::from_min_max(
+                        egui::pos2(node_r.right() - grip, node_r.top() + title_h),
+                        egui::pos2(node_r.right() + grip * 0.5, node_r.bottom()),
                     );
-                    let er = ui.interact(edge, ui.id().with("edge"), egui::Sense::drag());
-                    if er.dragged() {
-                        let nw = (gw + er.drag_delta().x / zoom).clamp(130.0, 320.0);
-                        st.shader_node_sizes.insert(node.id, [nw, gh]);
-                        ui.ctx()
-                            .set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
-                    } else if er.hovered() {
-                        ui.ctx()
-                            .set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+                    let left_grip = egui::Rect::from_min_max(
+                        egui::pos2(node_r.left() - grip * 0.5, node_r.top() + title_h),
+                        egui::pos2(node_r.left() + grip, node_r.bottom()),
+                    );
+                    let rg = ui.interact(right_grip, ui.id().with("rw"), egui::Sense::drag());
+                    let lg = ui.interact(left_grip, ui.id().with("lw"), egui::Sense::drag());
+
+                    // Visual cue when hovering a resize edge
+                    if rg.hovered() || rg.dragged() {
+                        ui.painter().line_segment(
+                            [
+                                egui::pos2(node_r.right() - 1.0, node_r.top() + title_h + 2.0),
+                                egui::pos2(node_r.right() - 1.0, node_r.bottom() - 2.0),
+                            ],
+                            egui::Stroke::new(2.0_f32, egui::Color32::from_rgb(0xc0, 0xa0, 0x50)),
+                        );
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+                    }
+                    if lg.hovered() || lg.dragged() {
+                        ui.painter().line_segment(
+                            [
+                                egui::pos2(node_r.left() + 1.0, node_r.top() + title_h + 2.0),
+                                egui::pos2(node_r.left() + 1.0, node_r.bottom() - 2.0),
+                            ],
+                            egui::Stroke::new(2.0_f32, egui::Color32::from_rgb(0xc0, 0xa0, 0x50)),
+                        );
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+                    }
+
+                    if rg.dragged() {
+                        // gw is graph-space width; screen width = gw * zoom
+                        let nw = (gw + rg.drag_delta().x / zoom.max(0.25)).clamp(120.0, 400.0);
+                        st.shader_node_sizes.insert(node.id, [nw, fixed_h]);
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+                    }
+                    if lg.dragged() {
+                        let dx = lg.drag_delta().x / zoom.max(0.25);
+                        let nw = (gw - dx).clamp(120.0, 400.0);
+                        let applied = gw - nw;
+                        st.shader_node_sizes.insert(node.id, [nw, fixed_h]);
+                        if let Some(n) = st.shader_nodes.iter_mut().find(|n| n.id == node.id) {
+                            n.pos[0] += applied;
+                        }
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
                     }
                 });
             });
@@ -1698,9 +1765,13 @@ fn shader_socket_control(
     label: &str,
 ) -> egui::Response {
     let response = ui.add(egui::Button::new(label).sense(egui::Sense::click_and_drag()));
-    // Screen-space centre of the actual control — used for wire endpoints.
-    let center = response.rect.center();
-    st.shader_socket_positions.insert((node_id, is_output, socket), [center.x, center.y]);
+    // Wire endpoints: left edge for inputs, right edge for outputs (Blender-accurate)
+    let p = if is_output {
+        [response.rect.right(), response.rect.center().y]
+    } else {
+        [response.rect.left(), response.rect.center().y]
+    };
+    st.shader_socket_positions.insert((node_id, is_output, socket), p);
     if response.drag_started() {
         st.shader_drag_from = Some((node_id, is_output, socket));
         st.shader_socket_pick = None;

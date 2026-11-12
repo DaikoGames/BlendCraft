@@ -1217,13 +1217,13 @@ pub fn evaluate_graph_ex(
             }
             ShaderNodeKind::Noise => {
                 if live {
-                    let (col, fac) = proc_sample(node.kind, node.mode, node.value, &node.props, node.color, 0.37, 0.61);
+                    let (col, fac) = proc_sample(node.kind, node.mode, tex_scale(node), &node.props, node.color, 0.37, 0.61);
                     cache.insert((id, 0), SocketVal::Scalar(fac));
                     cache.insert((id, 1), SocketVal::Color(col));
                     continue;
                 }
                 let scale = {
-                    let s = inp(2, SocketVal::Scalar(if node.value.abs() < 1e-4 { 5.0 } else { node.value })).as_scalar();
+                    let s = inp(2, SocketVal::Scalar(tex_scale(node))).as_scalar();
                     if s.abs() < 1e-4 { 5.0 } else { s }
                 };
                 let detail = inp(3, SocketVal::Scalar(if node.props[0] > 0.0 { node.props[0] } else { 5.0 })).as_scalar().clamp(0.0, 15.0);
@@ -1260,7 +1260,7 @@ pub fn evaluate_graph_ex(
                         rgba[i] = b; rgba[i+1] = b; rgba[i+2] = b; rgba[i+3] = 255;
                     }
                 }
-                let tex = TextureData { name: format!("Noise_{id}"), width: size, height: size, rgba8: rgba };
+                let tex = TextureData { name: format!("__sg_Noise_{id}"), width: size, height: size, rgba8: rgba };
                 let new_idx = textures.len() + result.new_textures.len();
                 result.new_textures.push(tex);
                 proc_tex_index.insert(id, new_idx);
@@ -1271,7 +1271,7 @@ pub fn evaluate_graph_ex(
             }
             ShaderNodeKind::Voronoi => {
                 if live {
-                    let (col, fac) = proc_sample(node.kind, node.mode, node.value, &node.props, node.color, 0.37, 0.61);
+                    let (col, fac) = proc_sample(node.kind, node.mode, tex_scale(node), &node.props, node.color, 0.37, 0.61);
                     cache.insert((id, 0), SocketVal::Scalar(fac));
                     cache.insert((id, 1), SocketVal::Color(col));
                     cache.insert((id, 2), SocketVal::Vector([0.37, 0.61, 0.0]));
@@ -1280,7 +1280,7 @@ pub fn evaluate_graph_ex(
                     continue;
                 }
                 let scale = {
-                    let s = inp(2, SocketVal::Scalar(if node.value.abs() < 1e-4 { 5.0 } else { node.value })).as_scalar();
+                    let s = inp(2, SocketVal::Scalar(tex_scale(node))).as_scalar();
                     if s.abs() < 1e-4 { 5.0 } else { s }
                 };
                 let randomness = inp(7, SocketVal::Scalar(if node.props[0] > 0.0 { node.props[0] } else { 1.0 })).as_scalar().clamp(0.0, 1.0);
@@ -1307,7 +1307,7 @@ pub fn evaluate_graph_ex(
                         }
                     }
                 }
-                let tex = TextureData { name: format!("Voronoi_{id}"), width: size, height: size, rgba8: rgba };
+                let tex = TextureData { name: format!("__sg_Voronoi_{id}"), width: size, height: size, rgba8: rgba };
                 let new_idx = textures.len() + result.new_textures.len();
                 result.new_textures.push(tex);
                 proc_tex_index.insert(id, new_idx);
@@ -1320,7 +1320,7 @@ pub fn evaluate_graph_ex(
             }
             ShaderNodeKind::Brick => {
                 if live {
-                    let (col, fac) = proc_sample(node.kind, node.mode, node.value, &node.props, node.color, 0.37, 0.61);
+                    let (col, fac) = proc_sample(node.kind, node.mode, tex_scale(node), &node.props, node.color, 0.37, 0.61);
                     cache.insert((id, 0), SocketVal::Color(col));
                     cache.insert((id, 1), SocketVal::Scalar(fac));
                     continue;
@@ -1328,7 +1328,7 @@ pub fn evaluate_graph_ex(
                 let c1 = inp(1, SocketVal::Color([0.6, 0.25, 0.15, 1.0])).as_color();
                 let c2 = inp(2, SocketVal::Color([0.55, 0.22, 0.12, 1.0])).as_color();
                 let mortar = inp(3, SocketVal::Color([0.35, 0.35, 0.35, 1.0])).as_color();
-                let scale = inp(4, SocketVal::Scalar(if node.value.abs() < 1e-4 { 5.0 } else { node.value })).as_scalar().max(0.01);
+                let scale = inp(4, SocketVal::Scalar(tex_scale(node))).as_scalar().max(0.01);
                 let mortar_size = inp(5, SocketVal::Scalar(if node.props[0] > 0.0 { node.props[0] } else { 0.08 })).as_scalar().clamp(0.0, 0.5);
                 let brick_w = inp(8, SocketVal::Scalar(if node.props[1] > 0.0 { node.props[1] } else { 0.5 })).as_scalar().max(0.05);
                 let row_h = inp(9, SocketVal::Scalar(if node.props[2] > 0.0 { node.props[2] } else { 0.25 })).as_scalar().max(0.05);
@@ -1355,7 +1355,7 @@ pub fn evaluate_graph_ex(
                         rgba[i+3] = (fac * 255.0) as u8;
                     }
                 }
-                let tex = TextureData { name: format!("Brick_{id}"), width: size, height: size, rgba8: rgba };
+                let tex = TextureData { name: format!("__sg_Brick_{id}"), width: size, height: size, rgba8: rgba };
                 let new_idx = textures.len() + result.new_textures.len();
                 result.new_textures.push(tex);
                 proc_tex_index.insert(id, new_idx);
@@ -1365,14 +1365,14 @@ pub fn evaluate_graph_ex(
             }
             ShaderNodeKind::Checker => {
                 if live {
-                    let (col, fac) = proc_sample(node.kind, node.mode, node.value, &node.props, node.color, 0.37, 0.61);
+                    let (col, fac) = proc_sample(node.kind, node.mode, tex_scale(node), &node.props, node.color, 0.37, 0.61);
                     cache.insert((id, 0), SocketVal::Color(col));
                     cache.insert((id, 1), SocketVal::Scalar(fac));
                     continue;
                 }
                 let c1 = inp(1, SocketVal::Color([1.0, 1.0, 1.0, 1.0])).as_color();
                 let c2 = inp(2, SocketVal::Color([0.0, 0.0, 0.0, 1.0])).as_color();
-                let scale = inp(3, SocketVal::Scalar(if node.value.abs() < 1e-4 { 5.0 } else { node.value })).as_scalar().max(0.01);
+                let scale = inp(3, SocketVal::Scalar(tex_scale(node))).as_scalar().max(0.01);
                 let size = tex_size.max(64).min(512);
                 let mut rgba = vec![0u8; (size * size * 4) as usize];
                 for y in 0..size {
@@ -1390,7 +1390,7 @@ pub fn evaluate_graph_ex(
                         rgba[i+3] = 255;
                     }
                 }
-                let tex = TextureData { name: format!("Checker_{id}"), width: size, height: size, rgba8: rgba };
+                let tex = TextureData { name: format!("__sg_Checker_{id}"), width: size, height: size, rgba8: rgba };
                 let new_idx = textures.len() + result.new_textures.len();
                 result.new_textures.push(tex);
                 proc_tex_index.insert(id, new_idx);
@@ -1401,7 +1401,7 @@ pub fn evaluate_graph_ex(
             ShaderNodeKind::Gradient => {
                 // mode: 0 Linear, 1 Quadratic, 2 Easing, 3 Diagonal, 4 Spherical, 5 Radial
                 if live {
-                    let (col, fac) = proc_sample(node.kind, node.mode, node.value, &node.props, node.color, 0.37, 0.61);
+                    let (col, fac) = proc_sample(node.kind, node.mode, tex_scale(node), &node.props, node.color, 0.37, 0.61);
                     cache.insert((id, 0), SocketVal::Scalar(fac));
                     cache.insert((id, 1), SocketVal::Color(col));
                     continue;
@@ -1435,7 +1435,7 @@ pub fn evaluate_graph_ex(
                         rgba[i] = b; rgba[i+1] = b; rgba[i+2] = b; rgba[i+3] = 255;
                     }
                 }
-                let tex = TextureData { name: format!("Gradient_{id}"), width: size, height: size, rgba8: rgba };
+                let tex = TextureData { name: format!("__sg_Gradient_{id}"), width: size, height: size, rgba8: rgba };
                 let new_idx = textures.len() + result.new_textures.len();
                 result.new_textures.push(tex);
                 proc_tex_index.insert(id, new_idx);
@@ -1446,12 +1446,12 @@ pub fn evaluate_graph_ex(
             }
             ShaderNodeKind::Wave => {
                 if live {
-                    let (col, fac) = proc_sample(node.kind, node.mode, node.value, &node.props, node.color, 0.37, 0.61);
+                    let (col, fac) = proc_sample(node.kind, node.mode, tex_scale(node), &node.props, node.color, 0.37, 0.61);
                     cache.insert((id, 0), SocketVal::Scalar(fac));
                     cache.insert((id, 1), SocketVal::Color(col));
                     continue;
                 }
-                let scale = inp(1, SocketVal::Scalar(if node.value.abs() < 1e-4 { 5.0 } else { node.value })).as_scalar().max(0.01);
+                let scale = inp(1, SocketVal::Scalar(tex_scale(node))).as_scalar().max(0.01);
                 let distortion = inp(2, SocketVal::Scalar(node.props[0])).as_scalar();
                 let detail = inp(3, SocketVal::Scalar(if node.props[1] > 0.0 { node.props[1] } else { 2.0 })).as_scalar();
                 let phase = inp(6, SocketVal::Scalar(node.props[2])).as_scalar();
@@ -1483,7 +1483,7 @@ pub fn evaluate_graph_ex(
                         rgba[i] = b; rgba[i+1] = b; rgba[i+2] = b; rgba[i+3] = 255;
                     }
                 }
-                let tex = TextureData { name: format!("Wave_{id}"), width: size, height: size, rgba8: rgba };
+                let tex = TextureData { name: format!("__sg_Wave_{id}"), width: size, height: size, rgba8: rgba };
                 let new_idx = textures.len() + result.new_textures.len();
                 result.new_textures.push(tex);
                 proc_tex_index.insert(id, new_idx);
@@ -1493,12 +1493,12 @@ pub fn evaluate_graph_ex(
             }
             ShaderNodeKind::Magic => {
                 if live {
-                    let (col, fac) = proc_sample(node.kind, node.mode, node.value, &node.props, node.color, 0.37, 0.61);
+                    let (col, fac) = proc_sample(node.kind, node.mode, tex_scale(node), &node.props, node.color, 0.37, 0.61);
                     cache.insert((id, 0), SocketVal::Scalar(fac));
                     cache.insert((id, 1), SocketVal::Color(col));
                     continue;
                 }
-                let scale = inp(1, SocketVal::Scalar(if node.value.abs() < 1e-4 { 5.0 } else { node.value })).as_scalar().max(0.01);
+                let scale = inp(1, SocketVal::Scalar(tex_scale(node))).as_scalar().max(0.01);
                 let distortion = inp(2, SocketVal::Scalar(if node.props[0].abs() < 1e-6 { 1.0 } else { node.props[0] })).as_scalar();
                 let depth = (node.mode as i32 + 2).clamp(2, 10);
                 let size = tex_size.max(64).min(512);
@@ -1523,7 +1523,7 @@ pub fn evaluate_graph_ex(
                         rgba[i+3] = 255;
                     }
                 }
-                let tex = TextureData { name: format!("Magic_{id}"), width: size, height: size, rgba8: rgba };
+                let tex = TextureData { name: format!("__sg_Magic_{id}"), width: size, height: size, rgba8: rgba };
                 let new_idx = textures.len() + result.new_textures.len();
                 result.new_textures.push(tex);
                 proc_tex_index.insert(id, new_idx);
@@ -1533,7 +1533,7 @@ pub fn evaluate_graph_ex(
             }
             ShaderNodeKind::Gabor => {
                 if live {
-                    let (col, fac) = proc_sample(node.kind, node.mode, node.value, &node.props, node.color, 0.37, 0.61);
+                    let (col, fac) = proc_sample(node.kind, node.mode, tex_scale(node), &node.props, node.color, 0.37, 0.61);
                     cache.insert((id, 0), SocketVal::Scalar(fac));
                     cache.insert((id, 1), SocketVal::Color(col));
                     continue;
@@ -1560,7 +1560,7 @@ pub fn evaluate_graph_ex(
                         rgba[i] = b; rgba[i+1] = b; rgba[i+2] = b; rgba[i+3] = 255;
                     }
                 }
-                let tex = TextureData { name: format!("Gabor_{id}"), width: size, height: size, rgba8: rgba };
+                let tex = TextureData { name: format!("__sg_Gabor_{id}"), width: size, height: size, rgba8: rgba };
                 let new_idx = textures.len() + result.new_textures.len();
                 result.new_textures.push(tex);
                 proc_tex_index.insert(id, new_idx);
@@ -1570,7 +1570,7 @@ pub fn evaluate_graph_ex(
             }
             ShaderNodeKind::WhiteNoise => {
                 if live {
-                    let (col, fac) = proc_sample(node.kind, node.mode, node.value, &node.props, node.color, 0.37, 0.61);
+                    let (col, fac) = proc_sample(node.kind, node.mode, tex_scale(node), &node.props, node.color, 0.37, 0.61);
                     cache.insert((id, 0), SocketVal::Scalar(fac));
                     cache.insert((id, 1), SocketVal::Color(col));
                     continue;
@@ -1593,7 +1593,7 @@ pub fn evaluate_graph_ex(
                         rgba[i] = b; rgba[i+1] = b; rgba[i+2] = b; rgba[i+3] = 255;
                     }
                 }
-                let tex = TextureData { name: format!("WhiteNoise_{id}"), width: size, height: size, rgba8: rgba };
+                let tex = TextureData { name: format!("__sg_WhiteNoise_{id}"), width: size, height: size, rgba8: rgba };
                 let new_idx = textures.len() + result.new_textures.len();
                 result.new_textures.push(tex);
                 proc_tex_index.insert(id, new_idx);
@@ -1620,7 +1620,7 @@ pub fn evaluate_graph_ex(
                     }
                 }
                 if !live {
-                    let tex = TextureData { name: format!("Sky_{id}"), width: size, height: size, rgba8: rgba.clone() };
+                    let tex = TextureData { name: format!("__sg_Sky_{id}"), width: size, height: size, rgba8: rgba.clone() };
                     let new_idx = textures.len() + result.new_textures.len();
                     result.new_textures.push(tex);
                     proc_tex_index.insert(id, new_idx);
@@ -2204,6 +2204,18 @@ fn sample_graph_at(
 
 
 /// Fast single-UV sample for live viewport (no texture allocation).
+
+fn tex_scale(node: &ShaderNode) -> f32 {
+    if node.value.abs() > 1e-4 {
+        node.value.abs()
+    } else if node.props[0].abs() > 1e-4 {
+        // older UI stored Scale in props[0]
+        node.props[0].abs()
+    } else {
+        5.0
+    }
+}
+
 fn proc_sample(kind: ShaderNodeKind, mode: u8, value: f32, props: &[f32; 16], color: [f32; 4], u: f32, v: f32) -> ([f32; 4], f32) {
     let scale = if value.abs() < 1e-4 { 5.0 } else { value.abs() };
     match kind {

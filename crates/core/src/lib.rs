@@ -27,7 +27,7 @@ pub use constraints::{Constraint, ConstraintKind};
 pub use document::{AlignMode, AlignTo, Document, OriginMode, SameKind};
 pub use environment::{sh_basis, EnvironmentMap};
 pub use material::{AlphaMode, Material, TextureData};
-pub use shader_graph::{apply_eval_to_material, bake_graph_texture, color_ramp_eval_stops, color_ramp_from_node, evaluate_graph, evaluate_graph_ex, ramp_get_stops, ramp_stop_count, COLOR_RAMP_MAX_STOPS, ShaderGraph, ShaderLink, ShaderNode, ShaderNodeKind};
+pub use shader_graph::{apply_eval_to_material, bake_graph_texture, color_ramp_eval_stops, color_ramp_from_node, evaluate_graph, evaluate_graph_ex, ramp_get_stops, ramp_stop_count, COLOR_RAMP_MAX_STOPS, ShaderGraph, ShaderLink, ShaderNode, ShaderNodeKind, SocketDef, SocketType};
 pub use mesh::{Aabb, MeshData, MeshGroup, Vertex};
 pub use primitives::{Primitive, TextFont};
 pub use fonts::{font_registry, free_font_catalog, mesh_from_font, system_font_dirs, FontRegistry, CatalogFont};
