@@ -7,12 +7,37 @@ use forge_core::{font_registry, free_font_catalog, TextFont,
     GreasePencilData, LightData, LightProbeData, LightProbeType, LightType, Material, ObjectKind, SpeakerData, SurfaceData, VolumeData,
     OriginMode, Primitive,
     AnimationData, ShaderGraph, ShaderLink, ShaderNode, ShaderNodeKind,
-    apply_eval_to_material, bake_graph_texture, evaluate_graph, evaluate_graph_ex,
+    apply_eval_to_material, bake_graph_texture, TextureData,
 };
+use forge_core::shader_graph::{evaluate_graph_ex_cancellable, GraphEvalResult};
 use forge_render::{ShadingMode, ViewSettings, WireMode};
 use glam::{EulerRot, Quat, Vec3};
 use std::sync::Arc;
 use std::collections::HashMap;
+use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
+
+#[derive(Clone, Debug, PartialEq)]
+struct ShaderEvalKey {
+    graph: ShaderGraph,
+    material: usize,
+    frame: i32,
+    texture_id: usize,
+}
+
+struct ShaderEvalCompletion {
+    key: ShaderEvalKey,
+    textures: Vec<TextureData>,
+    result: Option<GraphEvalResult>,
+}
+
+struct ShaderBakeCompletion {
+    graph: ShaderGraph,
+    material: usize,
+    texture_id: usize,
+    texture: TextureData,
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Rename {
@@ -68,8 +93,17 @@ pub struct UiState {
     pub shader_image_preview_versions: HashMap<usize, u64>,
     /// Which material index the current UI graph belongs to.
     pub shader_material_mi: Option<usize>,
+    pub shader_last_eval_graph: Option<ShaderGraph>,
+    pub shader_last_eval_material: Option<usize>,
+    pub shader_last_eval_frame: Option<i32>,
+    pub shader_last_eval_texture_id: usize,
     pub shader_apply_pending: bool,
     pub shader_bake_pending: bool,
+    shader_eval_rx: Option<Receiver<ShaderEvalCompletion>>,
+    shader_eval_key: Option<ShaderEvalKey>,
+    shader_eval_cancel: Option<Arc<AtomicBool>>,
+    shader_eval_failed_key: Option<ShaderEvalKey>,
+    shader_bake_rx: Option<Receiver<ShaderBakeCompletion>>,
     /// Offline render / output settings (Blender-style).
     pub render_width: u32,
     pub render_height: u32,
@@ -694,64 +728,306 @@ fn load_graph_into_ui(st: &mut UiState, g: &ShaderGraph) {
     st.shader_next_id = g.next_id.max(1);
 }
 
-fn sync_graph_to_material(doc: &mut Document, mi: usize, st: &UiState) {
-    // Full evaluation + bake procedural textures into the material (what you see on the mesh).
-    let g = graph_from_ui(st);
-    doc.scene.materials[mi].shader_graph = Some(g.clone());
-    let mut textures: Vec<_> = doc
-        .scene
-        .textures
+fn add_noise_ramp_demo(st: &mut UiState) {
+    let mut next_id = st.shader_next_id.max(1);
+    let mut create_node = |kind, pos| {
+        let id = next_id;
+        next_id += 1;
+        ShaderNode::with_kind(id, kind, pos)
+    };
+
+    let principled_id = st.shader_nodes
         .iter()
-        .filter(|t| !t.name.starts_with("__sg_"))
-        .cloned()
-        .collect();
-    let eval = evaluate_graph(&g, &doc.scene.materials[mi], &textures, 256);
-    apply_eval_to_material(&mut doc.scene.materials[mi], &mut textures, eval);
-    // Ensure solid colors win when no base texture was produced by the graph.
-    if doc.scene.materials[mi].base_color_tex.is_none() {
-        // keep base_color from eval (already applied)
-    }
-    doc.scene.textures = std::sync::Arc::new(textures);
-    doc.touch();
+        .find(|node| node.kind == ShaderNodeKind::Principled)
+        .map(|node| node.id)
+        .unwrap_or_else(|| {
+            let node = create_node(ShaderNodeKind::Principled, [600.0, 100.0]);
+            let id = node.id;
+            st.shader_nodes.push(node);
+            id
+        });
+    let output_id = st.shader_nodes
+        .iter()
+        .find(|node| node.kind == ShaderNodeKind::Output)
+        .map(|node| node.id)
+        .unwrap_or_else(|| {
+            let node = create_node(ShaderNodeKind::Output, [920.0, 100.0]);
+            let id = node.id;
+            st.shader_nodes.push(node);
+            id
+        });
+
+    let noise = create_node(ShaderNodeKind::Noise, [60.0, 120.0]);
+    let noise_id = noise.id;
+    let mut ramp = create_node(ShaderNodeKind::ColorRamp, [315.0, 120.0]);
+    let ramp_id = ramp.id;
+    ramp.value = 2.0;
+    ramp.color = [0.0, 0.0, 0.0, 1.0];
+    ramp.props[0..4].copy_from_slice(&[1.0; 4]);
+    ramp.props[12] = 0.0;
+    ramp.props[13] = 1.0;
+    st.shader_nodes.extend([noise, ramp]);
+    st.shader_links.retain(|link| {
+        !(link.to == principled_id && link.to_socket == 0)
+            && !(link.to == output_id && link.to_socket == 0)
+    });
+    st.shader_links.extend([
+        ShaderLink { from: noise_id, from_socket: 0, to: ramp_id, to_socket: 0 },
+        ShaderLink { from: ramp_id, from_socket: 0, to: principled_id, to_socket: 0 },
+        ShaderLink { from: principled_id, from_socket: 0, to: output_id, to_socket: 0 },
+    ]);
+    st.shader_next_id = next_id;
+    st.shader_apply_pending = true;
 }
 
-fn principled_base_source(g: &ShaderGraph) -> Option<ShaderNodeKind> {
-    let princ = g.nodes.iter().find(|n| n.kind == ShaderNodeKind::Principled)?;
-    for link in &g.links {
-        if link.to == princ.id && link.to_socket == 0 {
-            return g.nodes.iter().find(|n| n.id == link.from).map(|n| n.kind);
+fn remap_graph_texture_indices(
+    material: &mut Material,
+    graph: &mut ShaderGraph,
+    old_textures: &[TextureData],
+) -> Vec<usize> {
+    let mut remap = vec![None; old_textures.len()];
+    let mut kept = Vec::with_capacity(old_textures.len());
+    for (old_index, texture) in old_textures.iter().enumerate() {
+        if !texture.name.starts_with("__sg_") {
+            remap[old_index] = Some(kept.len());
+            kept.push(old_index);
         }
     }
-    None
+    let remap_slot = |slot: &mut Option<usize>| {
+        if let Some(old) = *slot {
+            *slot = remap.get(old).copied().flatten();
+        }
+    };
+    remap_slot(&mut material.base_color_tex);
+    remap_slot(&mut material.metallic_roughness_tex);
+    remap_slot(&mut material.normal_tex);
+    remap_slot(&mut material.occlusion_tex);
+    remap_slot(&mut material.emissive_tex);
+    for node in &mut graph.nodes {
+        if let Some(old) = node.image_index {
+            node.image_index = remap.get(old).copied().flatten();
+        }
+    }
+    kept
 }
 
-fn sync_graph_live(doc: &mut Document, mi: usize, st: &UiState) {
-    let g = graph_from_ui(st);
-    doc.scene.materials[mi].shader_graph = Some(g.clone());
-    let frame = doc.scene.animation.frame_current as f32;
-    let fps = doc.scene.animation.fps.max(1) as f32;
-    let time_sec = frame / fps;
-    // Drop previous graph-baked images so we do not leak a texture every frame.
-    let mut textures: Vec<_> = doc
-        .scene
-        .textures
-        .iter()
-        .filter(|t| !t.name.starts_with("__sg_"))
-        .cloned()
-        .collect();
-    // Full eval with 128px procedural bake so texture nodes show on the mesh.
-    let eval = evaluate_graph_ex(
-        &g,
-        &doc.scene.materials[mi],
-        &textures,
-        128,
-        false,
-        frame,
-        time_sec,
-    );
-    apply_eval_to_material(&mut doc.scene.materials[mi], &mut textures, eval);
-    doc.scene.textures = std::sync::Arc::new(textures);
-    doc.touch();
+fn sync_graph_live(ctx: &egui::Context, doc: &mut Document, mi: usize, st: &mut UiState) {
+    let current_graph = graph_from_ui(st);
+    let current_frame = doc.scene.animation.frame_current;
+    let current_texture_id = Arc::as_ptr(&doc.scene.textures) as usize;
+    let current_key = ShaderEvalKey {
+        graph: current_graph.clone(),
+        material: mi,
+        frame: current_frame,
+        texture_id: current_texture_id,
+    };
+    if st.shader_eval_key.as_ref().is_some_and(|active| active != &current_key) {
+        if let Some(cancel) = &st.shader_eval_cancel {
+            cancel.store(true, Ordering::Relaxed);
+        }
+    }
+
+    let completion = st.shader_eval_rx.as_ref().and_then(|rx| match rx.try_recv() {
+        Ok(completion) => Some(Ok(completion)),
+        Err(TryRecvError::Disconnected) => Some(Err(())),
+        Err(TryRecvError::Empty) => None,
+    });
+    if let Some(completion) = completion {
+        let active_key = st.shader_eval_key.clone();
+        st.shader_eval_rx = None;
+        st.shader_eval_key = None;
+        st.shader_eval_cancel = None;
+        match completion {
+            Ok(completion) => {
+                st.shader_eval_failed_key = None;
+                let key = &completion.key;
+                let is_current = key.graph == current_graph
+                    && key.material == mi
+                    && key.frame == current_frame
+                    && key.texture_id == current_texture_id;
+                if is_current && !forge_render::supports_shader_graph(&current_graph) {
+                    if let Some(result) = completion.result {
+                        let mut graph = graph_from_ui(st);
+                        remap_graph_texture_indices(
+                            &mut doc.scene.materials[mi],
+                            &mut graph,
+                            &doc.scene.textures,
+                        );
+                        st.shader_nodes = graph.nodes.clone();
+                        let mut textures = completion.textures;
+                        doc.scene.materials[mi].shader_graph = Some(graph.clone());
+                        apply_eval_to_material(
+                            &mut doc.scene.materials[mi],
+                            &mut textures,
+                            result,
+                        );
+                        doc.scene.textures = Arc::new(textures);
+                        st.shader_last_eval_graph = Some(graph);
+                        st.shader_last_eval_material = Some(mi);
+                        st.shader_last_eval_frame = Some(current_frame);
+                        st.shader_last_eval_texture_id = Arc::as_ptr(&doc.scene.textures) as usize;
+                        doc.touch();
+                    }
+                }
+            }
+            Err(()) => {
+                st.shader_eval_failed_key = active_key;
+                st.status = "Shader graph evaluation worker stopped unexpectedly".into();
+            }
+        }
+    }
+
+    let graph = graph_from_ui(st);
+    let key = ShaderEvalKey {
+        graph: graph.clone(),
+        material: mi,
+        frame: current_frame,
+        texture_id: Arc::as_ptr(&doc.scene.textures) as usize,
+    };
+    let already_evaluated = st.shader_last_eval_graph.as_ref() == Some(&key.graph)
+        && st.shader_last_eval_material == Some(key.material)
+        && st.shader_last_eval_frame == Some(key.frame)
+        && st.shader_last_eval_texture_id == key.texture_id;
+    let already_failed = st.shader_eval_failed_key.as_ref() == Some(&key);
+    if st.shader_eval_rx.is_none() && !already_evaluated && !already_failed {
+        if forge_render::supports_shader_graph(&graph) {
+            st.shader_eval_failed_key = None;
+            st.shader_last_eval_graph = Some(graph.clone());
+            st.shader_last_eval_material = Some(mi);
+            st.shader_last_eval_frame = Some(current_frame);
+            st.shader_last_eval_texture_id = current_texture_id;
+            if doc.scene.materials[mi].shader_graph.as_ref() != Some(&graph) {
+                doc.scene.materials[mi].shader_graph = Some(graph);
+                doc.touch();
+            }
+        } else {
+            let mut eval_graph = graph.clone();
+            let mut eval_material = doc.scene.materials[mi].clone();
+            let source_textures = Arc::clone(&doc.scene.textures);
+            let kept_texture_indices = remap_graph_texture_indices(
+                &mut eval_material,
+                &mut eval_graph,
+                &source_textures,
+            );
+            let frame = current_frame as f32;
+            let time_sec = frame / doc.scene.animation.fps.max(1) as f32;
+            let (tx, rx) = mpsc::channel();
+            let worker_key = key.clone();
+            let cancel = Arc::new(AtomicBool::new(false));
+            let worker_cancel = Arc::clone(&cancel);
+            match std::thread::Builder::new()
+                .name("shader-graph-eval".into())
+                .spawn(move || {
+                    let eval_textures: Vec<_> = kept_texture_indices
+                        .iter()
+                        .filter_map(|index| source_textures.get(*index).cloned())
+                        .collect();
+                    let result = evaluate_graph_ex_cancellable(
+                        &eval_graph,
+                        &eval_material,
+                        &eval_textures,
+                        128,
+                        false,
+                        frame,
+                        time_sec,
+                        &worker_cancel,
+                    );
+                    let _ = tx.send(ShaderEvalCompletion {
+                        key: worker_key,
+                        textures: eval_textures,
+                        result,
+                    });
+                })
+            {
+                Ok(_) => {
+                    st.shader_eval_rx = Some(rx);
+                    st.shader_eval_key = Some(key);
+                    st.shader_eval_cancel = Some(cancel);
+                    st.shader_eval_failed_key = None;
+                }
+                Err(error) => {
+                    st.shader_eval_failed_key = Some(key);
+                    st.status = format!("Could not start shader graph evaluation: {error}");
+                }
+            }
+        }
+    }
+
+    if st.shader_eval_rx.is_some() {
+        ctx.request_repaint_after(Duration::from_millis(16));
+    }
+}
+
+fn sync_graph_bake(ctx: &egui::Context, doc: &mut Document, mi: usize, st: &mut UiState) {
+    let completion = st.shader_bake_rx.as_ref().and_then(|rx| match rx.try_recv() {
+        Ok(completion) => Some(Ok(completion)),
+        Err(TryRecvError::Disconnected) => Some(Err(())),
+        Err(TryRecvError::Empty) => None,
+    });
+    if let Some(completion) = completion {
+        st.shader_bake_rx = None;
+        match completion {
+            Ok(completion) => {
+                if completion.graph == graph_from_ui(st)
+                    && completion.material == mi
+                    && completion.texture_id == Arc::as_ptr(&doc.scene.textures) as usize
+                {
+                    let mut textures = (*doc.scene.textures).clone();
+                    textures.push(completion.texture);
+                    let texture_index = textures.len() - 1;
+                    doc.scene.textures = Arc::new(textures);
+                    doc.scene.materials[mi].base_color_tex = Some(texture_index);
+                    st.shader_last_eval_graph = Some(graph_from_ui(st));
+                    st.shader_last_eval_material = Some(mi);
+                    st.shader_last_eval_frame = Some(doc.scene.animation.frame_current);
+                    st.shader_last_eval_texture_id = Arc::as_ptr(&doc.scene.textures) as usize;
+                    doc.touch();
+                } else {
+                    st.status = "Graph changed during texture bake; bake it again to use the result".into();
+                }
+            }
+            Err(()) => {
+                st.status = "Shader texture bake worker stopped unexpectedly".into();
+            }
+        }
+    }
+
+    if st.shader_bake_pending && st.shader_bake_rx.is_none() && st.shader_eval_rx.is_none() {
+        st.shader_bake_pending = false;
+        let graph = graph_from_ui(st);
+        let mut eval_graph = graph.clone();
+        let mut material = doc.scene.materials[mi].clone();
+        let source_textures = Arc::clone(&doc.scene.textures);
+        let kept_texture_indices =
+            remap_graph_texture_indices(&mut material, &mut eval_graph, &source_textures);
+        let texture_id = Arc::as_ptr(&doc.scene.textures) as usize;
+        let (tx, rx) = mpsc::channel();
+        match std::thread::Builder::new()
+            .name("shader-graph-texture-bake".into())
+            .spawn(move || {
+                let textures: Vec<_> = kept_texture_indices
+                    .iter()
+                    .filter_map(|index| source_textures.get(*index).cloned())
+                    .collect();
+                let texture = bake_graph_texture(&eval_graph, &material, &textures, 1024);
+                let _ = tx.send(ShaderBakeCompletion {
+                    graph,
+                    material: mi,
+                    texture_id,
+                    texture,
+                });
+            })
+        {
+            Ok(_) => st.shader_bake_rx = Some(rx),
+            Err(error) => {
+                st.status = format!("Could not start shader texture bake: {error}");
+            }
+        }
+    }
+
+    if st.shader_bake_rx.is_some() || st.shader_bake_pending {
+        ctx.request_repaint_after(Duration::from_millis(16));
+    }
 }
 
 fn shader_node_color(kind: ShaderNodeKind) -> egui::Color32 {
@@ -823,17 +1099,11 @@ fn draw_shading_editor(ui: &mut egui::Ui, ctx: &egui::Context, doc: &mut Documen
                                     } else {
                                         ([0.8, 0.8, 0.8, 1.0], [0.0; 16], 0.5)
                                     };
-                                    st.shader_nodes.push(ShaderNode {
-                                        id,
-                                        kind,
-                                        pos: [col, row],
-                                        image_index: None,
-                                        value,
-                                        color,
-                                        props,
-                                        mode: 0,
-                                        name_prop: String::new(),
-                                    });
+                                    let mut node = ShaderNode::with_kind(id, kind, [col, row]);
+                                    node.value = value;
+                                    node.color = color;
+                                    node.props = props;
+                                    st.shader_nodes.push(node);
                                     ui.close_menu();
                                 }
                             }
@@ -866,7 +1136,17 @@ fn draw_shading_editor(ui: &mut egui::Ui, ctx: &egui::Context, doc: &mut Documen
             if ui.button("Bake…").on_hover_text("Bake graph color to a new texture and assign as Base Color").clicked() {
                 st.shader_bake_pending = true;
             }
+            if ui.button("Noise Demo").on_hover_text("Add a connected Noise → Color Ramp → Principled example").clicked() {
+                add_noise_ramp_demo(st);
+            }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if st.shader_bake_pending || st.shader_bake_rx.is_some() {
+                    ui.spinner();
+                    ui.weak("Baking texture");
+                } else if st.shader_eval_rx.is_some() {
+                    ui.spinner();
+                    ui.weak("Updating material");
+                }
                 ui.weak("Drag nodes · Click sockets · Apply Graph · Bake");
             });
         });
@@ -907,23 +1187,11 @@ fn draw_shading_editor(ui: &mut egui::Ui, ctx: &egui::Context, doc: &mut Documen
 
     if st.shader_apply_pending {
         st.shader_apply_pending = false;
-        sync_graph_to_material(doc, mi, st);
-    } else {
-        // Continuous live update so the 3D viewport tracks the node graph.
-        sync_graph_live(doc, mi, st);
+        st.shader_last_eval_graph = None;
     }
-    if st.shader_bake_pending {
-        st.shader_bake_pending = false;
-        let g = graph_from_ui(st);
-        doc.scene.materials[mi].shader_graph = Some(g.clone());
-        let baked = bake_graph_texture(&g, &doc.scene.materials[mi], &doc.scene.textures, 1024);
-        let mut textures = (*doc.scene.textures).clone();
-        textures.push(baked);
-        let idx = textures.len() - 1;
-        doc.scene.textures = std::sync::Arc::new(textures);
-        doc.scene.materials[mi].base_color_tex = Some(idx);
-        doc.touch();
-    }
+    // Keep graph editing responsive; CPU texture evaluation runs outside the UI frame.
+    sync_graph_live(ctx, doc, mi, st);
+    sync_graph_bake(ctx, doc, mi, st);
 
     // Persist graph continuously so project save keeps it.
     doc.scene.materials[mi].shader_graph = Some(graph_from_ui(st));
@@ -1171,6 +1439,113 @@ fn draw_shading_editor(ui: &mut egui::Ui, ctx: &egui::Context, doc: &mut Documen
 
                             // Compact property controls
                             match node.kind {
+                                ShaderNodeKind::Wave => {
+                                    let wave_types = ["Bands", "Rings"];
+                                    let wave_type = (node.mode as usize).min(wave_types.len() - 1);
+                                    egui::ComboBox::from_id_salt(("wave_type", node.id))
+                                        .selected_text(wave_types[wave_type])
+                                        .show_ui(ui, |ui| {
+                                            for (i, label) in wave_types.iter().enumerate() {
+                                                if ui.selectable_label(wave_type == i, *label).clicked() {
+                                                    if let Some(n) = st.shader_nodes.iter_mut().find(|n| n.id == node.id) {
+                                                        n.mode = i as u8;
+                                                    }
+                                                }
+                                            }
+                                        });
+                                    let directions = if node.mode == 0 {
+                                        &["X", "Y", "Z", "Diagonal"][..]
+                                    } else {
+                                        &["X", "Y", "Z", "Spherical"][..]
+                                    };
+                                    let property = if node.mode == 0 { 8 } else { 9 };
+                                    let direction =
+                                        (node.props[property].round() as usize).min(directions.len() - 1);
+                                    egui::ComboBox::from_id_salt(("wave_direction", node.id))
+                                        .selected_text(format!("Direction: {}", directions[direction]))
+                                        .show_ui(ui, |ui| {
+                                            for (i, label) in directions.iter().enumerate() {
+                                                if ui.selectable_label(direction == i, *label).clicked() {
+                                                    if let Some(n) = st.shader_nodes.iter_mut().find(|n| n.id == node.id) {
+                                                        n.props[property] = i as f32;
+                                                    }
+                                                }
+                                            }
+                                        });
+                                    let profiles = ["Sine", "Saw", "Triangle"];
+                                    let profile = (node.props[10].round() as usize).min(profiles.len() - 1);
+                                    egui::ComboBox::from_id_salt(("wave_profile", node.id))
+                                        .selected_text(format!("Profile: {}", profiles[profile]))
+                                        .show_ui(ui, |ui| {
+                                            for (i, label) in profiles.iter().enumerate() {
+                                                if ui.selectable_label(profile == i, *label).clicked() {
+                                                    if let Some(n) = st.shader_nodes.iter_mut().find(|n| n.id == node.id) {
+                                                        n.props[10] = i as f32;
+                                                    }
+                                                }
+                                            }
+                                        });
+                                }
+                                ShaderNodeKind::Brick => {
+                                    let controls = if node.props[..4].iter().all(|value| *value == 0.0) {
+                                        [0.5, 2.0, 1.0, 2.0]
+                                    } else {
+                                        [node.props[0], node.props[1], node.props[2], node.props[3]]
+                                    };
+                                    let mut offset = controls[0];
+                                    if ui.add(egui::DragValue::new(&mut offset).range(0.0..=1.0).prefix("Offset ")).changed() {
+                                        if let Some(n) = st.shader_nodes.iter_mut().find(|n| n.id == node.id) {
+                                            n.props[..4].copy_from_slice(&[offset, controls[1], controls[2], controls[3]]);
+                                        }
+                                    }
+                                    let mut offset_frequency = controls[1].round() as i32;
+                                    if ui.add(egui::DragValue::new(&mut offset_frequency).range(1..=99).prefix("Offset Frequency ")).changed() {
+                                        if let Some(n) = st.shader_nodes.iter_mut().find(|n| n.id == node.id) {
+                                            n.props[..4].copy_from_slice(&[controls[0], offset_frequency as f32, controls[2], controls[3]]);
+                                        }
+                                    }
+                                    let mut squash = controls[2];
+                                    if ui.add(egui::DragValue::new(&mut squash).range(0.0..=1.0).prefix("Squash ")).changed() {
+                                        if let Some(n) = st.shader_nodes.iter_mut().find(|n| n.id == node.id) {
+                                            n.props[..4].copy_from_slice(&[controls[0], controls[1], squash, controls[3]]);
+                                        }
+                                    }
+                                    let mut squash_frequency = controls[3].round() as i32;
+                                    if ui.add(egui::DragValue::new(&mut squash_frequency).range(1..=99).prefix("Squash Frequency ")).changed() {
+                                        if let Some(n) = st.shader_nodes.iter_mut().find(|n| n.id == node.id) {
+                                            n.props[..4].copy_from_slice(&[controls[0], controls[1], controls[2], squash_frequency as f32]);
+                                        }
+                                    }
+                                }
+                                ShaderNodeKind::Magic => {
+                                    let mut depth = if node.props[9] > 0.5 {
+                                        node.props[8].round().clamp(0.0, 10.0) as i32
+                                    } else {
+                                        node.mode.saturating_add(2).min(10) as i32
+                                    };
+                                    if ui.add(egui::DragValue::new(&mut depth).range(0..=10).prefix("Depth ")).changed() {
+                                        if let Some(n) = st.shader_nodes.iter_mut().find(|n| n.id == node.id) {
+                                            n.props[8] = depth as f32;
+                                            n.props[9] = 1.0;
+                                        }
+                                    }
+                                }
+                                ShaderNodeKind::WhiteNoise => {
+                                    let dimensions = ["1D", "2D", "3D", "4D"];
+                                    let dimension = (node.mode as usize).min(dimensions.len() - 1);
+                                    egui::ComboBox::from_id_salt(("white_noise_dimensions", node.id))
+                                        .selected_text(format!("Dimensions: {}", dimensions[dimension]))
+                                        .show_ui(ui, |ui| {
+                                            for (i, label) in dimensions.iter().enumerate() {
+                                                if ui.selectable_label(dimension == i, *label).clicked() {
+                                                    if let Some(n) = st.shader_nodes.iter_mut().find(|n| n.id == node.id) {
+                                                        n.mode = i as u8;
+                                                    }
+                                                }
+                                            }
+                                        });
+                                    ui.label("Use Mapping to scale coordinates; White Noise has no Detail setting.");
+                                }
                                 ShaderNodeKind::ColorRamp => {
                                     use forge_core::{
                                         color_ramp_eval_stops, ramp_get_stops, COLOR_RAMP_MAX_STOPS,
@@ -1339,13 +1714,13 @@ fn draw_shading_editor(ui: &mut egui::Ui, ctx: &egui::Context, doc: &mut Documen
                                             }
                                         });
                                 }
-                                ShaderNodeKind::Noise | ShaderNodeKind::Wave | ShaderNodeKind::Voronoi
-                                | ShaderNodeKind::Magic | ShaderNodeKind::Gabor
-                                | ShaderNodeKind::Gradient | ShaderNodeKind::WhiteNoise => {
+                                ShaderNodeKind::Noise
+                                | ShaderNodeKind::Voronoi
+                                | ShaderNodeKind::Gabor
+                                | ShaderNodeKind::Gradient => {
                                     // Dimensions / type mode
                                     let labels = match node.kind {
                                         ShaderNodeKind::Noise => &["1D","2D","3D","4D"][..],
-                                        ShaderNodeKind::Wave => &["Bands","Rings"][..],
                                         ShaderNodeKind::Voronoi => &["F1","F2","Smooth F1","Distance to Edge","N-Sphere"][..],
                                         ShaderNodeKind::Gradient => &["Linear","Quadratic","Easing","Diagonal","Spherical","Quadratic Sphere","Radial"][..],
                                         ShaderNodeKind::Gabor => &["2D","3D"][..],
@@ -1390,7 +1765,6 @@ fn draw_shading_editor(ui: &mut egui::Ui, ctx: &egui::Context, doc: &mut Documen
                             // you can drag when nothing is linked. Linked value overrides.
                             {
                                 let inputs = node.kind.inputs();
-                                let mut float_i = 0usize;
                                 for (i, sock) in inputs.iter().enumerate() {
                                     ui.horizontal(|ui| {
                                         let _ = shader_socket_control(
@@ -1404,47 +1778,7 @@ fn draw_shading_editor(ui: &mut egui::Ui, ctx: &egui::Context, doc: &mut Documen
                                         ui.label(sock.name);
                                         match sock.ty {
                                             forge_core::SocketType::Float => {
-                                                let mut v = if sock.name == "Scale" {
-                                                    if node.value.abs() < 1e-8 { 5.0 } else { node.value }
-                                                } else if sock.name == "Detail" {
-                                                    if node.props[0].abs() < 1e-8 { 2.0 } else { node.props[0] }
-                                                } else if sock.name == "W" {
-                                                    node.props[5]
-                                                } else if float_i == 0 {
-                                                    node.value
-                                                } else {
-                                                    node.props
-                                                        .get(float_i.saturating_sub(1))
-                                                        .copied()
-                                                        .unwrap_or(0.0)
-                                                };
-                                                if matches!(node.kind, ShaderNodeKind::Principled) {
-                                                    v = match sock.name {
-                                                        "Metallic" => node.props[0],
-                                                        "Roughness" => {
-                                                            if node.props[1].abs() < 1e-8 {
-                                                                0.5
-                                                            } else {
-                                                                node.props[1]
-                                                            }
-                                                        }
-                                                        "IOR" => {
-                                                            if node.props[2].abs() < 1e-8 {
-                                                                1.45
-                                                            } else {
-                                                                node.props[2]
-                                                            }
-                                                        }
-                                                        "Alpha" => {
-                                                            if node.props[3].abs() < 1e-8 {
-                                                                1.0
-                                                            } else {
-                                                                node.props[3]
-                                                            }
-                                                        }
-                                                        _ => v,
-                                                    };
-                                                }
+                                                let mut v = node.socket_default(i)[0];
                                                 let (speed, range) = match sock.name {
                                                     "Scale" | "Detail" | "Distortion" | "Lacunarity" => {
                                                         (0.05, 0.0..=50.0)
@@ -1482,38 +1816,18 @@ fn draw_shading_editor(ui: &mut egui::Ui, ctx: &egui::Context, doc: &mut Documen
                                                         .iter_mut()
                                                         .find(|n| n.id == node.id)
                                                     {
-                                                        // Scale is the primary texture control → always node.value
-                                                        if sock.name == "Scale" {
-                                                            n.value = v;
-                                                        } else if float_i == 0 {
-                                                            n.value = v;
-                                                        } else if float_i - 1 < 16 {
-                                                            n.props[float_i - 1] = v;
-                                                        }
-                                                        // Named props for common texture fields
-                                                        match sock.name {
-                                                            "Detail" => n.props[0] = v,
-                                                            "Lacunarity" => n.props[2] = v,
-                                                            "Distortion" | "Randomness" => n.props[3] = v,
-                                                            "Smoothness" => n.props[4] = v,
-                                                            "W" => n.props[5] = v,
-                                                            "Metallic" => n.props[0] = v,
-                                                            "Roughness" => n.props[1] = v,
-                                                            "IOR" => n.props[2] = v,
-                                                            "Alpha" => n.props[3] = v,
-                                                            _ => {}
-                                                        }
+                                                        n.set_socket_default(i, [v, 0.0, 0.0, 0.0]);
                                                     }
                                                 }
-                                                float_i += 1;
                                             }
                                             forge_core::SocketType::Color
                                             | forge_core::SocketType::Shader => {
                                                 // Default color when unlinked (still connectable via ●)
+                                                let default = node.socket_default(i);
                                                 let mut rgb = [
-                                                    lin_to_srgb8(node.color[0]),
-                                                    lin_to_srgb8(node.color[1]),
-                                                    lin_to_srgb8(node.color[2]),
+                                                    lin_to_srgb8(default[0]),
+                                                    lin_to_srgb8(default[1]),
+                                                    lin_to_srgb8(default[2]),
                                                 ];
                                                 if ui.color_edit_button_srgb(&mut rgb).changed() {
                                                     if let Some(n) = st
@@ -1521,23 +1835,20 @@ fn draw_shading_editor(ui: &mut egui::Ui, ctx: &egui::Context, doc: &mut Documen
                                                         .iter_mut()
                                                         .find(|n| n.id == node.id)
                                                     {
-                                                        n.color = [
+                                                        n.set_socket_default(i, [
                                                             srgb8_to_lin(rgb[0]),
                                                             srgb8_to_lin(rgb[1]),
                                                             srgb8_to_lin(rgb[2]),
-                                                            n.color[3],
-                                                        ];
+                                                            default[3],
+                                                        ]);
                                                     }
                                                 }
                                             }
                                             forge_core::SocketType::Vector => {
-                                                // Compact XYZ defaults in props when useful
-                                                let base = float_i.min(13);
-                                                let mut x = node.props.get(base).copied().unwrap_or(0.0);
-                                                let mut y =
-                                                    node.props.get(base + 1).copied().unwrap_or(0.0);
-                                                let mut z =
-                                                    node.props.get(base + 2).copied().unwrap_or(0.0);
+                                                let default = node.socket_default(i);
+                                                let mut x = default[0];
+                                                let mut y = default[1];
+                                                let mut z = default[2];
                                                 let mut changed = false;
                                                 changed |= ui
                                                     .add(
@@ -1566,11 +1877,7 @@ fn draw_shading_editor(ui: &mut egui::Ui, ctx: &egui::Context, doc: &mut Documen
                                                         .iter_mut()
                                                         .find(|n| n.id == node.id)
                                                     {
-                                                        if base + 2 < 16 {
-                                                            n.props[base] = x;
-                                                            n.props[base + 1] = y;
-                                                            n.props[base + 2] = z;
-                                                        }
+                                                        n.set_socket_default(i, [x, y, z, 0.0]);
                                                     }
                                                 }
                                             }

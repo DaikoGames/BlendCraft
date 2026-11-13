@@ -3,9 +3,14 @@
 //! Step 2 features: glTF PBR materials + textures (with mips), image-based lighting from an
 //! equirect HDR (SH diffuse + roughness-mip specular), procedural sky, view modes, wireframe.
 mod settings;
+mod shader_graph_wgsl;
 mod texture;
 
 pub use settings::{Highlight, ShadingMode, ViewSettings, WireMode};
+
+pub fn supports_shader_graph(graph: &forge_core::ShaderGraph) -> bool {
+    shader_graph_wgsl::compile(graph).is_ok()
+}
 
 use anyhow::{anyhow, Result};
 use bytemuck::{Pod, Zeroable};
@@ -84,6 +89,7 @@ struct GpuObject {
 struct GpuMaterial {
     bind_group: wgpu::BindGroup,
     blend: bool,
+    graph_pipeline: Option<Arc<wgpu::RenderPipeline>>,
 }
 
 const MESH_ATTRS: [wgpu::VertexAttribute; 3] =
@@ -136,6 +142,8 @@ pub struct Renderer {
     grid_vb: wgpu::Buffer,
     grid_count: u32,
     materials: Vec<GpuMaterial>,
+    graph_pipeline_cache: HashMap<(String, bool), Arc<wgpu::RenderPipeline>>,
+    graph_params_default: Arc<wgpu::Buffer>,
     objects: Vec<GpuObject>,
     mesh_cache: HashMap<usize, (Arc<MeshData>, Arc<MeshBuffers>)>,
     tex_cache: TexCache,
@@ -288,6 +296,7 @@ impl Renderer {
                 tex_entry(4),
                 tex_entry(5),
                 sampler_entry(6),
+                uniform_entry(7, wgpu::ShaderStages::FRAGMENT),
             ],
         });
         let model_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -519,6 +528,11 @@ fn vs_main(@location(0) pos: vec3<f32>) -> @builtin(position) vec4<f32> {
             contents: bytemuck::cast_slice(&grid),
             usage: wgpu::BufferUsages::VERTEX,
         });
+        let graph_params_default = Arc::new(device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("default graph parameters"),
+            contents: bytemuck::cast_slice(&[[0.0f32; 4]; 960]),
+            usage: wgpu::BufferUsages::UNIFORM,
+        }));
 
         Ok(Self {
             surface, device, queue, config, depth_view,
@@ -529,7 +543,8 @@ fn vs_main(@location(0) pos: vec3<f32>) -> @builtin(position) vec4<f32> {
             shadow_tex, shadow_view, shadow_sampler, shadow_pipeline, shadow_global_bg,
             white, flat_normal,
             sky_pipeline, grid_pipeline, mesh_opaque, mesh_blend, wire_pipeline,
-            grid_vb, grid_count: grid.len() as u32, materials: Vec::new(), objects: Vec::new(),
+            grid_vb, grid_count: grid.len() as u32, materials: Vec::new(),
+            graph_pipeline_cache: HashMap::new(), graph_params_default, objects: Vec::new(),
             mesh_cache: HashMap::new(), tex_cache: HashMap::new(), tex_owner: None,
             capture_cache: None,
         })
@@ -821,7 +836,7 @@ fn vs_main(@location(0) pos: vec3<f32>) -> @builtin(position) vec4<f32> {
         cache.insert((idx, srgb), texture::upload_mips(&self.device, &self.queue, &t.name, &levels, fmt));
     }
 
-    fn make_material(&self, m: &Material, scene: &Scene, cache: &mut TexCache) -> GpuMaterial {
+    fn make_material(&mut self, m: &Material, scene: &Scene, cache: &mut TexCache) -> GpuMaterial {
         let slots = [
             (m.base_color_tex, true),
             (m.metallic_roughness_tex, false),
@@ -848,6 +863,31 @@ fn vs_main(@location(0) pos: vec3<f32>) -> @builtin(position) vec4<f32> {
         if has_normal { flags |= 1; }
         if m.alpha_mode == AlphaMode::Mask { flags |= 2; }
         if blend { flags |= 4; }
+        let graph_program = m.shader_graph.as_ref().and_then(|graph| {
+            match shader_graph_wgsl::shader_source(
+                graph,
+                include_str!("common.wgsl"),
+                include_str!("mesh.wgsl"),
+            ) {
+                Ok(source) => Some(source),
+                Err(error) => {
+                    log::warn!("material {:?} graph uses baked fallback: {error}", m.name);
+                    None
+                }
+            }
+        });
+        let graph_source = graph_program.as_ref().map(|program| program.source.clone());
+        if graph_source.is_some() {
+            flags |= 8;
+        }
+        let graph_params = graph_program.as_ref().map_or_else(
+            || self.graph_params_default.clone(),
+            |program| Arc::new(self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("material graph parameters"),
+                contents: bytemuck::cast_slice(&program.params),
+                usage: wgpu::BufferUsages::UNIFORM,
+            })),
+        );
         let u = MaterialUniform {
             base_color: m.base_color,
             emissive: [m.emissive[0], m.emissive[1], m.emissive[2], m.normal_scale],
@@ -885,9 +925,42 @@ fn vs_main(@location(0) pos: vec3<f32>) -> @builtin(position) vec4<f32> {
                     resource: wgpu::BindingResource::TextureView(pick(cache, m.occlusion_tex, false, &self.white)),
                 },
                 wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::Sampler(&self.mat_sampler) },
+                wgpu::BindGroupEntry { binding: 7, resource: graph_params.as_entire_binding() },
             ],
         });
-        GpuMaterial { bind_group, blend }
+        let graph_pipeline = graph_source.map(|source| {
+            let key = (source.clone(), blend);
+            if let Some(pipeline) = self.graph_pipeline_cache.get(&key) {
+                return pipeline.clone();
+            }
+            if self.graph_pipeline_cache.len() >= 64 {
+                self.graph_pipeline_cache.clear();
+            }
+            let layout = self.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("graph material layout"),
+                bind_group_layouts: &[&self.global_bgl, &self.material_bgl, &self.model_bgl],
+                push_constant_ranges: &[],
+            });
+            let vertex_layout = wgpu::VertexBufferLayout {
+                array_stride: std::mem::size_of::<Vertex>() as u64,
+                step_mode: wgpu::VertexStepMode::Vertex,
+                attributes: &MESH_ATTRS,
+            };
+            let pipeline = Arc::new(make_pipeline(
+                &self.device,
+                &layout,
+                self.config.format,
+                &source,
+                &[vertex_layout],
+                wgpu::PrimitiveTopology::TriangleList,
+                !blend,
+                wgpu::CompareFunction::Less,
+                if blend { wgpu::BlendState::ALPHA_BLENDING } else { wgpu::BlendState::REPLACE },
+            ));
+            self.graph_pipeline_cache.insert(key, pipeline.clone());
+            pipeline
+        });
+        GpuMaterial { bind_group, blend, graph_pipeline }
     }
 
     /// Render the 3D view into `viewport` (x, y, w, h in physical pixels), then let `overlay`
@@ -1008,17 +1081,20 @@ fn vs_main(@location(0) pos: vec3<f32>) -> @builtin(position) vec4<f32> {
 
             if s.wireframe != WireMode::Only {
                 for blend in [false, true] {
-                    pass.set_pipeline(if blend { &self.mesh_blend } else { &self.mesh_opaque });
                     for o in &self.objects {
                         let mut bound = false;
                         for d in o.draws.iter().filter(|d| d.blend == blend) {
+                            let material = &self.materials[d.material];
+                            pass.set_pipeline(material.graph_pipeline.as_deref().unwrap_or(
+                                if blend { &self.mesh_blend } else { &self.mesh_opaque },
+                            ));
                             if !bound {
                                 pass.set_bind_group(2, &o.model_bg, &[]);
                                 pass.set_vertex_buffer(0, o.buffers.vb.slice(..));
                                 pass.set_index_buffer(o.buffers.ib.slice(..), wgpu::IndexFormat::Uint32);
                                 bound = true;
                             }
-                            pass.set_bind_group(1, &self.materials[d.material].bind_group, &[]);
+                            pass.set_bind_group(1, &material.bind_group, &[]);
                             pass.draw_indexed(d.first..d.first + d.count, 0, 0..1);
                         }
                     }
@@ -1204,17 +1280,20 @@ fn vs_main(@location(0) pos: vec3<f32>) -> @builtin(position) vec4<f32> {
 
             if s.wireframe != WireMode::Only {
                 for blend in [false, true] {
-                    pass.set_pipeline(if blend { &self.mesh_blend } else { &self.mesh_opaque });
                     for o in &self.objects {
                         let mut bound = false;
                         for d in o.draws.iter().filter(|d| d.blend == blend) {
+                            let material = &self.materials[d.material];
+                            pass.set_pipeline(material.graph_pipeline.as_deref().unwrap_or(
+                                if blend { &self.mesh_blend } else { &self.mesh_opaque },
+                            ));
                             if !bound {
                                 pass.set_bind_group(2, &o.model_bg, &[]);
                                 pass.set_vertex_buffer(0, o.buffers.vb.slice(..));
                                 pass.set_index_buffer(o.buffers.ib.slice(..), wgpu::IndexFormat::Uint32);
                                 bound = true;
                             }
-                            pass.set_bind_group(1, &self.materials[d.material].bind_group, &[]);
+                            pass.set_bind_group(1, &material.bind_group, &[]);
                             pass.draw_indexed(d.first..d.first + d.count, 0, 0..1);
                         }
                     }

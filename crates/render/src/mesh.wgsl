@@ -29,6 +29,15 @@ struct VsOut {
     @location(0) normal: vec3<f32>,
     @location(1) world: vec3<f32>,
     @location(2) uv: vec2<f32>,
+    @location(3) local_pos: vec3<f32>,
+};
+struct GraphSurface {
+    base_color: vec4<f32>,
+    metallic: f32,
+    roughness: f32,
+    emission: vec3<f32>,
+    normal: vec3<f32>,
+    ao: f32,
 };
 
 @vertex
@@ -39,8 +48,15 @@ fn vs_main(v: VsIn) -> VsOut {
     o.normal = (model.normal_matrix * vec4<f32>(v.normal, 0.0)).xyz;
     o.world = wp.xyz;
     o.uv = v.uv;
+    o.local_pos = v.pos;
     return o;
 }
+
+// GRAPH_EVALUATOR_BEGIN
+fn graph_surface(in: VsOut) -> GraphSurface {
+    return GraphSurface(u_mat.base_color, u_mat.params.x, u_mat.params.y, u_mat.emissive.rgb, normalize(in.normal), 1.0);
+}
+// GRAPH_EVALUATOR_END
 
 // Normal mapping without stored tangents: derive T/B from screen-space derivatives.
 // Solved explicitly so the result does not depend on the screen-space Y direction.
@@ -116,10 +132,11 @@ fn fs_main(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f
     let is_mask = (flags & 2u) != 0u;
     let is_blend = (flags & 4u) != 0u;
 
-    let base = u_mat.base_color * base_s;
-    let metallic = clamp(u_mat.params.x * mr_s.b, 0.0, 1.0);
-    let roughness = clamp(u_mat.params.y * mr_s.g, 0.045, 1.0);
-    let ao = 1.0 + u_mat.params.w * (ao_s - 1.0);
+    var base = u_mat.base_color * base_s;
+    var metallic = clamp(u_mat.params.x * mr_s.b, 0.0, 1.0);
+    var roughness = clamp(u_mat.params.y * mr_s.g, 0.045, 1.0);
+    var ao = 1.0 + u_mat.params.w * (ao_s - 1.0);
+    var graph_emission = em_s * u_mat.emissive.rgb;
 
     var n = normalize(in.normal);
     let flip = select(!front, front, model.tint.w < 0.0);
@@ -130,6 +147,16 @@ fn fs_main(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f
     tn = vec3<f32>(tn.xy * u_mat.emissive.w, tn.z);
     let np = perturb_normal(n, in.world, uv, tn);
     n = select(n, np, has_normal);
+
+    if ((flags & 8u) != 0u) {
+        let surface = graph_surface(in);
+        base = surface.base_color;
+        metallic = clamp(surface.metallic, 0.0, 1.0);
+        roughness = clamp(surface.roughness, 0.045, 1.0);
+        ao = clamp(surface.ao, 0.0, 1.0);
+        graph_emission = surface.emission;
+        n = normalize(surface.normal);
+    }
 
     if (is_mask && base.a < u_mat.params.z) {
         discard;
@@ -201,7 +228,7 @@ fn fs_main(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f
     // Ambient also respects the rule (no "glow through" walls)
     let shade = mix(0.0, 1.0, shadow_factor);
     let ambient = diffuse_color * 0.02 * ao * shade;
-    let lit = ambient + (diffuse_color * irradiance + spec) * ao * g.opts.z * shade + direct + em_s * u_mat.emissive.rgb;
+    let lit = ambient + (diffuse_color * irradiance + spec) * ao * g.opts.z * shade + direct + graph_emission;
 
     let mode = u32(g.env.w + 0.5);
     var rgb = finish_color(lit);

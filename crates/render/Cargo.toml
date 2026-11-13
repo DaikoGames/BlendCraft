@@ -11,3 +11,7 @@ bytemuck.workspace = true
 wgpu.workspace = true
 anyhow.workspace = true
 half.workspace = true
+log.workspace = true
+
+[dev-dependencies]
+naga = { version = "=22.1.0", features = ["wgsl-in"] }

@@ -1132,6 +1132,8 @@ dependencies = [
  "forge-core",
  "glam",
  "half",
+ "log",
+ "naga",
  "wgpu",
 ]
 

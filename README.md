@@ -32,6 +32,32 @@ cargo test -p forge-core
 4. Combine objects to build a model. Click objects in the viewport to select them. Right-click in the Outliner for Rename / Delete / Parenting / etc.
 5. File > Save (.forge) to keep the project, File > Export > glTF Binary to use it in Unity/Godot.
 
+## Shader graphs
+The renderer compiles supported connected graphs into a WGSL fragment shader and evaluates them
+per rendered surface fragment; compiled pipelines are cached, and parameter changes update a
+uniform buffer instead of recompiling. The current GPU subset includes Value, RGB, texture
+coordinates, Mapping, Noise and White Noise (1D-4D), Voronoi, Brick, Checker, Gradient, Magic,
+Gabor, Wave, Math, Color Ramp, Mix, Combine/Separate XYZ and Color, Principled BSDF, Emission, and
+Background. Graphs using other nodes continue through the asynchronous CPU UV-bake path, and the
+renderer logs which node prevented real-time compilation. In the real-time path, unconnected
+texture vector inputs use per-fragment object-space positions, so meshes without UV maps still show
+procedural patterns; explicit coordinate links take precedence. The CPU bake fallback still relies
+on UVs. Use **Bake** when an image texture is needed for export.
+
+Wave exposes Bands/Rings, direction, profile, and distortion detail controls; Brick exposes
+offset/frequency and squash/frequency settings; Magic exposes its iteration depth. White Noise
+matches Blender's 1D-4D dimension choices and has no Scale or Detail input: use a Mapping node to
+change its feature size.
+
+This is an EEVEE-style real-time implementation, not exact Blender EEVEE parity. Procedural
+functions, texture mode details, and lighting are BlendCraft implementations. Image Texture, Bump,
+Normal Map, other shader closures, Cycles-only behavior, and some coordinate semantics still use
+the baked fallback or are unsupported. Blender's EEVEE and Cycles are different rendering engines,
+so a single mode cannot match both. Run `cargo run --release -p forge-app`, open the Shading
+workspace, and try the **Noise Demo** (Noise → Color Ramp → Principled) to see the live GPU path.
+See the [Blender Shader Nodes manual](https://docs.blender.org/manual/en/latest/render/shader_nodes/index.html)
+for Blender's reference behavior.
+
 ## Navigation
 - Middle mouse drag: orbit
 - Shift + Middle / Right drag: pan
