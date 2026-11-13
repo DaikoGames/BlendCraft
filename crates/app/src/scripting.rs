@@ -189,7 +189,7 @@ fn primitive_script_data(primitive: &forge_core::Primitive) -> (String, Vec<f32>
     (primitive.name().to_owned(), params)
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "python-scripting"))]
 mod embedded {
     use super::{ScriptError, ScriptMaterial, ScriptObject, ScriptResult, ScriptSnapshot};
     use glam::{EulerRot, Quat};
@@ -200,7 +200,8 @@ mod embedded {
     };
     use std::{
         ffi::CString,
-        sync::{Arc, Mutex},
+        path::Path,
+        sync::{Arc, Mutex, OnceLock},
     };
 
     #[derive(Clone)]
@@ -1928,6 +1929,7 @@ mod embedded {
     }
 
     pub fn execute(source: String, snapshot: ScriptSnapshot) -> Result<ScriptResult, ScriptError> {
+        configure_bundled_python()?;
         let scene = Arc::new(Mutex::new(RuntimeScene::from_snapshot(snapshot)));
         Python::with_gil(|py| {
             let module = PyModule::new(py, "bpy").map_err(|error| ScriptError {
@@ -2093,12 +2095,78 @@ mod embedded {
             Ok(state.result(format!("{output}{error_output}")))
         })
     }
+
+    fn configure_bundled_python() -> Result<(), ScriptError> {
+        static CONFIGURED: OnceLock<Result<(), String>> = OnceLock::new();
+        CONFIGURED
+            .get_or_init(|| {
+                let executable = std::env::current_exe()
+                    .map_err(|error| format!("Could not locate BlendCraft executable: {error}"))?;
+                let executable_dir = executable
+                    .parent()
+                    .ok_or_else(|| "BlendCraft executable has no parent directory".to_owned())?;
+                let home = executable_dir.join("python");
+                if !home.is_dir() {
+                    return Ok(());
+                }
+                if !has_standard_library(&home) {
+                    return Err(format!(
+                        "Bundled Python runtime is incomplete at {}",
+                        home.display()
+                    ));
+                }
+                std::env::set_var("PYTHONHOME", &home);
+                #[cfg(target_os = "windows")]
+                {
+                    let mut paths = vec![
+                        executable_dir.to_path_buf(),
+                        home.clone(),
+                        home.join("DLLs"),
+                    ];
+                    if let Some(existing) = std::env::var_os("PATH") {
+                        paths.extend(std::env::split_paths(&existing));
+                    }
+                    let path = std::env::join_paths(paths)
+                        .map_err(|error| format!("Could not configure Python DLL paths: {error}"))?;
+                    std::env::set_var("PATH", path);
+                }
+                Ok(())
+            })
+            .clone()
+            .map_err(|message| ScriptError {
+                output: String::new(),
+                message,
+            })
+    }
+
+    fn has_standard_library(home: &Path) -> bool {
+        if home.join("Lib/os.py").is_file() {
+            return true;
+        }
+        home.join("lib")
+            .read_dir()
+            .ok()
+            .into_iter()
+            .flatten()
+            .filter_map(Result::ok)
+            .any(|entry| entry.path().join("os.py").is_file())
+    }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "python-scripting"))]
 pub use embedded::execute;
 
-#[cfg(all(test, not(target_arch = "wasm32")))]
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "python-scripting")))]
+pub fn execute(_source: String, _snapshot: ScriptSnapshot) -> Result<ScriptResult, ScriptError> {
+    Err(ScriptError {
+        output: String::new(),
+        message:
+            "Python scripting is unavailable in this build; enable the `python-scripting` feature."
+                .to_owned(),
+    })
+}
+
+#[cfg(all(test, not(target_arch = "wasm32"), feature = "python-scripting"))]
 mod tests {
     use super::{execute, ScriptObject, ScriptSnapshot};
 
@@ -2134,14 +2202,16 @@ mod tests {
         )
         .expect("shared Python example should run");
 
-        assert_eq!(result.objects[0].name, "Python Test Cube");
+        assert_eq!(result.objects[0].name, "BC Compatibility Cube");
         assert_eq!(result.objects[0].location, [1.0, 2.0, 3.0]);
         assert_eq!(result.objects[0].material, Some(0));
-        assert_eq!(result.materials[0].name, "BlendCraft Test Material");
+        assert_eq!(result.materials[0].name, "BC Compatibility Material");
         assert_eq!(result.materials[0].diffuse_color, [0.2, 0.55, 0.9, 1.0]);
-        assert!((result.objects[0].rotation_euler[2] - 0.523599).abs() < 0.00001);
-        assert!(result.output.contains("Script ran successfully."));
-        assert!(result.output.contains("Python Test Cube"));
+        assert!((result.objects[0].rotation_euler[2] - 0.25).abs() < 0.00001);
+        assert!(result
+            .output
+            .contains("BlendCraft scripting compatibility test passed."));
+        assert!(result.output.contains("BC Compatibility Material"));
     }
 
     #[test]

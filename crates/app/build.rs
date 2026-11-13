@@ -1,4 +1,12 @@
 fn main() {
+    let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    if target_os == "linux" || target_os == "freebsd" {
+        println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN/python/lib");
+    } else if target_os == "macos" {
+        println!("cargo:rustc-link-arg=-Wl,-rpath,@executable_path/python/lib");
+        println!("cargo:rustc-link-arg=-Wl,-rpath,@executable_path/python/Frameworks");
+    }
+
     // Re-run when the logo assets change so the embedded icon stays in sync.
     println!("cargo:rerun-if-changed=icon.ico");
     println!("cargo:rerun-if-changed=logo.png");

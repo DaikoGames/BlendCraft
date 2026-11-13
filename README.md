@@ -84,17 +84,28 @@ compositing, masks, multilayer render passes, or color-management pipeline.
 The **Scripting** workspace runs Python in an embedded CPython runtime from a background worker,
 so scripts do not block the UI. BlendCraft itself and its scene bridge remain Rust; the small
 `bpy`-named compatibility module is implemented natively in Rust and is not copied from Blender.
-The project must be built with CPython development libraries available, and packaged builds need
-the corresponding CPython runtime.
+Building from source requires CPython development libraries. Official portable ZIP bundles for
+Linux x64/arm64, Windows x64, macOS x64/arm64, and FreeBSD x64, plus Linux x64/arm64 AppImages
+and Flatpaks, include the CPython runtime. Unzip a portable bundle and run the executable beside
+its `python/` directory; no separate Python installation is needed. Raw executable artifacts and
+experimental targets without bundled scripting are not self-contained.
+The `python-scripting` Cargo feature is enabled by default. CI disables it only for cross-target
+artifacts that lack a target CPython toolchain; those builds still run the app, but Python scripts
+are unavailable there and report that limitation.
 
-The implemented subset supports scene object lookup and selection, object names and transforms,
-`mathutils.Vector`/`Euler`/`Quaternion`, common mesh-add operators, and basic material creation,
-color, metallic/roughness, and single-slot object assignment through `bpy.data.materials` and
-`obj.data.materials`. Scene changes are applied together as one undoable operation only after a
-script finishes successfully. This is not full `bpy` compatibility: node trees, modifiers, mesh
-editing, UI context, rendering, external Blender modules, and many other Blender systems are not
-implemented. Scripts using unsupported APIs will fail explicitly rather than being silently
-emulated. Use `examples/blendcraft_blender_compat_test.py` in either app.
+The implemented subset includes object lookup (`get`, name/index lookup, iteration, membership),
+context scene/active/selected objects, object names and transforms, selection methods, and
+`mathutils.Vector`, `Euler`, and `Quaternion` basics. Supported operators are object select-all
+(select/deselect/invert), delete, and mesh add for cube, plane, UV sphere, ico sphere, cylinder,
+cone, torus, and monkey. Basic materials support lookup/creation, name, diffuse color,
+metallic/roughness, and one material slot per object. A comprehensive exercise script is
+`examples/blendcraft_blender_compat_test.py`.
+
+This is not full `bpy` compatibility: mesh editing, multiple material slots, node trees, modifiers,
+collections/linking, cameras/lights creation, animation, rendering, UI context, Blender-specific
+modules, and many other Blender systems are not implemented. Unsupported API calls fail rather
+than being silently emulated. Successful scene changes are applied together as one undoable
+operation.
 
 ## Navigation
 - Middle mouse drag: orbit
