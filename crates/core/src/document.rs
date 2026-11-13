@@ -3,7 +3,10 @@
 use crate::armature::{ArmatureData, SkinBinding};
 use crate::kinds::{CameraData, LightData, LightType};
 use crate::mesh::Aabb;
-use crate::{Collection, EditDomain, EditSession, Material, MeshData, Object, ObjectKind, Primitive, Scene, TextureData, Vertex};
+use crate::{
+    Collection, EditDomain, EditSession, Material, MeshData, Object, ObjectKind, Primitive, Scene,
+    TextureData, Vertex,
+};
 use glam::{Mat4, Quat, Vec3};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
@@ -80,7 +83,6 @@ struct UndoSnap {
     edit: Option<EditSession>,
 }
 
-
 const MAX_UNDO: usize = 200;
 
 impl Document {
@@ -94,12 +96,10 @@ impl Document {
         d.scene.objects.push(cube);
 
         // Sun light above and slightly offset
-        let mut light = Object::new(
-            "Sun Light",
-            MeshData::default(),
-        );
+        let mut light = Object::new("Sun Light", MeshData::default());
         light.translation = Vec3::new(0.0, 4.0, 0.0);
-        light.rotation = Quat::from_rotation_arc(Vec3::NEG_Z, Vec3::new(-0.4, -0.8, -0.4).normalize());
+        light.rotation =
+            Quat::from_rotation_arc(Vec3::NEG_Z, Vec3::new(-0.4, -0.8, -0.4).normalize());
         light.kind = ObjectKind::Light(LightData::new(LightType::Sun));
         d.scene.objects.push(light);
 
@@ -244,8 +244,14 @@ impl Document {
         if !exists(base) {
             return base.to_string();
         }
-        let root = base.rsplit_once('.').filter(|(_, n)| n.chars().all(|c| c.is_ascii_digit())).map_or(base, |(r, _)| r);
-        (1..).map(|i| format!("{root}.{i:03}")).find(|n| !exists(n)).unwrap()
+        let root = base
+            .rsplit_once('.')
+            .filter(|(_, n)| n.chars().all(|c| c.is_ascii_digit()))
+            .map_or(base, |(r, _)| r);
+        (1..)
+            .map(|i| format!("{root}.{i:03}"))
+            .find(|n| !exists(n))
+            .unwrap()
     }
 
     // ------------------------------------------------------------------ selection
@@ -254,11 +260,20 @@ impl Document {
     }
 
     pub fn selected_indices(&self) -> Vec<usize> {
-        self.scene.objects.iter().enumerate().filter(|(_, o)| self.selection.contains(&o.id)).map(|(i, _)| i).collect()
+        self.scene
+            .objects
+            .iter()
+            .enumerate()
+            .filter(|(_, o)| self.selection.contains(&o.id))
+            .map(|(i, _)| i)
+            .collect()
     }
 
     pub fn is_selected(&self, i: usize) -> bool {
-        self.scene.objects.get(i).map_or(false, |o| self.selection.contains(&o.id))
+        self.scene
+            .objects
+            .get(i)
+            .map_or(false, |o| self.selection.contains(&o.id))
     }
 
     pub fn select_only(&mut self, i: usize) {
@@ -291,7 +306,9 @@ impl Document {
 
     /// Shift-click behaviour: add, or make active, or remove if it is already the active one.
     pub fn select_toggle(&mut self, i: usize) {
-        let Some(o) = self.scene.objects.get(i) else { return };
+        let Some(o) = self.scene.objects.get(i) else {
+            return;
+        };
         let id = o.id;
         if self.selection.contains(&id) {
             if self.active == Some(id) {
@@ -311,7 +328,10 @@ impl Document {
     }
 
     pub fn select_all(&mut self) {
-        let ids: Vec<u64> = (0..self.scene.objects.len()).filter(|&i| self.scene.is_visible(i)).map(|i| self.scene.objects[i].id).collect();
+        let ids: Vec<u64> = (0..self.scene.objects.len())
+            .filter(|&i| self.scene.is_visible(i))
+            .map(|i| self.scene.objects[i].id)
+            .collect();
         for id in &ids {
             self.selection.insert(*id);
         }
@@ -322,7 +342,10 @@ impl Document {
     }
 
     pub fn select_invert(&mut self) {
-        let ids: Vec<u64> = (0..self.scene.objects.len()).filter(|&i| self.scene.is_visible(i)).map(|i| self.scene.objects[i].id).collect();
+        let ids: Vec<u64> = (0..self.scene.objects.len())
+            .filter(|&i| self.scene.is_visible(i))
+            .map(|i| self.scene.objects[i].id)
+            .collect();
         for id in ids {
             if !self.selection.remove(&id) {
                 self.selection.insert(id);
@@ -332,7 +355,10 @@ impl Document {
     }
 
     pub fn select_random(&mut self, ratio: f32) {
-        let ids: Vec<u64> = (0..self.scene.objects.len()).filter(|&i| self.scene.is_visible(i)).map(|i| self.scene.objects[i].id).collect();
+        let ids: Vec<u64> = (0..self.scene.objects.len())
+            .filter(|&i| self.scene.is_visible(i))
+            .map(|i| self.scene.objects[i].id)
+            .collect();
         for id in ids {
             self.rng = self.rng.wrapping_mul(1664525).wrapping_add(1013904223);
             if ((self.rng >> 8) as f32 / (1u32 << 24) as f32) < ratio {
@@ -356,7 +382,11 @@ impl Document {
     }
 
     pub fn select_parent(&mut self) {
-        let parents: Vec<u64> = self.selected_indices().iter().filter_map(|&i| self.scene.objects[i].parent).collect();
+        let parents: Vec<u64> = self
+            .selected_indices()
+            .iter()
+            .filter_map(|&i| self.scene.objects[i].parent)
+            .collect();
         if parents.is_empty() {
             return;
         }
@@ -379,10 +409,15 @@ impl Document {
                 .filter(|(i, o)| {
                     self.scene.is_visible(*i)
                         && match k {
-                            SameKind::Type => std::mem::discriminant(&o.kind) == std::mem::discriminant(&ao.kind),
+                            SameKind::Type => {
+                                std::mem::discriminant(&o.kind) == std::mem::discriminant(&ao.kind)
+                            }
                             SameKind::Collection => o.collection == ao.collection,
                             SameKind::Material => o.material == ao.material,
-                            SameKind::Linked => (o.link_group.is_some() && o.link_group == ao.link_group) || Arc::ptr_eq(&o.mesh, &ao.mesh),
+                            SameKind::Linked => {
+                                (o.link_group.is_some() && o.link_group == ao.link_group)
+                                    || Arc::ptr_eq(&o.mesh, &ao.mesh)
+                            }
                         }
                 })
                 .map(|(_, o)| o.id)
@@ -397,13 +432,18 @@ impl Document {
     // ------------------------------------------------------------------ bounds
     pub fn selected_bounds(&self) -> Option<Aabb> {
         let w = self.scene.world_matrices();
-        self.selected_indices().into_iter().filter_map(|i| self.scene.object_world_bounds(i, &w[i])).reduce(Aabb::union)
+        self.selected_indices()
+            .into_iter()
+            .filter_map(|i| self.scene.object_world_bounds(i, &w[i]))
+            .reduce(Aabb::union)
     }
 
     // ------------------------------------------------------------------ adding
     fn add_object_select(&mut self, mut o: Object) {
         o.id = self.scene.alloc_id();
-        o.collection = self.active_collection.filter(|c| self.scene.collections.iter().any(|x| x.id == *c));
+        o.collection = self
+            .active_collection
+            .filter(|c| self.scene.collections.iter().any(|x| x.id == *c));
         let id = o.id;
         self.scene.objects.push(o);
         self.selection.clear();
@@ -435,7 +475,10 @@ impl Document {
                 LightType::Point => o.translation = Vec3::new(2.0, 3.0, 2.0),
                 LightType::Sun => {
                     o.translation = Vec3::new(0.0, 4.0, 0.0);
-                    o.rotation = Quat::from_rotation_arc(Vec3::NEG_Z, Vec3::new(-0.4, -0.8, -0.4).normalize());
+                    o.rotation = Quat::from_rotation_arc(
+                        Vec3::NEG_Z,
+                        Vec3::new(-0.4, -0.8, -0.4).normalize(),
+                    );
                 }
                 LightType::Spot | LightType::Area => {
                     o.translation = Vec3::new(2.0, 4.0, 2.0);
@@ -457,10 +500,26 @@ impl Document {
         let mesh = MeshData {
             name: name.to_string(),
             vertices: vec![
-                Vertex { position: [-hw, hh, 0.0], normal: n, uv: [0.0, 0.0] },
-                Vertex { position: [hw, hh, 0.0], normal: n, uv: [1.0, 0.0] },
-                Vertex { position: [hw, -hh, 0.0], normal: n, uv: [1.0, 1.0] },
-                Vertex { position: [-hw, -hh, 0.0], normal: n, uv: [0.0, 1.0] },
+                Vertex {
+                    position: [-hw, hh, 0.0],
+                    normal: n,
+                    uv: [0.0, 0.0],
+                },
+                Vertex {
+                    position: [hw, hh, 0.0],
+                    normal: n,
+                    uv: [1.0, 0.0],
+                },
+                Vertex {
+                    position: [hw, -hh, 0.0],
+                    normal: n,
+                    uv: [1.0, 1.0],
+                },
+                Vertex {
+                    position: [-hw, -hh, 0.0],
+                    normal: n,
+                    uv: [0.0, 1.0],
+                },
             ],
             indices: vec![0, 3, 2, 0, 2, 1],
             ..Default::default()
@@ -597,7 +656,9 @@ impl Document {
             }
         }
         self.selection = news.iter().copied().collect();
-        self.active = active_old.and_then(|a| map.get(&a).copied()).or(news.last().copied());
+        self.active = active_old
+            .and_then(|a| map.get(&a).copied())
+            .or(news.last().copied());
         self.sel_changed();
         true
     }
@@ -652,7 +713,9 @@ impl Document {
     /// Make `child` a child of `parent` (None = unparent), keeping its world transform.
     pub fn set_parent_of(&mut self, child: usize, parent: Option<u64>) -> Result<(), String> {
         if let Some(pid) = parent {
-            let Some(pi) = self.scene.index_of(pid) else { return Err("Parent not found".into()) };
+            let Some(pi) = self.scene.index_of(pid) else {
+                return Err("Parent not found".into());
+            };
             if pi == child || self.scene.is_ancestor(child, pi) {
                 return Err("That would create a parent loop".into());
             }
@@ -667,8 +730,14 @@ impl Document {
 
     /// Selected objects become children of the active object.
     pub fn parent_set(&mut self) -> Result<(), String> {
-        let Some(ai) = self.active_index() else { return Err("No active object (select the parent last)".into()) };
-        let children: Vec<usize> = self.selected_indices().into_iter().filter(|&i| i != ai).collect();
+        let Some(ai) = self.active_index() else {
+            return Err("No active object (select the parent last)".into());
+        };
+        let children: Vec<usize> = self
+            .selected_indices()
+            .into_iter()
+            .filter(|&i| i != ai)
+            .collect();
         if children.is_empty() {
             return Err("Select the children first, then the parent last (active)".into());
         }
@@ -692,7 +761,11 @@ impl Document {
     }
 
     pub fn parent_clear(&mut self, keep_transform: bool) {
-        let sel: Vec<usize> = self.selected_indices().into_iter().filter(|&i| self.scene.objects[i].parent.is_some()).collect();
+        let sel: Vec<usize> = self
+            .selected_indices()
+            .into_iter()
+            .filter(|&i| self.scene.objects[i].parent.is_some())
+            .collect();
         if sel.is_empty() {
             return;
         }
@@ -718,7 +791,11 @@ impl Document {
             n += 1;
         };
         let id = self.scene.alloc_id();
-        self.scene.collections.push(Collection { id, name, visible: true });
+        self.scene.collections.push(Collection {
+            id,
+            name,
+            visible: true,
+        });
         self.active_collection = Some(id);
         id
     }
@@ -779,7 +856,11 @@ impl Document {
 
     /// Bake location / rotation / scale into the mesh (the object keeps looking the same).
     pub fn apply_transform(&mut self, loc: bool, rot: bool, scale: bool) {
-        let sel: Vec<usize> = self.selected_indices().into_iter().filter(|&i| self.scene.objects[i].kind.is_mesh()).collect();
+        let sel: Vec<usize> = self
+            .selected_indices()
+            .into_iter()
+            .filter(|&i| self.scene.objects[i].kind.is_mesh())
+            .collect();
         if sel.is_empty() {
             return;
         }
@@ -814,7 +895,11 @@ impl Document {
 
     /// Move the object origin (the mesh stays where it is in the world).
     pub fn set_origin(&mut self, mode: OriginMode) {
-        let sel: Vec<usize> = self.selected_indices().into_iter().filter(|&i| self.scene.objects[i].kind.is_mesh()).collect();
+        let sel: Vec<usize> = self
+            .selected_indices()
+            .into_iter()
+            .filter(|&i| self.scene.objects[i].kind.is_mesh())
+            .collect();
         if sel.is_empty() {
             return;
         }
@@ -827,7 +912,11 @@ impl Document {
                 OriginMode::Median => o.mesh.centroid(),
                 OriginMode::Cursor => {
                     let w = old_worlds[i];
-                    if w.determinant().abs() < 1e-12 { Vec3::ZERO } else { w.inverse().transform_point3(self.scene.cursor) }
+                    if w.determinant().abs() < 1e-12 {
+                        Vec3::ZERO
+                    } else {
+                        w.inverse().transform_point3(self.scene.cursor)
+                    }
                 }
             };
             let new_t = o.matrix().transform_point3(off);
@@ -843,7 +932,11 @@ impl Document {
 
     /// Move the mesh so its bounding-box center sits on the object origin (the object moves visually).
     pub fn geometry_to_origin(&mut self) {
-        let sel: Vec<usize> = self.selected_indices().into_iter().filter(|&i| self.scene.objects[i].kind.is_mesh()).collect();
+        let sel: Vec<usize> = self
+            .selected_indices()
+            .into_iter()
+            .filter(|&i| self.scene.objects[i].kind.is_mesh())
+            .collect();
         if sel.is_empty() {
             return;
         }
@@ -867,18 +960,29 @@ impl Document {
         let target: Option<(f32, f32, f32)> = {
             let b = |i: usize| self.scene.object_world_bounds(i, &worlds[i]);
             match to {
-                AlignTo::Active => self.active_index().and_then(b).map(|bb| (bb.min[axis], bb.center()[axis], bb.max[axis])),
-                AlignTo::Selection => sel.iter().filter_map(|&i| b(i)).reduce(Aabb::union).map(|bb| (bb.min[axis], bb.center()[axis], bb.max[axis])),
+                AlignTo::Active => self
+                    .active_index()
+                    .and_then(b)
+                    .map(|bb| (bb.min[axis], bb.center()[axis], bb.max[axis])),
+                AlignTo::Selection => sel
+                    .iter()
+                    .filter_map(|&i| b(i))
+                    .reduce(Aabb::union)
+                    .map(|bb| (bb.min[axis], bb.center()[axis], bb.max[axis])),
                 AlignTo::Cursor => {
                     let c = self.scene.cursor[axis];
                     Some((c, c, c))
                 }
             }
         };
-        let Some((tmin, tc, tmax)) = target else { return };
+        let Some((tmin, tc, tmax)) = target else {
+            return;
+        };
         self.checkpoint();
         for i in self.scene.roots(&sel) {
-            let Some(bb) = self.scene.object_world_bounds(i, &worlds[i]) else { continue };
+            let Some(bb) = self.scene.object_world_bounds(i, &worlds[i]) else {
+                continue;
+            };
             let delta = match mode {
                 AlignMode::Min => tmin - bb.min[axis],
                 AlignMode::Center => tc - bb.center()[axis],
@@ -886,12 +990,17 @@ impl Document {
             };
             let mut d = Vec3::ZERO;
             d[axis] = delta;
-            self.scene.set_world(i, Mat4::from_translation(d) * worlds[i], &worlds);
+            self.scene
+                .set_world(i, Mat4::from_translation(d) * worlds[i], &worlds);
         }
     }
 
     fn move_roots_to(&mut self, target: Vec3, skip: Option<usize>) {
-        let sel: Vec<usize> = self.selected_indices().into_iter().filter(|&i| Some(i) != skip).collect();
+        let sel: Vec<usize> = self
+            .selected_indices()
+            .into_iter()
+            .filter(|&i| Some(i) != skip)
+            .collect();
         if sel.is_empty() {
             return;
         }
@@ -980,17 +1089,27 @@ impl Document {
     }
 
     pub fn join(&mut self) -> Result<(), String> {
-        let Some(ai) = self.active_index() else { return Err("No active object".into()) };
+        let Some(ai) = self.active_index() else {
+            return Err("No active object".into());
+        };
         if !self.scene.objects[ai].kind.is_mesh() {
             return Err("The active object must be a mesh".into());
         }
-        let others: Vec<usize> = self.selected_indices().into_iter().filter(|&i| i != ai && self.scene.objects[i].kind.is_mesh()).collect();
+        let others: Vec<usize> = self
+            .selected_indices()
+            .into_iter()
+            .filter(|&i| i != ai && self.scene.objects[i].kind.is_mesh())
+            .collect();
         if others.is_empty() {
             return Err("Select at least two mesh objects (active one last)".into());
         }
         self.checkpoint();
         let worlds = self.scene.world_matrices();
-        let inv_a = if worlds[ai].determinant().abs() < 1e-12 { Mat4::IDENTITY } else { worlds[ai].inverse() };
+        let inv_a = if worlds[ai].determinant().abs() < 1e-12 {
+            Mat4::IDENTITY
+        } else {
+            worlds[ai].inverse()
+        };
         let mut dst = (*self.scene.objects[ai].mesh).clone();
         dst.ensure_groups(self.scene.objects[ai].material);
         for &i in &others {
@@ -1025,8 +1144,16 @@ impl Document {
 
     /// Split each selected mesh into its disconnected pieces.
     pub fn separate_loose(&mut self) -> usize {
-        let sel: Vec<usize> = self.selected_indices().into_iter().filter(|&i| self.scene.objects[i].kind.is_mesh()).collect();
-        let jobs: Vec<(usize, Vec<MeshData>)> = sel.iter().map(|&i| (i, self.scene.objects[i].mesh.loose_parts())).filter(|(_, p)| p.len() > 1).collect();
+        let sel: Vec<usize> = self
+            .selected_indices()
+            .into_iter()
+            .filter(|&i| self.scene.objects[i].kind.is_mesh())
+            .collect();
+        let jobs: Vec<(usize, Vec<MeshData>)> = sel
+            .iter()
+            .map(|&i| (i, self.scene.objects[i].mesh.loose_parts()))
+            .filter(|(_, p)| p.len() > 1)
+            .collect();
         if jobs.is_empty() {
             return 0;
         }
@@ -1051,9 +1178,19 @@ impl Document {
 
     /// Split each selected multi-material mesh into one object per material.
     pub fn separate_material(&mut self) -> usize {
-        let sel: Vec<usize> = self.selected_indices().into_iter().filter(|&i| self.scene.objects[i].kind.is_mesh() && !self.scene.objects[i].mesh.groups.is_empty()).collect();
-        let jobs: Vec<(usize, Vec<(Option<usize>, MeshData)>)> =
-            sel.iter().map(|&i| (i, self.scene.objects[i].mesh.split_by_material())).filter(|(_, p)| p.len() > 1).collect();
+        let sel: Vec<usize> = self
+            .selected_indices()
+            .into_iter()
+            .filter(|&i| {
+                self.scene.objects[i].kind.is_mesh()
+                    && !self.scene.objects[i].mesh.groups.is_empty()
+            })
+            .collect();
+        let jobs: Vec<(usize, Vec<(Option<usize>, MeshData)>)> = sel
+            .iter()
+            .map(|&i| (i, self.scene.objects[i].mesh.split_by_material()))
+            .filter(|(_, p)| p.len() > 1)
+            .collect();
         if jobs.is_empty() {
             // single material: just flatten groups
             return 0;
@@ -1085,8 +1222,6 @@ impl Document {
         self.edit.is_some() || self.armature_edit
     }
 
-
-
     pub fn enter_paint_mode(&mut self) -> Result<(), String> {
         if self.paint_mode {
             return Ok(());
@@ -1102,26 +1237,42 @@ impl Document {
         }
         self.armature_edit = false;
         self.pose_mode = false;
-        let id = self.active.or_else(|| self.selection.iter().copied().next())
+        let id = self
+            .active
+            .or_else(|| self.selection.iter().copied().next())
             .ok_or_else(|| "Select a mesh object first".to_string())?;
-        let obj = self.scene.objects.iter().find(|o| o.id == id)
+        let obj = self
+            .scene
+            .objects
+            .iter()
+            .find(|o| o.id == id)
             .ok_or_else(|| "Object not found".to_string())?;
         if !matches!(obj.kind, crate::ObjectKind::Mesh) {
             return Err("Only mesh objects support Texture Paint".into());
         }
-        let has_usable_uvs = !obj.mesh.vertices.is_empty() && obj.mesh.vertices.iter().all(|v| {
-            v.uv.iter().all(|c| c.is_finite())
-        }) && obj.mesh.indices.len() >= 3 && {
-            let mut min = glam::Vec2::splat(f32::INFINITY);
-            let mut max = glam::Vec2::splat(f32::NEG_INFINITY);
-            for vertex in &obj.mesh.vertices {
-                let uv = glam::Vec2::from(vertex.uv);
-                if uv.is_finite() { min = min.min(uv); max = max.max(uv); }
-            }
-            (max - min).length_squared() > 1.0e-10
-        };
+        let has_usable_uvs = !obj.mesh.vertices.is_empty()
+            && obj
+                .mesh
+                .vertices
+                .iter()
+                .all(|v| v.uv.iter().all(|c| c.is_finite()))
+            && obj.mesh.indices.len() >= 3
+            && {
+                let mut min = glam::Vec2::splat(f32::INFINITY);
+                let mut max = glam::Vec2::splat(f32::NEG_INFINITY);
+                for vertex in &obj.mesh.vertices {
+                    let uv = glam::Vec2::from(vertex.uv);
+                    if uv.is_finite() {
+                        min = min.min(uv);
+                        max = max.max(uv);
+                    }
+                }
+                (max - min).length_squared() > 1.0e-10
+            };
         if !has_usable_uvs {
-            return Err("This mesh has no usable UV map. Unwrap it in UV Editing before painting.".into());
+            return Err(
+                "This mesh has no usable UV map. Unwrap it in UV Editing before painting.".into(),
+            );
         }
         self.checkpoint();
         self.selection.clear();
@@ -1148,11 +1299,18 @@ impl Document {
     /// Ensure active object material has a base color texture to paint into.
     pub fn ensure_paint_texture(&mut self) -> Result<(), String> {
         let id = self.active.ok_or_else(|| "No active object".to_string())?;
-        let obj = self.scene.objects.iter().find(|o| o.id == id)
+        let obj = self
+            .scene
+            .objects
+            .iter()
+            .find(|o| o.id == id)
             .ok_or_else(|| "Object not found".to_string())?;
         let mat_idx = obj.material.unwrap_or(0);
         // Need mutable scene textures + materials
-        let has_tex = self.scene.materials.get(mat_idx)
+        let has_tex = self
+            .scene
+            .materials
+            .get(mat_idx)
             .and_then(|m| m.base_color_tex)
             .and_then(|texture_index| self.scene.textures.get(texture_index))
             .is_some();
@@ -1167,7 +1325,11 @@ impl Document {
         for y in 0..h {
             for x in 0..w {
                 let i = ((y * w + x) * 4) as usize;
-                let c = if ((x / 32) + (y / 32)) % 2 == 0 { 200 } else { 180 };
+                let c = if ((x / 32) + (y / 32)) % 2 == 0 {
+                    200
+                } else {
+                    180
+                };
                 rgba[i] = c;
                 rgba[i + 1] = c;
                 rgba[i + 2] = c;
@@ -1200,25 +1362,56 @@ impl Document {
     }
 
     /// Paint one soft brush stamp at UV (0..1).
-    pub fn paint_at_uv(&mut self, uv: glam::Vec2, color: [f32; 4], radius_uv: f32, strength: f32) -> bool {
+    pub fn paint_at_uv(
+        &mut self,
+        uv: glam::Vec2,
+        color: [f32; 4],
+        radius_uv: f32,
+        strength: f32,
+    ) -> bool {
         self.paint_stroke_uv(&[uv], color, radius_uv, strength)
     }
 
     /// Paint a sequence of UV samples as one image update. Keeping the texture clone
     /// outside the sample loop avoids a full image copy and GPU re-upload per dab.
-    pub fn paint_stroke_uv(&mut self, uvs: &[glam::Vec2], color: [f32; 4], radius_uv: f32, strength: f32) -> bool {
-        if uvs.is_empty() { return false; }
-        let id = match self.active { Some(i) => i, None => return false };
-        let mat_idx = self.scene.objects.iter().find(|o| o.id == id)
-            .and_then(|o| o.material).unwrap_or(0);
-        let tex_idx = match self.scene.materials.get(mat_idx).and_then(|m| m.base_color_tex) {
+    pub fn paint_stroke_uv(
+        &mut self,
+        uvs: &[glam::Vec2],
+        color: [f32; 4],
+        radius_uv: f32,
+        strength: f32,
+    ) -> bool {
+        if uvs.is_empty() {
+            return false;
+        }
+        let id = match self.active {
+            Some(i) => i,
+            None => return false,
+        };
+        let mat_idx = self
+            .scene
+            .objects
+            .iter()
+            .find(|o| o.id == id)
+            .and_then(|o| o.material)
+            .unwrap_or(0);
+        let tex_idx = match self
+            .scene
+            .materials
+            .get(mat_idx)
+            .and_then(|m| m.base_color_tex)
+        {
             Some(t) => t,
             None => return false,
         };
         let mut textures = (*self.scene.textures).clone();
-        let Some(tex) = textures.get_mut(tex_idx) else { return false };
+        let Some(tex) = textures.get_mut(tex_idx) else {
+            return false;
+        };
         let (w, h) = (tex.width as i32, tex.height as i32);
-        if w < 1 || h < 1 || tex.rgba8.len() != (w as usize * h as usize * 4) { return false; }
+        if w < 1 || h < 1 || tex.rgba8.len() != (w as usize * h as usize * 4) {
+            return false;
+        }
 
         let radius_uv = radius_uv.clamp(0.0001, 1.0);
         let radius_px = (radius_uv * w.min(h) as f32).max(1.0);
@@ -1233,7 +1426,9 @@ impl Document {
         let mut changed = false;
         for uv in uvs {
             // UVs outside the active image are not painted (no accidental edge smearing).
-            if !uv.is_finite() || uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0 { continue; }
+            if !uv.is_finite() || uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0 {
+                continue;
+            }
             let cx = uv.x * (w - 1) as f32;
             let cy = uv.y * (h - 1) as f32;
             let x0 = (cx.floor() as i32 - radius_i).max(0);
@@ -1245,19 +1440,26 @@ impl Document {
                     let dx = x as f32 - cx;
                     let dy = y as f32 - cy;
                     let d = (dx * dx + dy * dy).sqrt();
-                    if d > radius_px { continue; }
+                    if d > radius_px {
+                        continue;
+                    }
                     let t = (1.0 - d / radius_px).clamp(0.0, 1.0);
                     let falloff = t * t * (3.0 - 2.0 * t);
                     let alpha = (falloff * strength * (src[3] as f32 / 255.0)).clamp(0.0, 1.0);
-                    if alpha <= 0.0 { continue; }
+                    if alpha <= 0.0 {
+                        continue;
+                    }
                     let i = ((y * w + x) * 4) as usize;
                     for channel in 0..3 {
                         let dst = tex.rgba8[i + channel] as f32;
                         tex.rgba8[i + channel] = (dst * (1.0 - alpha) + src[channel] as f32 * alpha)
-                            .round().clamp(0.0, 255.0) as u8;
+                            .round()
+                            .clamp(0.0, 255.0)
+                            as u8;
                     }
                     tex.rgba8[i + 3] = (tex.rgba8[i + 3] as f32 * (1.0 - alpha) + 255.0 * alpha)
-                        .round().clamp(0.0, 255.0) as u8;
+                        .round()
+                        .clamp(0.0, 255.0) as u8;
                     changed = true;
                 }
             }
@@ -1279,9 +1481,15 @@ impl Document {
         }
         self.armature_edit = false;
         self.pose_mode = false;
-        let id = self.active.or_else(|| self.selection.iter().copied().next())
+        let id = self
+            .active
+            .or_else(|| self.selection.iter().copied().next())
             .ok_or_else(|| "Select a mesh object first".to_string())?;
-        let obj = self.scene.objects.iter().find(|o| o.id == id)
+        let obj = self
+            .scene
+            .objects
+            .iter()
+            .find(|o| o.id == id)
             .ok_or_else(|| "Object not found".to_string())?;
         if !matches!(obj.kind, crate::ObjectKind::Mesh) {
             return Err("Only mesh objects can enter UV Editing".into());
@@ -1403,7 +1611,9 @@ impl Document {
 
     pub fn uv_translate_live(&mut self, dx: f32, dy: f32) {
         let selected = self.uv_selection.clone();
-        if selected.is_empty() { return; }
+        if selected.is_empty() {
+            return;
+        }
         if let Some(mesh) = self.active_mesh_mut() {
             crate::uv_translate(mesh, &selected, glam::Vec2::new(dx, dy));
         }
@@ -1412,14 +1622,21 @@ impl Document {
 
     pub fn uv_scale_live(&mut self, factor: f32) {
         let selected = self.uv_selection.clone();
-        if selected.is_empty() { return; }
+        if selected.is_empty() {
+            return;
+        }
         let pivot = if let Some(session) = self.edit.as_ref() {
             crate::uv_selection_center(&session.mesh, &selected)
         } else if let Some(id) = self.active {
-            self.scene.objects.iter().find(|o| o.id == id)
+            self.scene
+                .objects
+                .iter()
+                .find(|o| o.id == id)
                 .map(|o| crate::uv_selection_center(&o.mesh, &selected))
                 .unwrap_or(glam::Vec2::splat(0.5))
-        } else { glam::Vec2::splat(0.5) };
+        } else {
+            glam::Vec2::splat(0.5)
+        };
         if let Some(mesh) = self.active_mesh_mut() {
             crate::uv_scale(mesh, &selected, pivot, factor);
         }
@@ -1428,14 +1645,21 @@ impl Document {
 
     pub fn uv_rotate_live(&mut self, angle: f32) {
         let selected = self.uv_selection.clone();
-        if selected.is_empty() { return; }
+        if selected.is_empty() {
+            return;
+        }
         let pivot = if let Some(session) = self.edit.as_ref() {
             crate::uv_selection_center(&session.mesh, &selected)
         } else if let Some(id) = self.active {
-            self.scene.objects.iter().find(|o| o.id == id)
+            self.scene
+                .objects
+                .iter()
+                .find(|o| o.id == id)
                 .map(|o| crate::uv_selection_center(&o.mesh, &selected))
                 .unwrap_or(glam::Vec2::splat(0.5))
-        } else { glam::Vec2::splat(0.5) };
+        } else {
+            glam::Vec2::splat(0.5)
+        };
         if let Some(mesh) = self.active_mesh_mut() {
             crate::uv_rotate(mesh, &selected, pivot, angle);
         }
@@ -1503,9 +1727,15 @@ impl Document {
         }
         self.armature_edit = false;
         self.pose_mode = false;
-        let id = self.active.or_else(|| self.selection.iter().copied().next())
+        let id = self
+            .active
+            .or_else(|| self.selection.iter().copied().next())
             .ok_or_else(|| "Select a mesh object first".to_string())?;
-        let obj = self.scene.objects.iter().find(|o| o.id == id)
+        let obj = self
+            .scene
+            .objects
+            .iter()
+            .find(|o| o.id == id)
             .ok_or_else(|| "Object not found".to_string())?;
         if !matches!(obj.kind, crate::ObjectKind::Mesh) {
             return Err("Only mesh objects can enter Sculpt Mode".into());
@@ -1543,19 +1773,24 @@ impl Document {
         grab_delta_world: Option<glam::Vec3>,
     ) -> bool {
         let Some(id) = self.active else { return false };
-        let Some(idx) = self.scene.objects.iter().position(|o| o.id == id) else { return false };
+        let Some(idx) = self.scene.objects.iter().position(|o| o.id == id) else {
+            return false;
+        };
         let world = self.scene.world_matrices()[idx];
         let inv = world.inverse();
         let local_o = inv.transform_point3(origin);
         let local_d = inv.transform_vector3(dir).normalize_or_zero();
         let mesh_ref = self.scene.objects[idx].mesh.clone();
         let hit = crate::raycast_mesh(&mesh_ref, local_o, local_d);
-        let Some((hit_p, hit_n, _)) = hit else { return false };
+        let Some((hit_p, hit_n, _)) = hit else {
+            return false;
+        };
         let local_grab = grab_delta_world.map(|d| inv.transform_vector3(d));
         // Clone mesh, mutate, write back as new Arc
         let mut mesh = (*mesh_ref).clone();
         if settings.dyntopo {
-            let _ = crate::dyntopo_refine(&mut mesh, hit_p, settings.radius, settings.dyntopo_detail);
+            let _ =
+                crate::dyntopo_refine(&mut mesh, hit_p, settings.radius, settings.dyntopo_detail);
         }
         crate::apply_brush(&mut mesh, settings, hit_p, hit_n, local_grab);
         if let Some(obj) = self.scene.objects.iter_mut().find(|o| o.id == id) {
@@ -1571,9 +1806,15 @@ impl Document {
         if self.edit.is_some() {
             return Ok(());
         }
-        let id = self.active.or_else(|| self.selection.iter().copied().next())
+        let id = self
+            .active
+            .or_else(|| self.selection.iter().copied().next())
             .ok_or_else(|| "Select a mesh object first".to_string())?;
-        let idx = self.scene.objects.iter().position(|o| o.id == id)
+        let idx = self
+            .scene
+            .objects
+            .iter()
+            .position(|o| o.id == id)
             .ok_or_else(|| "Object not found".to_string())?;
         let obj = &self.scene.objects[idx];
         if matches!(obj.kind, ObjectKind::Armature(_)) {
@@ -1607,13 +1848,25 @@ impl Document {
 
     /// Leave Edit Mode. `apply` keeps edits; otherwise restores the original mesh.
     pub fn exit_edit_mode(&mut self, apply: bool) {
-        let Some(session) = self.edit.take() else { return };
+        let Some(session) = self.edit.take() else {
+            return;
+        };
         if apply {
             // Mesh was already live-synced during edits; keep current geometry.
-            if let Some(obj) = self.scene.objects.iter_mut().find(|o| o.id == session.object_id) {
+            if let Some(obj) = self
+                .scene
+                .objects
+                .iter_mut()
+                .find(|o| o.id == session.object_id)
+            {
                 obj.mesh = std::sync::Arc::new(session.mesh);
             }
-        } else if let Some(obj) = self.scene.objects.iter_mut().find(|o| o.id == session.object_id) {
+        } else if let Some(obj) = self
+            .scene
+            .objects
+            .iter_mut()
+            .find(|o| o.id == session.object_id)
+        {
             // Cancel: restore mesh from before entering Edit Mode
             obj.mesh = std::sync::Arc::new(session.original);
         }
@@ -1650,7 +1903,9 @@ impl Document {
 
     /// Push working mesh to the scene object (live preview while editing).
     pub fn sync_edit_mesh(&mut self) {
-        let Some(session) = self.edit.as_ref() else { return };
+        let Some(session) = self.edit.as_ref() else {
+            return;
+        };
         let id = session.object_id;
         let mesh = session.mesh.clone();
         if let Some(obj) = self.scene.objects.iter_mut().find(|o| o.id == id) {
@@ -1716,7 +1971,9 @@ impl Document {
         }
     }
     pub fn edit_delete(&mut self) {
-        if self.edit.is_none() { return; }
+        if self.edit.is_none() {
+            return;
+        }
         self.checkpoint();
         if let Some(e) = self.edit.as_mut() {
             e.delete_selection();
@@ -1725,7 +1982,9 @@ impl Document {
     }
 
     pub fn edit_extrude(&mut self, amount: f32) {
-        if self.edit.is_none() { return; }
+        if self.edit.is_none() {
+            return;
+        }
         self.checkpoint();
         if let Some(e) = self.edit.as_mut() {
             e.extrude_faces(amount);
@@ -1734,7 +1993,9 @@ impl Document {
     }
 
     pub fn edit_merge_verts(&mut self) {
-        if self.edit.is_none() { return; }
+        if self.edit.is_none() {
+            return;
+        }
         self.checkpoint();
         if let Some(e) = self.edit.as_mut() {
             e.merge_verts_at_center();
@@ -1743,7 +2004,9 @@ impl Document {
     }
 
     pub fn edit_inset(&mut self, factor: f32) {
-        if self.edit.is_none() { return; }
+        if self.edit.is_none() {
+            return;
+        }
         self.checkpoint();
         if let Some(e) = self.edit.as_mut() {
             e.inset_faces(factor);
@@ -1752,7 +2015,9 @@ impl Document {
     }
 
     pub fn edit_bevel(&mut self, amount: f32) {
-        if self.edit.is_none() { return; }
+        if self.edit.is_none() {
+            return;
+        }
         self.checkpoint();
         if let Some(e) = self.edit.as_mut() {
             e.bevel(amount);
@@ -1761,7 +2026,9 @@ impl Document {
     }
 
     pub fn edit_smooth(&mut self, factor: f32) {
-        if self.edit.is_none() { return; }
+        if self.edit.is_none() {
+            return;
+        }
         self.checkpoint();
         if let Some(e) = self.edit.as_mut() {
             e.smooth_verts(factor);
@@ -1770,7 +2037,9 @@ impl Document {
     }
 
     pub fn edit_shrink_fatten(&mut self, amount: f32) {
-        if self.edit.is_none() { return; }
+        if self.edit.is_none() {
+            return;
+        }
         self.checkpoint();
         if let Some(e) = self.edit.as_mut() {
             e.shrink_fatten(amount);
@@ -1779,7 +2048,9 @@ impl Document {
     }
 
     pub fn edit_shear(&mut self, axis: usize, amount: f32) {
-        if self.edit.is_none() { return; }
+        if self.edit.is_none() {
+            return;
+        }
         self.checkpoint();
         if let Some(e) = self.edit.as_mut() {
             e.shear(axis, amount);
@@ -1788,7 +2059,9 @@ impl Document {
     }
 
     pub fn edit_edge_slide(&mut self, amount: f32) {
-        if self.edit.is_none() { return; }
+        if self.edit.is_none() {
+            return;
+        }
         self.checkpoint();
         if let Some(e) = self.edit.as_mut() {
             e.edge_slide(amount);
@@ -1797,7 +2070,9 @@ impl Document {
     }
 
     pub fn edit_rip(&mut self) {
-        if self.edit.is_none() { return; }
+        if self.edit.is_none() {
+            return;
+        }
         self.checkpoint();
         if let Some(e) = self.edit.as_mut() {
             e.rip_region();
@@ -1806,7 +2081,9 @@ impl Document {
     }
 
     pub fn edit_loop_cut(&mut self) {
-        if self.edit.is_none() { return; }
+        if self.edit.is_none() {
+            return;
+        }
         self.checkpoint();
         if let Some(e) = self.edit.as_mut() {
             e.loop_cut();
@@ -1815,7 +2092,9 @@ impl Document {
     }
 
     pub fn edit_spin(&mut self, steps: u32, angle_deg: f32) {
-        if self.edit.is_none() { return; }
+        if self.edit.is_none() {
+            return;
+        }
         self.checkpoint();
         if let Some(e) = self.edit.as_mut() {
             e.spin(steps, angle_deg);
@@ -1824,7 +2103,9 @@ impl Document {
     }
 
     pub fn edit_knife_bisect(&mut self, plane_point: glam::Vec3, plane_normal: glam::Vec3) {
-        if self.edit.is_none() { return; }
+        if self.edit.is_none() {
+            return;
+        }
         self.checkpoint();
         if let Some(e) = self.edit.as_mut() {
             e.knife_bisect(plane_point, plane_normal);
@@ -1833,7 +2114,9 @@ impl Document {
     }
 
     pub fn edit_poly_build(&mut self, amount: f32) {
-        if self.edit.is_none() { return; }
+        if self.edit.is_none() {
+            return;
+        }
         self.checkpoint();
         if let Some(e) = self.edit.as_mut() {
             e.poly_build(amount);
@@ -1842,7 +2125,9 @@ impl Document {
     }
 
     pub fn edit_duplicate(&mut self) {
-        if self.edit.is_none() { return; }
+        if self.edit.is_none() {
+            return;
+        }
         self.checkpoint();
         if let Some(e) = self.edit.as_mut() {
             e.duplicate_faces(glam::Vec3::new(0.1, 0.1, 0.0));
@@ -1936,16 +2221,24 @@ impl Document {
     }
 
     pub fn armature_delete_bones(&mut self) {
-        let Some(armature_id) = self.active else { return };
+        let Some(armature_id) = self.active else {
+            return;
+        };
         self.checkpoint();
         let remap = if let Some(a) = self.active_armature_mut() {
             a.delete_selected()
-        } else { return };
+        } else {
+            return;
+        };
 
         // Keep every bound mesh's joint indices valid after bone indices shift.
         for object in &mut self.scene.objects {
-            let Some(skin) = object.skin.as_mut() else { continue };
-            if skin.armature_id != armature_id { continue; }
+            let Some(skin) = object.skin.as_mut() else {
+                continue;
+            };
+            if skin.armature_id != armature_id {
+                continue;
+            }
             for vertex in 0..skin.joints.len().min(skin.weights.len()) {
                 let mut joints = skin.joints[vertex];
                 let mut weights = skin.weights[vertex];
@@ -1959,7 +2252,9 @@ impl Document {
                 }
                 let sum: f32 = weights.iter().sum();
                 if sum > 1.0e-8 {
-                    for weight in &mut weights { *weight /= sum; }
+                    for weight in &mut weights {
+                        *weight /= sum;
+                    }
                 } else {
                     // Keep a deterministic fallback binding. With zero bones the
                     // skin evaluator returns rest positions; a later first bone
@@ -1986,8 +2281,13 @@ impl Document {
 
     /// Bind every selected mesh to the active armature (auto weights).
     pub fn bind_selected_to_armature(&mut self) -> Result<usize, String> {
-        let arm_id = self.active.ok_or_else(|| "Select an Armature first".to_string())?;
-        let arm_idx = self.scene.index_of(arm_id).ok_or_else(|| "Armature not found".to_string())?;
+        let arm_id = self
+            .active
+            .ok_or_else(|| "Select an Armature first".to_string())?;
+        let arm_idx = self
+            .scene
+            .index_of(arm_id)
+            .ok_or_else(|| "Armature not found".to_string())?;
         let arm = match &self.scene.objects[arm_idx].kind {
             ObjectKind::Armature(a) => a.clone(),
             _ => return Err("Active object is not an Armature".into()),
@@ -2015,7 +2315,9 @@ impl Document {
         let arm_world = worlds[arm_idx];
         let mut count = 0;
         for mid in mesh_ids {
-            let Some(mi) = self.scene.index_of(mid) else { continue };
+            let Some(mi) = self.scene.index_of(mid) else {
+                continue;
+            };
             let mesh_world = worlds[mi];
             // Bones into mesh-local space for weighting
             let to_mesh = mesh_world.inverse() * arm_world;
@@ -2061,7 +2363,9 @@ impl Document {
         let worlds = self.scene.world_matrices();
         for (oi, o) in self.scene.objects.iter_mut().enumerate() {
             let Some(skin) = o.skin.clone() else { continue };
-            let Some((_, arm_world, deform_arm)) = arm_info.iter().find(|(id, _, _)| *id == skin.armature_id) else {
+            let Some((_, arm_world, deform_arm)) =
+                arm_info.iter().find(|(id, _, _)| *id == skin.armature_id)
+            else {
                 continue;
             };
             // Mesh local deform mats: convert armature-local deform into mesh-local
@@ -2091,8 +2395,6 @@ impl Document {
         }
         self.version = self.version.wrapping_add(1);
     }
-
-
 }
 
 impl Default for Document {
@@ -2100,8 +2402,6 @@ impl Default for Document {
         Self::new()
     }
 }
-
-
 
 #[cfg(test)]
 mod tests {
@@ -2111,7 +2411,11 @@ mod tests {
     fn undo_redo_add_delete() {
         let mut d = Document::new();
         assert_eq!(d.scene.objects.len(), 3); // Cube + Sun + Camera
-        d.add_primitive(Primitive::Sphere { radius: 0.5, segments: 8, rings: 4 });
+        d.add_primitive(Primitive::Sphere {
+            radius: 0.5,
+            segments: 8,
+            rings: 4,
+        });
         assert_eq!(d.scene.objects.len(), 4);
         d.delete_selected();
         assert_eq!(d.scene.objects.len(), 3);
@@ -2149,7 +2453,11 @@ mod tests {
     #[test]
     fn join_and_separate_roundtrip() {
         let mut d = Document::new();
-        d.add_primitive(Primitive::Sphere { radius: 0.3, segments: 8, rings: 4 });
+        d.add_primitive(Primitive::Sphere {
+            radius: 0.3,
+            segments: 8,
+            rings: 4,
+        });
         d.scene.objects[3].translation = Vec3::new(3.0, 0.0, 0.0);
         // Select only the two meshes
         d.selection.clear();

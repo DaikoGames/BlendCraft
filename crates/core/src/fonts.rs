@@ -3,9 +3,7 @@
 use crate::mesh::{MeshData, Vertex};
 use lyon::math::Point;
 use lyon::path::Path;
-use lyon::tessellation::{
-    BuffersBuilder, FillOptions, FillTessellator, FillVertex, VertexBuffers,
-};
+use lyon::tessellation::{BuffersBuilder, FillOptions, FillTessellator, FillVertex, VertexBuffers};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 use ttf_parser::{Face, OutlineBuilder};
@@ -77,7 +75,11 @@ pub fn mesh_from_font_bytes(
         return Err("invalid units_per_em".into());
     }
     let scale = size / units;
-    let depth = if extrude { depth.max(0.01) } else { size * 0.02 };
+    let depth = if extrude {
+        depth.max(0.01)
+    } else {
+        size * 0.02
+    };
     let line_gap = face.line_gap() as f32 * scale;
     let asc = face.ascender() as f32 * scale;
     let line_height = (face.ascender() as f32 - face.descender() as f32) * scale + line_gap;
@@ -250,7 +252,9 @@ fn add_side_walls(
                     pts.push(last);
                 }
             }
-            lyon::path::PathEvent::Cubic { ctrl1, ctrl2, to, .. } => {
+            lyon::path::PathEvent::Cubic {
+                ctrl1, ctrl2, to, ..
+            } => {
                 for i in 1..=4 {
                     let t = i as f32 / 4.0;
                     let u = 1.0 - t;
@@ -331,7 +335,6 @@ impl OutlineBuilder for LyonOutline {
         self.builder.close();
     }
 }
-
 
 /// Well-known open-licensed fonts (direct .ttf URLs — one-time download, then local only).
 pub struct CatalogFont {

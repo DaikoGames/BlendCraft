@@ -234,9 +234,15 @@ pub fn dyntopo_refine(mesh: &mut MeshData, hit: Vec3, radius: f32, detail_relati
             (Some(m), None, None) => new_idx.extend_from_slice(&[a, m, c, m, b, c]),
             (None, Some(m), None) => new_idx.extend_from_slice(&[a, b, m, a, m, c]),
             (None, None, Some(m)) => new_idx.extend_from_slice(&[a, b, m, b, c, m]),
-            (Some(m0), Some(m1), None) => new_idx.extend_from_slice(&[a, m0, c, m0, b, m1, m0, m1, c]),
-            (None, Some(m0), Some(m1)) => new_idx.extend_from_slice(&[a, b, m0, a, m0, m1, m0, c, m1]),
-            (Some(m0), None, Some(m1)) => new_idx.extend_from_slice(&[a, m0, m1, m0, b, c, m0, c, m1]),
+            (Some(m0), Some(m1), None) => {
+                new_idx.extend_from_slice(&[a, m0, c, m0, b, m1, m0, m1, c])
+            }
+            (None, Some(m0), Some(m1)) => {
+                new_idx.extend_from_slice(&[a, b, m0, a, m0, m1, m0, c, m1])
+            }
+            (Some(m0), None, Some(m1)) => {
+                new_idx.extend_from_slice(&[a, m0, m1, m0, b, c, m0, c, m1])
+            }
             (Some(m0), Some(m1), Some(m2)) => {
                 new_idx.extend_from_slice(&[a, m0, m2, m0, b, m1, m2, m1, c, m0, m1, m2])
             }
@@ -277,7 +283,11 @@ pub fn apply_brush(
     };
 
     match settings.brush {
-        SculptBrush::Draw | SculptBrush::DrawSharp | SculptBrush::Clay | SculptBrush::ClayStrips | SculptBrush::Layer => {
+        SculptBrush::Draw
+        | SculptBrush::DrawSharp
+        | SculptBrush::Clay
+        | SculptBrush::ClayStrips
+        | SculptBrush::Layer => {
             for v in &mut mesh.vertices {
                 let p = Vec3::from(v.position);
                 let d = (p - hit).length();
@@ -400,7 +410,7 @@ pub fn apply_brush(
                 let apply = match settings.brush {
                     SculptBrush::Fill => delta_h > 0.0,   // only raise low points
                     SculptBrush::Scrape => delta_h < 0.0, // only lower high points
-                    _ => true,                           // Flatten both ways
+                    _ => true,                            // Flatten both ways
                 };
                 if apply {
                     v.position = (p + n_hit * (delta_h * strength * w)).to_array();

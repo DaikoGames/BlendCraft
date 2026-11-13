@@ -26,7 +26,9 @@ pub fn fonts_dir() -> Option<PathBuf> {
 }
 
 fn try_register(name: &str, path: &Path) {
-    let Ok(bytes) = std::fs::read(path) else { return };
+    let Ok(bytes) = std::fs::read(path) else {
+        return;
+    };
     if bytes.len() < 16 {
         return;
     }
@@ -83,7 +85,9 @@ fn scan_font_dir(dir: &Path, depth: u32) {
     if depth > 2 {
         return;
     }
-    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
     for ent in rd.flatten() {
         let path = ent.path();
         if path.is_dir() {
@@ -127,7 +131,6 @@ pub fn import_font_file(path: &Path) -> Result<String, String> {
     }
     Ok(name)
 }
-
 
 pub fn is_catalog_installed(name: &str) -> bool {
     font_registry()

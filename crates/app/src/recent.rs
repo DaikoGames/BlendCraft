@@ -9,7 +9,9 @@ fn config_file() -> Option<PathBuf> {
     let base = if cfg!(target_os = "windows") {
         std::env::var_os("APPDATA").map(PathBuf::from)?
     } else if cfg!(target_os = "macos") {
-        PathBuf::from(std::env::var_os("HOME")?).join("Library").join("Application Support")
+        PathBuf::from(std::env::var_os("HOME")?)
+            .join("Library")
+            .join("Application Support")
     } else {
         std::env::var_os("XDG_CONFIG_HOME")
             .map(PathBuf::from)
@@ -72,7 +74,11 @@ impl Recent {
             if let Some(dir) = f.parent() {
                 let _ = std::fs::create_dir_all(dir);
             }
-            let text: String = self.paths.iter().map(|p| format!("{}\n", p.to_string_lossy())).collect();
+            let text: String = self
+                .paths
+                .iter()
+                .map(|p| format!("{}\n", p.to_string_lossy()))
+                .collect();
             if let Err(e) = std::fs::write(&f, text) {
                 log::warn!("could not save recent files: {e}");
             }
@@ -94,6 +100,11 @@ mod tests {
         assert_eq!(l[0], PathBuf::from("/p/14.forge"));
         push_recent(&mut l, PathBuf::from("/p/10.forge"));
         assert_eq!(l[0], PathBuf::from("/p/10.forge"));
-        assert_eq!(l.iter().filter(|p| **p == PathBuf::from("/p/10.forge")).count(), 1);
+        assert_eq!(
+            l.iter()
+                .filter(|p| **p == PathBuf::from("/p/10.forge"))
+                .count(),
+            1
+        );
     }
 }

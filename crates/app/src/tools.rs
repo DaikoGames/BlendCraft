@@ -88,22 +88,36 @@ impl Tool {
 
     /// Tools shown in Edit Mode (left toolbar) – matches the Blender list you provided
     pub const ARMATURE_EDIT_MODE: [Tool; 13] = [
-        Tool::Select, Tool::BoxSelect, Tool::Circle, Tool::Lasso,
-        Tool::Move, Tool::Rotate, Tool::Scale,
-        Tool::BoneAdd, Tool::BoneExtrude, Tool::BoneDelete,
-        Tool::Annotate, Tool::Measure, Tool::Cursor,
+        Tool::Select,
+        Tool::BoxSelect,
+        Tool::Circle,
+        Tool::Lasso,
+        Tool::Move,
+        Tool::Rotate,
+        Tool::Scale,
+        Tool::BoneAdd,
+        Tool::BoneExtrude,
+        Tool::BoneDelete,
+        Tool::Annotate,
+        Tool::Measure,
+        Tool::Cursor,
     ];
 
     pub const POSE_MODE: [Tool; 11] = [
-        Tool::Select, Tool::BoxSelect, Tool::Circle, Tool::Lasso,
-        Tool::Move, Tool::Rotate, Tool::Scale,
-        Tool::PoseClear, Tool::Annotate, Tool::Measure, Tool::Cursor,
+        Tool::Select,
+        Tool::BoxSelect,
+        Tool::Circle,
+        Tool::Lasso,
+        Tool::Move,
+        Tool::Rotate,
+        Tool::Scale,
+        Tool::PoseClear,
+        Tool::Annotate,
+        Tool::Measure,
+        Tool::Cursor,
     ];
 
-    pub const PAINT_MODE: [Tool; 2] = [
-        Tool::PaintBrush,
-        Tool::PaintErase,
-    ];
+    pub const PAINT_MODE: [Tool; 2] = [Tool::PaintBrush, Tool::PaintErase];
 
     pub const UV_MODE: [Tool; 9] = [
         Tool::UvSelect,
@@ -374,11 +388,17 @@ impl Tool {
     }
 
     pub fn is_gizmo(self) -> bool {
-        matches!(self, Tool::Move | Tool::Rotate | Tool::Scale | Tool::Transform)
+        matches!(
+            self,
+            Tool::Move | Tool::Rotate | Tool::Scale | Tool::Transform
+        )
     }
 
     pub fn is_select(self) -> bool {
-        matches!(self, Tool::Select | Tool::BoxSelect | Tool::Lasso | Tool::Circle)
+        matches!(
+            self,
+            Tool::Select | Tool::BoxSelect | Tool::Lasso | Tool::Circle
+        )
     }
 }
 
@@ -392,7 +412,13 @@ pub enum Pivot {
 }
 
 impl Pivot {
-    pub const ALL: [Pivot; 5] = [Pivot::Median, Pivot::Active, Pivot::Individual, Pivot::Cursor, Pivot::BoundsCenter];
+    pub const ALL: [Pivot; 5] = [
+        Pivot::Median,
+        Pivot::Active,
+        Pivot::Individual,
+        Pivot::Cursor,
+        Pivot::BoundsCenter,
+    ];
     pub fn name(self) -> &'static str {
         match self {
             Pivot::Median => "Median Point",
@@ -593,7 +619,11 @@ pub fn draw_toolbar(ctx: &egui::Context, rect: egui::Rect, ts: &mut ToolState) {
                             SnapMode::Vertex => "Vertex",
                         })
                         .show_ui(ui, |ui| {
-                            ui.selectable_value(&mut ts.snap.mode, SnapMode::Increment, "Increment");
+                            ui.selectable_value(
+                                &mut ts.snap.mode,
+                                SnapMode::Increment,
+                                "Increment",
+                            );
                             ui.selectable_value(&mut ts.snap.mode, SnapMode::Vertex, "Vertex");
                         });
                     if ts.snap.mode == SnapMode::Increment {

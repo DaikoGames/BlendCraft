@@ -16,8 +16,7 @@ use std::path::Path;
 
 #[cfg(not(target_arch = "wasm32"))]
 pub fn load_fbx(path: &Path) -> Result<Scene> {
-    let bytes = std::fs::read(path)
-        .with_context(|| format!("reading {}", path.display()))?;
+    let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
     load_fbx_bytes(&bytes)
 }
 
@@ -38,7 +37,8 @@ pub fn load_fbx_bytes(bytes: &[u8]) -> Result<Scene> {
         let doc = parse_binary(bytes)?;
         return convert_doc(&doc);
     }
-    let text = std::str::from_utf8(bytes).context("FBX is not valid UTF-8 (and not a binary FBX header)")?;
+    let text = std::str::from_utf8(bytes)
+        .context("FBX is not valid UTF-8 (and not a binary FBX header)")?;
     load_fbx_str(text)
 }
 
@@ -333,8 +333,12 @@ fn parse_geometry_body(body: &str, g: &mut Geom) {
 
 fn parse_model_body(body: &str, m: &mut Model) {
     for key in [
-        "Lcl Translation", "Lcl Rotation", "Lcl Scaling",
-        "GeometricTranslation", "GeometricRotation", "GeometricScaling",
+        "Lcl Translation",
+        "Lcl Rotation",
+        "Lcl Scaling",
+        "GeometricTranslation",
+        "GeometricRotation",
+        "GeometricScaling",
     ] {
         if let Some(vals) = extract_property_vec3(body, key) {
             match key {
@@ -399,7 +403,7 @@ fn extract_array_i32(body: &str, label: &str) -> Option<Vec<i32>> {
 fn extract_array_raw(body: &str, label: &str) -> Option<String> {
     let idx = body.find(label)?;
     let after = &body[idx + label.len()..];
-    // Find "a:" 
+    // Find "a:"
     let a_idx = after.find("a:")?;
     let mut rest = &after[a_idx + 2..];
     // Collect until we hit a line that is only "}" or a new property key without commas of numbers
@@ -419,7 +423,14 @@ fn extract_array_raw(body: &str, label: &str) -> Option<String> {
             break;
         }
         // stop if we see another property like "PolygonVertexIndex:" on its own header
-        if t.contains(':') && !t.contains(',') && !t.chars().next().map(|c| c.is_ascii_digit() || c == '-' || c == '.').unwrap_or(false) {
+        if t.contains(':')
+            && !t.contains(',')
+            && !t
+                .chars()
+                .next()
+                .map(|c| c.is_ascii_digit() || c == '-' || c == '.')
+                .unwrap_or(false)
+        {
             // might be next property — if we already have data, stop
             if !buf.is_empty() && !t.starts_with('a') {
                 break;
@@ -450,8 +461,6 @@ fn extract_array_raw(body: &str, label: &str) -> Option<String> {
 // ---------------------------------------------------------------------------
 // Convert DOM → BlendCraft Scene
 // ---------------------------------------------------------------------------
-
-
 
 /// FBX UnitScaleFactor = how many centimeters one file unit is.
 /// Convert to meters: unit_to_meters = UnitScaleFactor * 0.01
@@ -505,7 +514,11 @@ fn convert_doc(doc: &FbxDoc) -> Result<Scene> {
     let mut scene = Scene::default();
     let u = doc.unit_to_meters;
     // Guard against absurd scales from bad UnitScaleFactor
-    let u = if u.is_finite() && u > 1e-9 && u < 1e6 { u } else { 0.01 };
+    let u = if u.is_finite() && u > 1e-9 && u < 1e6 {
+        u
+    } else {
+        0.01
+    };
 
     // Materials
     let mut mat_id_to_index: HashMap<i64, usize> = HashMap::new();
@@ -838,7 +851,9 @@ fn build_ascii_fbx(scene: &Scene, only: Option<&BTreeSet<u64>>) -> Result<String
         out.push_str("            P: \"InheritType\", \"enum\", \"\", \"\",1\n");
         out.push_str("            P: \"DefaultAttributeIndex\", \"int\", \"Integer\", \"\",0\n");
         // Identity transform (already baked)
-        out.push_str("            P: \"Lcl Translation\", \"Lcl Translation\", \"\", \"A\",0,0,0\n");
+        out.push_str(
+            "            P: \"Lcl Translation\", \"Lcl Translation\", \"\", \"A\",0,0,0\n",
+        );
         out.push_str("            P: \"Lcl Rotation\", \"Lcl Rotation\", \"\", \"A\",0,0,0\n");
         out.push_str("            P: \"Lcl Scaling\", \"Lcl Scaling\", \"\", \"A\",1,1,1\n");
         out.push_str("        }\n");
@@ -852,7 +867,11 @@ fn build_ascii_fbx(scene: &Scene, only: Option<&BTreeSet<u64>>) -> Result<String
     for &(model_id, geom_id, mat_i) in &model_links {
         out.push_str(&format!("    C: \"OO\",{geom_id},{model_id}\n"));
         out.push_str(&format!("    C: \"OO\",{model_id},0\n"));
-        let mid = mat_ids.get(mat_i).or_else(|| mat_ids.first()).copied().unwrap_or(0);
+        let mid = mat_ids
+            .get(mat_i)
+            .or_else(|| mat_ids.first())
+            .copied()
+            .unwrap_or(0);
         if mid != 0 {
             out.push_str(&format!("    C: \"OO\",{mid},{model_id}\n"));
         }
@@ -869,7 +888,6 @@ fn sanitize(s: &str) -> String {
     s.replace('\"', "").replace('\n', " ")
 }
 
-
 // ===========================================================================
 // Binary FBX parser (local, no external FBX libraries)
 // ===========================================================================
@@ -882,7 +900,11 @@ struct BinReader<'a> {
 
 impl<'a> BinReader<'a> {
     fn new(data: &'a [u8], version: u32) -> Self {
-        Self { data, pos: 0, version }
+        Self {
+            data,
+            pos: 0,
+            version,
+        }
     }
     fn remaining(&self) -> usize {
         self.data.len().saturating_sub(self.pos)
@@ -921,7 +943,9 @@ impl<'a> BinReader<'a> {
         if self.pos + 8 > self.data.len() {
             bail!("unexpected end of FBX");
         }
-        let v = f64::from_bits(u64::from_le_bytes(self.data[self.pos..self.pos + 8].try_into().unwrap()));
+        let v = f64::from_bits(u64::from_le_bytes(
+            self.data[self.pos..self.pos + 8].try_into().unwrap(),
+        ));
         self.pos += 8;
         Ok(v)
     }
@@ -934,7 +958,11 @@ impl<'a> BinReader<'a> {
         Ok(s)
     }
     fn offset_size(&self) -> usize {
-        if self.version >= 7500 { 8 } else { 4 }
+        if self.version >= 7500 {
+            8
+        } else {
+            4
+        }
     }
     fn read_offset(&mut self) -> Result<u64> {
         if self.version >= 7500 {
@@ -1083,7 +1111,11 @@ fn read_node(r: &mut BinReader<'_>) -> Result<Option<BinNode>> {
         r.pos = end_offset as usize;
     }
     let _ = start;
-    Ok(Some(BinNode { name, props, children }))
+    Ok(Some(BinNode {
+        name,
+        props,
+        children,
+    }))
 }
 
 fn read_prop(r: &mut BinReader<'_>) -> Result<BinProp> {
@@ -1138,7 +1170,8 @@ fn read_array_raw(r: &mut BinReader<'_>) -> Result<Vec<u8>> {
         use std::io::Read;
         let mut dec = ZlibDecoder::new(&data[..]);
         let mut out = Vec::new();
-        dec.read_to_end(&mut out).context("zlib decompress FBX array")?;
+        dec.read_to_end(&mut out)
+            .context("zlib decompress FBX array")?;
         Ok(out)
     } else {
         bail!("unsupported FBX array encoding {encoding}")
@@ -1356,7 +1389,11 @@ fn fill_model_from_children(node: &BinNode, m: &mut Model) {
                 let key = prop_string(p.props.get(0)).unwrap_or_default();
                 let nums = prop_trailing_f32(p);
                 if nums.len() >= 3 {
-                    let v = [nums[nums.len() - 3], nums[nums.len() - 2], nums[nums.len() - 1]];
+                    let v = [
+                        nums[nums.len() - 3],
+                        nums[nums.len() - 2],
+                        nums[nums.len() - 1],
+                    ];
                     if key.contains("Lcl Translation") {
                         m.translation = v;
                     } else if key.contains("Lcl Rotation") {
@@ -1406,7 +1443,11 @@ fn fill_material_from_children(node: &BinNode, mat: &mut Mat) {
                 if key.contains("Diffuse") {
                     let nums = prop_trailing_f32(p);
                     if nums.len() >= 3 {
-                        mat.diffuse = [nums[nums.len() - 3], nums[nums.len() - 2], nums[nums.len() - 1]];
+                        mat.diffuse = [
+                            nums[nums.len() - 3],
+                            nums[nums.len() - 2],
+                            nums[nums.len() - 1],
+                        ];
                     }
                 }
             }
@@ -1459,8 +1500,6 @@ fn prop_trailing_f32(node: &BinNode) -> Vec<f32> {
     v
 }
 
-
-
 // ===========================================================================
 // Binary FBX 7.4 writer (local, no external FBX libraries)
 // Version 7400 uses 32-bit offsets.
@@ -1492,8 +1531,14 @@ fn build_binary_fbx(scene: &Scene, only: Option<&BTreeSet<u64>>) -> Result<Vec<u
         if baked.vertices.is_empty() || baked.indices.is_empty() {
             continue;
         }
-        let mi = obj.material.unwrap_or(0).min(mat_names.len().saturating_sub(1));
-        let diff = mat_names.get(mi).map(|(_, c)| *c).unwrap_or([0.8, 0.8, 0.8, 1.0]);
+        let mi = obj
+            .material
+            .unwrap_or(0)
+            .min(mat_names.len().saturating_sub(1));
+        let diff = mat_names
+            .get(mi)
+            .map(|(_, c)| *c)
+            .unwrap_or([0.8, 0.8, 0.8, 1.0]);
         meshes.push((obj.name.clone(), baked, diff, mi));
     }
     if meshes.is_empty() {
@@ -1508,7 +1553,10 @@ fn build_binary_fbx(scene: &Scene, only: Option<&BTreeSet<u64>>) -> Result<Vec<u
             mat_remap[*mi] = used_mats.len();
             used_mats.push(mat_names[*mi].clone());
         } else {
-            mat_remap[*mi] = used_mats.iter().position(|(n, _)| n == &mat_names[*mi].0).unwrap_or(0);
+            mat_remap[*mi] = used_mats
+                .iter()
+                .position(|(n, _)| n == &mat_names[*mi].0)
+                .unwrap_or(0);
         }
     }
     if used_mats.is_empty() {
@@ -1592,7 +1640,11 @@ fn build_binary_fbx(scene: &Scene, only: Option<&BTreeSet<u64>>) -> Result<Vec<u
         // Model -> root (0)
         conn_children.push(connection_oo(model_ids[i], 0));
         let mi = meshes[i].3;
-        let mid = mat_ids[mat_remap.get(mi).copied().unwrap_or(0).min(mat_ids.len() - 1)];
+        let mid = mat_ids[mat_remap
+            .get(mi)
+            .copied()
+            .unwrap_or(0)
+            .min(mat_ids.len() - 1)];
         conn_children.push(connection_oo(mid, model_ids[i]));
     }
     let connections = bin_node("Connections", vec![], conn_children);
@@ -1702,7 +1754,11 @@ fn material_node(id: i64, name: &str, color: [f32; 4]) -> BinWNode {
         ],
         vec![
             bin_node("Version", vec![BinWProp::I32(102)], vec![]),
-            bin_node("ShadingModel", vec![BinWProp::String("Phong".into())], vec![]),
+            bin_node(
+                "ShadingModel",
+                vec![BinWProp::String("Phong".into())],
+                vec![],
+            ),
             bin_node("MultiLayer", vec![BinWProp::I32(0)], vec![]),
             bin_node(
                 "Properties70",
@@ -1722,7 +1778,11 @@ fn geometry_node(id: i64, name: &str, mesh: &MeshData) -> BinWNode {
     let mut verts: Vec<f64> = Vec::with_capacity(mesh.vertices.len() * 3);
     let mut norms: Vec<f64> = Vec::with_capacity(mesh.vertices.len() * 3);
     for v in &mesh.vertices {
-        verts.extend_from_slice(&[v.position[0] as f64, v.position[1] as f64, v.position[2] as f64]);
+        verts.extend_from_slice(&[
+            v.position[0] as f64,
+            v.position[1] as f64,
+            v.position[2] as f64,
+        ]);
         norms.extend_from_slice(&[v.normal[0] as f64, v.normal[1] as f64, v.normal[2] as f64]);
     }
     let mut pvi: Vec<i32> = Vec::with_capacity(mesh.indices.len());
@@ -1844,7 +1904,11 @@ fn model_node(id: i64, name: &str) -> BinWNode {
                 ],
             ),
             bin_node("Shading", vec![BinWProp::Bool(true)], vec![]),
-            bin_node("Culling", vec![BinWProp::String("CullingOff".into())], vec![]),
+            bin_node(
+                "Culling",
+                vec![BinWProp::String("CullingOff".into())],
+                vec![],
+            ),
         ],
     )
 }
@@ -1949,7 +2013,6 @@ fn write_array_f64(out: &mut Vec<u8>, arr: &[f64]) {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2005,7 +2068,10 @@ mod tests {
         scene.objects.push(obj);
 
         let bytes = build_binary_fbx(&scene, None).expect("export binary");
-        assert!(bytes.starts_with(b"Kaydara FBX Binary"), "missing binary magic");
+        assert!(
+            bytes.starts_with(b"Kaydara FBX Binary"),
+            "missing binary magic"
+        );
         assert!(bytes.len() > 100);
 
         let loaded = load_fbx_bytes(&bytes).expect("import binary");
@@ -2063,9 +2129,6 @@ Connections:  {
             }
         }
         // 50 cm → 0.5 m
-        assert!(
-            (max_abs - 0.5).abs() < 0.05,
-            "expected 0.5m, got {max_abs}"
-        );
+        assert!((max_abs - 0.5).abs() < 0.05, "expected 0.5m, got {max_abs}");
     }
 }

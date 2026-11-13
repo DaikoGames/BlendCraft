@@ -22,7 +22,6 @@ fn split_faces(mesh: &mut MeshData) {
     mesh.groups.clear();
 }
 
-
 /// Smart UV Project (simplified Blender):
 /// group faces by connected angle threshold, project each group along avg normal, pack.
 pub fn unwrap_smart(mesh: &mut MeshData) {
@@ -194,7 +193,6 @@ pub fn unwrap_reset(mesh: &mut MeshData) {
     pack_islands(mesh, 0.02);
 }
 
-
 fn normalize_per_face_then_pack(mesh: &mut MeshData, padding: f32) {
     // Preserve relative coordinates across neighboring triangles. Normalizing
     // each triangle independently tears every quad into separate UV pieces.
@@ -248,7 +246,9 @@ pub fn uv_islands(mesh: &MeshData) -> Vec<Vec<u32>> {
     let mut edge_owners: HashMap<(CornerKey, CornerKey), Vec<(u32, u32)>> = HashMap::new();
     for tri in mesh.indices.chunks_exact(3) {
         for (a, b) in [(tri[0], tri[1]), (tri[1], tri[2]), (tri[2], tri[0])] {
-            if a as usize >= count || b as usize >= count { continue; }
+            if a as usize >= count || b as usize >= count {
+                continue;
+            }
             // A face is one connected UV component by itself.
             adj[a as usize].push(b);
             adj[b as usize].push(a);
@@ -260,7 +260,9 @@ pub fn uv_islands(mesh: &MeshData) -> Vec<Vec<u32>> {
     }
     // Matching edges connect their corner vertices across split triangle faces.
     for owners in edge_owners.values() {
-        if owners.len() < 2 { continue; }
+        if owners.len() < 2 {
+            continue;
+        }
         for i in 0..owners.len() {
             for j in (i + 1)..owners.len() {
                 let (a0, a1) = owners[i];
@@ -277,14 +279,21 @@ pub fn uv_islands(mesh: &MeshData) -> Vec<Vec<u32>> {
 
     let mut used = vec![false; count];
     for &idx in &mesh.indices {
-        if let Some(slot) = used.get_mut(idx as usize) { *slot = true; }
+        if let Some(slot) = used.get_mut(idx as usize) {
+            *slot = true;
+        }
     }
     let mut seen = vec![false; count];
     let mut islands = Vec::new();
     for i in 0..count {
-        if seen[i] { continue; }
+        if seen[i] {
+            continue;
+        }
         // Ignore unused vertices; they are not UV faces/islands.
-        if !used[i] { seen[i] = true; continue; }
+        if !used[i] {
+            seen[i] = true;
+            continue;
+        }
         let mut stack = vec![i as u32];
         let mut island = Vec::new();
         seen[i] = true;
@@ -434,14 +443,17 @@ pub fn pick_uv(mesh: &MeshData, uv: Vec2, max_dist: f32) -> Option<u32> {
     best.map(|(_, i)| i)
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::mesh::Vertex;
 
     fn vertex(position: [f32; 3], uv: [f32; 2]) -> Vertex {
-        Vertex { position, normal: [0.0, 0.0, 1.0], uv }
+        Vertex {
+            position,
+            normal: [0.0, 0.0, 1.0],
+            uv,
+        }
     }
 
     #[test]

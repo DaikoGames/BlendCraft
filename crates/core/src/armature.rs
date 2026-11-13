@@ -22,7 +22,9 @@ pub struct Bone {
     pub pose_scale: [f32; 3],
 }
 
-fn default_pose_scale() -> [f32; 3] { [1.0, 1.0, 1.0] }
+fn default_pose_scale() -> [f32; 3] {
+    [1.0, 1.0, 1.0]
+}
 
 impl Bone {
     pub fn new(name: impl Into<String>, head: Vec3, tail: Vec3) -> Self {
@@ -44,8 +46,13 @@ impl Bone {
         Vec3::from(self.tail)
     }
     pub fn pose_rot_q(&self) -> Quat {
-        Quat::from_xyzw(self.pose_rot[0], self.pose_rot[1], self.pose_rot[2], self.pose_rot[3])
-            .normalize()
+        Quat::from_xyzw(
+            self.pose_rot[0],
+            self.pose_rot[1],
+            self.pose_rot[2],
+            self.pose_rot[3],
+        )
+        .normalize()
     }
     pub fn pose_loc_v(&self) -> Vec3 {
         Vec3::from(self.pose_loc)
@@ -129,13 +136,25 @@ impl ArmatureData {
     /// continues from the parent's tail. The new bone becomes the active selection.
     pub fn extrude_from_joint(&mut self, parent: u32, from_head: bool) -> Option<u32> {
         let source = self.bones.get(parent as usize)?.clone();
-        let head = if from_head { source.head_v() } else { source.tail_v() };
+        let head = if from_head {
+            source.head_v()
+        } else {
+            source.tail_v()
+        };
         let mut direction = source.direction();
-        if from_head { direction = -direction; }
-        if direction.length_squared() < 1e-8 { direction = Vec3::Y; }
+        if from_head {
+            direction = -direction;
+        }
+        if direction.length_squared() < 1e-8 {
+            direction = Vec3::Y;
+        }
         let length = source.length().max(0.25);
         let index = self.bones.len() as u32;
-        let mut bone = Bone::new(format!("Bone.{}", index + 1), head, head + direction * length);
+        let mut bone = Bone::new(
+            format!("Bone.{}", index + 1),
+            head,
+            head + direction * length,
+        );
         bone.parent = Some(parent);
         self.bones.push(bone);
         self.selected.clear();
@@ -175,7 +194,9 @@ impl ArmatureData {
             changed = false;
             for (i, b) in self.bones.iter().enumerate() {
                 let i = i as u32;
-                if remove.contains(&i) { continue; }
+                if remove.contains(&i) {
+                    continue;
+                }
                 if b.parent.map_or(false, |p| remove.contains(&p)) {
                     remove.insert(i);
                     changed = true;
@@ -195,14 +216,20 @@ impl ArmatureData {
         let old_bones = std::mem::take(&mut self.bones);
         let mut new_bones = Vec::with_capacity(next as usize);
         for (i, mut b) in old_bones.into_iter().enumerate() {
-            if remap[i].is_none() { continue; }
-            b.parent = b.parent.and_then(|p| remap.get(p as usize).and_then(|mapped| *mapped));
+            if remap[i].is_none() {
+                continue;
+            }
+            b.parent = b
+                .parent
+                .and_then(|p| remap.get(p as usize).and_then(|mapped| *mapped));
             new_bones.push(b);
         }
         self.bones = new_bones;
         self.selected.clear();
         self.active = self.bones.last().map(|_| (self.bones.len() - 1) as u32);
-        if let Some(a) = self.active { self.selected.insert(a); }
+        if let Some(a) = self.active {
+            self.selected.insert(a);
+        }
         remap
     }
 
@@ -210,7 +237,9 @@ impl ArmatureData {
     pub fn clear_pose(&mut self) {
         let mut indices: Vec<u32> = self.selected.iter().copied().collect();
         if indices.is_empty() {
-            if let Some(active) = self.active { indices.push(active); }
+            if let Some(active) = self.active {
+                indices.push(active);
+            }
         }
         for i in indices {
             if let Some(b) = self.bones.get_mut(i as usize) {
@@ -233,7 +262,9 @@ impl ArmatureData {
     ) {
         let order = self.topo_order();
         for child_idx in order {
-            let Some(parent_idx) = self.bones[child_idx].parent.map(|p| p as usize) else { continue };
+            let Some(parent_idx) = self.bones[child_idx].parent.map(|p| p as usize) else {
+                continue;
+            };
             if parent_idx >= self.bones.len()
                 || child_idx >= original.len()
                 || parent_idx >= original.len()
@@ -351,7 +382,11 @@ impl ArmatureData {
                 };
                 let (parent_scale, parent_rot, _) = parent_delta.to_scale_rotation_translation();
                 let rot = parent_rot * rest_rot * b.pose_rot_q();
-                pose_world[i] = Mat4::from_scale_rotation_translation(parent_scale * b.pose_scale_v(), rot, posed_head);
+                pose_world[i] = Mat4::from_scale_rotation_translation(
+                    parent_scale * b.pose_scale_v(),
+                    rot,
+                    posed_head,
+                );
             } else {
                 rest_world[i] = local_rest;
                 pose_world[i] = local_pose;
@@ -409,7 +444,11 @@ impl ArmatureData {
     /// `posed=false` displays rest geometry for Armature Edit Mode.
     pub fn indexed_lines(&self, posed: bool) -> Vec<(u32, Vec3, Vec3)> {
         let mut v = Vec::new();
-        let deform = if posed { Some(self.deform_matrices_hierarchical()) } else { None };
+        let deform = if posed {
+            Some(self.deform_matrices_hierarchical())
+        } else {
+            None
+        };
         for (i, b) in self.bones.iter().enumerate() {
             let pose = if let Some(mats) = deform.as_ref() {
                 mats[i] * Self::rest_matrix(b)
@@ -437,7 +476,10 @@ impl ArmatureData {
 
     /// Viewport line segments for bones (armature local, posed).
     pub fn lines(&self) -> Vec<(Vec3, Vec3)> {
-        self.indexed_lines(true).into_iter().map(|(_, a, b)| (a, b)).collect()
+        self.indexed_lines(true)
+            .into_iter()
+            .map(|(_, a, b)| (a, b))
+            .collect()
     }
 
     /// Pick against rest-pose bone segments (Armature Edit Mode).
@@ -610,7 +652,6 @@ fn dist_point_segment(p: Vec3, a: Vec3, b: Vec3) -> f32 {
     let t = ((p - a).dot(ab) / ab.length_squared().max(1e-12)).clamp(0.0, 1.0);
     (a + ab * t - p).length()
 }
-
 
 #[cfg(test)]
 mod connected_joint_tests {

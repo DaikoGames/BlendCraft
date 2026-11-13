@@ -14,7 +14,10 @@ pub fn supports_shader_graph(graph: &forge_core::ShaderGraph) -> bool {
 
 use anyhow::{anyhow, Result};
 use bytemuck::{Pod, Zeroable};
-use forge_core::{AlphaMode, EnvironmentMap, LightType, Material, MeshData, ObjectKind, OrbitCamera, Scene, TextureData, Vertex};
+use forge_core::{
+    AlphaMode, EnvironmentMap, LightType, Material, MeshData, ObjectKind, OrbitCamera, Scene,
+    TextureData, Vertex,
+};
 use glam::{Mat3, Mat4};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -95,10 +98,10 @@ struct GpuMaterial {
 const MESH_ATTRS: [wgpu::VertexAttribute; 3] =
     wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2];
 const POS_ATTRS: [wgpu::VertexAttribute; 1] = wgpu::vertex_attr_array![0 => Float32x3];
-const LINE_ATTRS: [wgpu::VertexAttribute; 2] = wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3];
+const LINE_ATTRS: [wgpu::VertexAttribute; 2] =
+    wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3];
 
 type TexCache = HashMap<(usize, bool), wgpu::TextureView>;
-
 
 pub struct Renderer {
     surface: wgpu::Surface<'static>,
@@ -164,20 +167,26 @@ struct CaptureCache {
 
 impl Renderer {
     /// `target` is anything winit's `Arc<Window>` converts into (or a canvas on wasm).
-    pub async fn new(target: impl Into<wgpu::SurfaceTarget<'static>>, width: u32, height: u32) -> Result<Self> {
+    pub async fn new(
+        target: impl Into<wgpu::SurfaceTarget<'static>>,
+        width: u32,
+        height: u32,
+    ) -> Result<Self> {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::default());
         let surface = instance.create_surface(target)?;
         // Prefer hardware rendering, but do not require a discrete GPU.
         // Retry with a lower-power adapter and finally a software/fallback adapter.
-        let adapter_options = |power_preference, force_fallback_adapter| {
-            wgpu::RequestAdapterOptions {
+        let adapter_options =
+            |power_preference, force_fallback_adapter| wgpu::RequestAdapterOptions {
                 power_preference,
                 compatible_surface: Some(&surface),
                 force_fallback_adapter,
-            }
-        };
+            };
         let adapter = if let Some(adapter) = instance
-            .request_adapter(&adapter_options(wgpu::PowerPreference::HighPerformance, false))
+            .request_adapter(&adapter_options(
+                wgpu::PowerPreference::HighPerformance,
+                false,
+            ))
             .await
         {
             adapter
@@ -201,7 +210,8 @@ impl Renderer {
                 &wgpu::DeviceDescriptor {
                     label: Some("forge device"),
                     required_features: wgpu::Features::empty(),
-                    required_limits: wgpu::Limits::downlevel_webgl2_defaults().using_resolution(adapter.limits()),
+                    required_limits: wgpu::Limits::downlevel_webgl2_defaults()
+                        .using_resolution(adapter.limits()),
                     memory_hints: wgpu::MemoryHints::default(),
                 },
                 None,
@@ -216,11 +226,9 @@ impl Renderer {
             .find(|f| f.is_srgb())
             .or_else(|| caps.formats.first().copied())
             .ok_or_else(|| anyhow!("The selected graphics adapter exposes no surface formats"))?;
-        let alpha_mode = caps
-            .alpha_modes
-            .first()
-            .copied()
-            .ok_or_else(|| anyhow!("The selected graphics adapter exposes no surface alpha modes"))?;
+        let alpha_mode = caps.alpha_modes.first().copied().ok_or_else(|| {
+            anyhow!("The selected graphics adapter exposes no surface alpha modes")
+        })?;
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format,
@@ -301,7 +309,10 @@ impl Renderer {
         });
         let model_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("model bgl"),
-            entries: &[uniform_entry(0, wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT)],
+            entries: &[uniform_entry(
+                0,
+                wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+            )],
         });
         let layout_wire = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("layout wire"),
@@ -346,7 +357,11 @@ impl Renderer {
                 &device,
                 &queue,
                 label,
-                &[texture::MipLevel { w: 1, h: 1, data: rgba.to_vec() }],
+                &[texture::MipLevel {
+                    w: 1,
+                    h: 1,
+                    data: rgba.to_vec(),
+                }],
                 wgpu::TextureFormat::Rgba8Unorm,
             )
         };
@@ -393,7 +408,13 @@ impl Renderer {
             ..Default::default()
         });
         let global_bg = make_global_bg(
-            &device, &global_bgl, &global_buf, &env_view, &env_sampler, &shadow_view, &shadow_sampler,
+            &device,
+            &global_bgl,
+            &global_buf,
+            &env_view,
+            &env_sampler,
+            &shadow_view,
+            &shadow_sampler,
         );
 
         // ---- pipelines ----
@@ -405,35 +426,68 @@ impl Renderer {
             attributes: &MESH_ATTRS,
         };
         let sky_pipeline = make_pipeline(
-            &device, &layout_basic, format, &src(include_str!("sky.wgsl"), common), &[],
-            wgpu::PrimitiveTopology::TriangleList, false, wgpu::CompareFunction::Always, wgpu::BlendState::REPLACE,
+            &device,
+            &layout_basic,
+            format,
+            &src(include_str!("sky.wgsl"), common),
+            &[],
+            wgpu::PrimitiveTopology::TriangleList,
+            false,
+            wgpu::CompareFunction::Always,
+            wgpu::BlendState::REPLACE,
         );
         let grid_pipeline = make_pipeline(
-            &device, &layout_basic, format, &src(include_str!("grid.wgsl"), common),
+            &device,
+            &layout_basic,
+            format,
+            &src(include_str!("grid.wgsl"), common),
             &[wgpu::VertexBufferLayout {
                 array_stride: std::mem::size_of::<LineVertex>() as u64,
                 step_mode: wgpu::VertexStepMode::Vertex,
                 attributes: &LINE_ATTRS,
             }],
-            wgpu::PrimitiveTopology::LineList, true, wgpu::CompareFunction::Less, wgpu::BlendState::REPLACE,
+            wgpu::PrimitiveTopology::LineList,
+            true,
+            wgpu::CompareFunction::Less,
+            wgpu::BlendState::REPLACE,
         );
         let mesh_src = src(include_str!("mesh.wgsl"), common);
         let mesh_opaque = make_pipeline(
-            &device, &layout_mat, format, &mesh_src, &[vertex_buf()],
-            wgpu::PrimitiveTopology::TriangleList, true, wgpu::CompareFunction::Less, wgpu::BlendState::REPLACE,
+            &device,
+            &layout_mat,
+            format,
+            &mesh_src,
+            &[vertex_buf()],
+            wgpu::PrimitiveTopology::TriangleList,
+            true,
+            wgpu::CompareFunction::Less,
+            wgpu::BlendState::REPLACE,
         );
         let mesh_blend = make_pipeline(
-            &device, &layout_mat, format, &mesh_src, &[vertex_buf()],
-            wgpu::PrimitiveTopology::TriangleList, false, wgpu::CompareFunction::Less, wgpu::BlendState::ALPHA_BLENDING,
+            &device,
+            &layout_mat,
+            format,
+            &mesh_src,
+            &[vertex_buf()],
+            wgpu::PrimitiveTopology::TriangleList,
+            false,
+            wgpu::CompareFunction::Less,
+            wgpu::BlendState::ALPHA_BLENDING,
         );
         let wire_pipeline = make_pipeline(
-            &device, &layout_wire, format, &src(include_str!("wire.wgsl"), common),
+            &device,
+            &layout_wire,
+            format,
+            &src(include_str!("wire.wgsl"), common),
             &[wgpu::VertexBufferLayout {
                 array_stride: std::mem::size_of::<Vertex>() as u64,
                 step_mode: wgpu::VertexStepMode::Vertex,
                 attributes: &POS_ATTRS,
             }],
-            wgpu::PrimitiveTopology::LineList, false, wgpu::CompareFunction::LessEqual, wgpu::BlendState::REPLACE,
+            wgpu::PrimitiveTopology::LineList,
+            false,
+            wgpu::CompareFunction::LessEqual,
+            wgpu::BlendState::REPLACE,
         );
 
         // Depth-only shadow pipeline: minimal group 0 layout so we never bind the
@@ -483,11 +537,13 @@ fn vs_main(@location(0) pos: vec3<f32>) -> @builtin(position) vec4<f32> {
         });
         let shadow_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("shadow pipeline"),
-            layout: Some(&device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("shadow pl"),
-                bind_group_layouts: &[&shadow_global_bgl, &model_bgl],
-                push_constant_ranges: &[],
-            })),
+            layout: Some(
+                &device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: Some("shadow pl"),
+                    bind_group_layouts: &[&shadow_global_bgl, &model_bgl],
+                    push_constant_ranges: &[],
+                }),
+            ),
             vertex: wgpu::VertexState {
                 module: &shadow_module,
                 entry_point: "vs_main",
@@ -528,24 +584,54 @@ fn vs_main(@location(0) pos: vec3<f32>) -> @builtin(position) vec4<f32> {
             contents: bytemuck::cast_slice(&grid),
             usage: wgpu::BufferUsages::VERTEX,
         });
-        let graph_params_default = Arc::new(device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("default graph parameters"),
-            contents: bytemuck::cast_slice(&[[0.0f32; 4]; 960]),
-            usage: wgpu::BufferUsages::UNIFORM,
-        }));
+        let graph_params_default = Arc::new(device.create_buffer_init(
+            &wgpu::util::BufferInitDescriptor {
+                label: Some("default graph parameters"),
+                contents: bytemuck::cast_slice(&[[0.0f32; 4]; 960]),
+                usage: wgpu::BufferUsages::UNIFORM,
+            },
+        ));
 
         Ok(Self {
-            surface, device, queue, config, depth_view,
-            global_buf, global_bgl, global_bg, material_bgl, model_bgl, env_sampler, mat_sampler, env_max_lod, sh,
-            light_count: 0, lights: [[[0.0; 4]; 4]; 8],
+            surface,
+            device,
+            queue,
+            config,
+            depth_view,
+            global_buf,
+            global_bgl,
+            global_bg,
+            material_bgl,
+            model_bgl,
+            env_sampler,
+            mat_sampler,
+            env_max_lod,
+            sh,
+            light_count: 0,
+            lights: [[[0.0; 4]; 4]; 8],
             shadow_light: -1,
             light_view_proj: Mat4::IDENTITY,
-            shadow_tex, shadow_view, shadow_sampler, shadow_pipeline, shadow_global_bg,
-            white, flat_normal,
-            sky_pipeline, grid_pipeline, mesh_opaque, mesh_blend, wire_pipeline,
-            grid_vb, grid_count: grid.len() as u32, materials: Vec::new(),
-            graph_pipeline_cache: HashMap::new(), graph_params_default, objects: Vec::new(),
-            mesh_cache: HashMap::new(), tex_cache: HashMap::new(), tex_owner: None,
+            shadow_tex,
+            shadow_view,
+            shadow_sampler,
+            shadow_pipeline,
+            shadow_global_bg,
+            white,
+            flat_normal,
+            sky_pipeline,
+            grid_pipeline,
+            mesh_opaque,
+            mesh_blend,
+            wire_pipeline,
+            grid_vb,
+            grid_count: grid.len() as u32,
+            materials: Vec::new(),
+            graph_pipeline_cache: HashMap::new(),
+            graph_params_default,
+            objects: Vec::new(),
+            mesh_cache: HashMap::new(),
+            tex_cache: HashMap::new(),
+            tex_owner: None,
             capture_cache: None,
         })
     }
@@ -577,8 +663,13 @@ fn vs_main(@location(0) pos: vec3<f32>) -> @builtin(position) vec4<f32> {
     pub fn set_environment(&mut self, env: &EnvironmentMap) {
         let (view, sh, max_lod) = build_environment(&self.device, &self.queue, env);
         self.global_bg = make_global_bg(
-            &self.device, &self.global_bgl, &self.global_buf, &view, &self.env_sampler,
-            &self.shadow_view, &self.shadow_sampler,
+            &self.device,
+            &self.global_bgl,
+            &self.global_buf,
+            &view,
+            &self.env_sampler,
+            &self.shadow_view,
+            &self.shadow_sampler,
         );
         self.sh = sh;
         self.env_max_lod = max_lod;
@@ -589,7 +680,10 @@ fn vs_main(@location(0) pos: vec3<f32>) -> @builtin(position) vec4<f32> {
     /// `highlight[i]` says how object `i` is outlined (selection state).
     pub fn set_scene(&mut self, scene: &Scene, highlight: &[Highlight]) {
         // textures
-        let same = self.tex_owner.as_ref().map_or(false, |a| Arc::ptr_eq(a, &scene.textures));
+        let same = self
+            .tex_owner
+            .as_ref()
+            .map_or(false, |a| Arc::ptr_eq(a, &scene.textures));
         if !same {
             self.tex_cache.clear();
             self.tex_owner = Some(scene.textures.clone());
@@ -626,26 +720,47 @@ fn vs_main(@location(0) pos: vec3<f32>) -> @builtin(position) vec4<f32> {
             let mut draws = Vec::new();
             if o.mesh.groups.is_empty() {
                 let mi = slot(o.material);
-                draws.push(Draw { first: 0, count: buffers.index_count, material: mi, blend: mats[mi].blend });
+                draws.push(Draw {
+                    first: 0,
+                    count: buffers.index_count,
+                    material: mi,
+                    blend: mats[mi].blend,
+                });
             } else {
                 for g in &o.mesh.groups {
                     let mi = slot(g.material);
-                    draws.push(Draw { first: g.first_index, count: g.index_count, material: mi, blend: mats[mi].blend });
+                    draws.push(Draw {
+                        first: g.first_index,
+                        count: g.index_count,
+                        material: mi,
+                        blend: mats[mi].blend,
+                    });
                 }
             }
             let hl = highlight.get(i).copied().unwrap_or(Highlight::None);
             let mu = model_uniform(&worlds[i], hl);
-            let model_buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("model uniform"),
-                contents: bytemuck::bytes_of(&mu),
-                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            });
+            let model_buf = self
+                .device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("model uniform"),
+                    contents: bytemuck::bytes_of(&mu),
+                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                });
             let model_bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("model bg"),
                 layout: &self.model_bgl,
-                entries: &[wgpu::BindGroupEntry { binding: 0, resource: model_buf.as_entire_binding() }],
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: model_buf.as_entire_binding(),
+                }],
             });
-            objects.push(GpuObject { buffers, model_buf, model_bg, draws, highlight: hl });
+            objects.push(GpuObject {
+                buffers,
+                model_buf,
+                model_bg,
+                draws,
+                highlight: hl,
+            });
         }
         self.mesh_cache = fresh;
         self.materials = mats;
@@ -681,7 +796,12 @@ fn vs_main(@location(0) pos: vec3<f32>) -> @builtin(position) vec4<f32> {
                 let inner = outer * (1.0 - l.spot_blend.clamp(0.0, 0.99));
                 lights[n] = [
                     [pos.x, pos.y, pos.z, ty],
-                    [l.color[0] * l.intensity, l.color[1] * l.intensity, l.color[2] * l.intensity, l.range],
+                    [
+                        l.color[0] * l.intensity,
+                        l.color[1] * l.intensity,
+                        l.color[2] * l.intensity,
+                        l.range,
+                    ],
                     [dir.x, dir.y, dir.z, 0.0],
                     [outer.cos(), inner.cos(), 0.0, 0.0],
                 ];
@@ -724,7 +844,11 @@ fn vs_main(@location(0) pos: vec3<f32>) -> @builtin(position) vec4<f32> {
             self.light_view_proj = match shadow_kind {
                 LightType::Sun => {
                     let dir = shadow_dir.normalize_or_zero();
-                    let up = if dir.y.abs() > 0.9 { glam::Vec3::Z } else { glam::Vec3::Y };
+                    let up = if dir.y.abs() > 0.9 {
+                        glam::Vec3::Z
+                    } else {
+                        glam::Vec3::Y
+                    };
                     let eye = center - dir * (radius * 2.0);
                     let view = Mat4::look_at_rh(eye, center, up);
                     let corners = [
@@ -744,13 +868,15 @@ fn vs_main(@location(0) pos: vec3<f32>) -> @builtin(position) vec4<f32> {
                         ls_min = ls_min.min(p);
                         ls_max = ls_max.max(p);
                     }
-                    let pad = (ls_max - ls_min).max(glam::Vec3::splat(0.5)) * 0.08 + glam::Vec3::splat(0.25);
+                    let pad = (ls_max - ls_min).max(glam::Vec3::splat(0.5)) * 0.08
+                        + glam::Vec3::splat(0.25);
                     ls_min -= pad;
                     ls_max += pad;
                     let z_pad = (ls_max.z - ls_min.z).abs() * 0.25 + 1.0;
                     let near = (-ls_max.z - z_pad).max(0.05);
                     let far = (-ls_min.z + z_pad).max(near + 0.5);
-                    let proj = Mat4::orthographic_rh(ls_min.x, ls_max.x, ls_min.y, ls_max.y, near, far);
+                    let proj =
+                        Mat4::orthographic_rh(ls_min.x, ls_max.x, ls_min.y, ls_max.y, near, far);
                     proj * view
                 }
                 // Point, Spot, Area: perspective from the light toward the scene.
@@ -762,10 +888,18 @@ fn vs_main(@location(0) pos: vec3<f32>) -> @builtin(position) vec4<f32> {
                         eye + shadow_dir.normalize_or_zero() * radius.max(1.0)
                     } else {
                         let to = center - eye;
-                        if to.length_squared() < 1e-4 { eye + glam::Vec3::NEG_Y } else { center }
+                        if to.length_squared() < 1e-4 {
+                            eye + glam::Vec3::NEG_Y
+                        } else {
+                            center
+                        }
                     };
                     let fwd = (target - eye).normalize_or_zero();
-                    let up = if fwd.y.abs() > 0.9 { glam::Vec3::Z } else { glam::Vec3::Y };
+                    let up = if fwd.y.abs() > 0.9 {
+                        glam::Vec3::Z
+                    } else {
+                        glam::Vec3::Y
+                    };
                     let view = Mat4::look_at_rh(eye, target, up);
                     let corners = [
                         glam::Vec3::new(bounds.min.x, bounds.min.y, bounds.min.z),
@@ -783,7 +917,9 @@ fn vs_main(@location(0) pos: vec3<f32>) -> @builtin(position) vec4<f32> {
                     for c in corners {
                         let to = c - eye;
                         let d = to.length();
-                        if d < 1e-5 { continue; }
+                        if d < 1e-5 {
+                            continue;
+                        }
                         min_dist = min_dist.min(d);
                         max_dist = max_dist.max(d);
                         max_ang = max_ang.max(fwd.dot(to / d).clamp(-1.0, 1.0).acos());
@@ -812,13 +948,30 @@ fn vs_main(@location(0) pos: vec3<f32>) -> @builtin(position) vec4<f32> {
     fn upload_mesh(&self, m: &MeshData) -> MeshBuffers {
         let edges = build_edges(&m.indices);
         let buf = |label: &str, bytes: &[u8], usage| {
-            self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some(label), contents: bytes, usage })
+            self.device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some(label),
+                    contents: bytes,
+                    usage,
+                })
         };
         MeshBuffers {
-            vb: buf("vb", bytemuck::cast_slice(&m.vertices), wgpu::BufferUsages::VERTEX),
-            ib: buf("ib", bytemuck::cast_slice(&m.indices), wgpu::BufferUsages::INDEX),
+            vb: buf(
+                "vb",
+                bytemuck::cast_slice(&m.vertices),
+                wgpu::BufferUsages::VERTEX,
+            ),
+            ib: buf(
+                "ib",
+                bytemuck::cast_slice(&m.indices),
+                wgpu::BufferUsages::INDEX,
+            ),
             index_count: m.indices.len() as u32,
-            wire_ib: buf("wire ib", bytemuck::cast_slice(&edges), wgpu::BufferUsages::INDEX),
+            wire_ib: buf(
+                "wire ib",
+                bytemuck::cast_slice(&edges),
+                wgpu::BufferUsages::INDEX,
+            ),
             wire_count: edges.len() as u32,
         }
     }
@@ -827,13 +980,25 @@ fn vs_main(@location(0) pos: vec3<f32>) -> @builtin(position) vec4<f32> {
         if cache.contains_key(&(idx, srgb)) {
             return;
         }
-        let Some(t) = scene.textures.get(idx) else { return };
-        if t.width == 0 || t.height == 0 || t.rgba8.len() != t.width as usize * t.height as usize * 4 {
+        let Some(t) = scene.textures.get(idx) else {
+            return;
+        };
+        if t.width == 0
+            || t.height == 0
+            || t.rgba8.len() != t.width as usize * t.height as usize * 4
+        {
             return;
         }
         let levels = texture::mip_chain_rgba8(t.width, t.height, t.rgba8.clone(), srgb);
-        let fmt = if srgb { wgpu::TextureFormat::Rgba8UnormSrgb } else { wgpu::TextureFormat::Rgba8Unorm };
-        cache.insert((idx, srgb), texture::upload_mips(&self.device, &self.queue, &t.name, &levels, fmt));
+        let fmt = if srgb {
+            wgpu::TextureFormat::Rgba8UnormSrgb
+        } else {
+            wgpu::TextureFormat::Rgba8Unorm
+        };
+        cache.insert(
+            (idx, srgb),
+            texture::upload_mips(&self.device, &self.queue, &t.name, &levels, fmt),
+        );
     }
 
     fn make_material(&mut self, m: &Material, scene: &Scene, cache: &mut TexCache) -> GpuMaterial {
@@ -857,12 +1022,20 @@ fn vs_main(@location(0) pos: vec3<f32>) -> @builtin(position) vec4<f32> {
         ) -> &'a wgpu::TextureView {
             t.and_then(|i| cache.get(&(i, srgb))).unwrap_or(fallback)
         }
-        let has_normal = m.normal_tex.map_or(false, |i| cache.contains_key(&(i, false)));
+        let has_normal = m
+            .normal_tex
+            .map_or(false, |i| cache.contains_key(&(i, false)));
         let blend = m.alpha_mode == AlphaMode::Blend;
         let mut flags = 0u32;
-        if has_normal { flags |= 1; }
-        if m.alpha_mode == AlphaMode::Mask { flags |= 2; }
-        if blend { flags |= 4; }
+        if has_normal {
+            flags |= 1;
+        }
+        if m.alpha_mode == AlphaMode::Mask {
+            flags |= 2;
+        }
+        if blend {
+            flags |= 4;
+        }
         let graph_program = m.shader_graph.as_ref().and_then(|graph| {
             match shader_graph_wgsl::shader_source(
                 graph,
@@ -882,50 +1055,96 @@ fn vs_main(@location(0) pos: vec3<f32>) -> @builtin(position) vec4<f32> {
         }
         let graph_params = graph_program.as_ref().map_or_else(
             || self.graph_params_default.clone(),
-            |program| Arc::new(self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("material graph parameters"),
-                contents: bytemuck::cast_slice(&program.params),
-                usage: wgpu::BufferUsages::UNIFORM,
-            })),
+            |program| {
+                Arc::new(
+                    self.device
+                        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                            label: Some("material graph parameters"),
+                            contents: bytemuck::cast_slice(&program.params),
+                            usage: wgpu::BufferUsages::UNIFORM,
+                        }),
+                )
+            },
         );
         let u = MaterialUniform {
             base_color: m.base_color,
             emissive: [m.emissive[0], m.emissive[1], m.emissive[2], m.normal_scale],
-            params: [m.metallic, m.roughness, m.alpha_cutoff, m.occlusion_strength],
+            params: [
+                m.metallic,
+                m.roughness,
+                m.alpha_cutoff,
+                m.occlusion_strength,
+            ],
             flags: [flags, 0, 0, 0],
         };
-        let ubuf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("material uniform"),
-            contents: bytemuck::bytes_of(&u),
-            usage: wgpu::BufferUsages::UNIFORM,
-        });
+        let ubuf = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("material uniform"),
+                contents: bytemuck::bytes_of(&u),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
         let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("material bg"),
             layout: &self.material_bgl,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: ubuf.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: ubuf.as_entire_binding(),
+                },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: wgpu::BindingResource::TextureView(pick(cache, m.base_color_tex, true, &self.white)),
+                    resource: wgpu::BindingResource::TextureView(pick(
+                        cache,
+                        m.base_color_tex,
+                        true,
+                        &self.white,
+                    )),
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
-                    resource: wgpu::BindingResource::TextureView(pick(cache, m.normal_tex, false, &self.flat_normal)),
+                    resource: wgpu::BindingResource::TextureView(pick(
+                        cache,
+                        m.normal_tex,
+                        false,
+                        &self.flat_normal,
+                    )),
                 },
                 wgpu::BindGroupEntry {
                     binding: 3,
-                    resource: wgpu::BindingResource::TextureView(pick(cache, m.metallic_roughness_tex, false, &self.white)),
+                    resource: wgpu::BindingResource::TextureView(pick(
+                        cache,
+                        m.metallic_roughness_tex,
+                        false,
+                        &self.white,
+                    )),
                 },
                 wgpu::BindGroupEntry {
                     binding: 4,
-                    resource: wgpu::BindingResource::TextureView(pick(cache, m.emissive_tex, true, &self.white)),
+                    resource: wgpu::BindingResource::TextureView(pick(
+                        cache,
+                        m.emissive_tex,
+                        true,
+                        &self.white,
+                    )),
                 },
                 wgpu::BindGroupEntry {
                     binding: 5,
-                    resource: wgpu::BindingResource::TextureView(pick(cache, m.occlusion_tex, false, &self.white)),
+                    resource: wgpu::BindingResource::TextureView(pick(
+                        cache,
+                        m.occlusion_tex,
+                        false,
+                        &self.white,
+                    )),
                 },
-                wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::Sampler(&self.mat_sampler) },
-                wgpu::BindGroupEntry { binding: 7, resource: graph_params.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: wgpu::BindingResource::Sampler(&self.mat_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: graph_params.as_entire_binding(),
+                },
             ],
         });
         let graph_pipeline = graph_source.map(|source| {
@@ -936,11 +1155,13 @@ fn vs_main(@location(0) pos: vec3<f32>) -> @builtin(position) vec4<f32> {
             if self.graph_pipeline_cache.len() >= 64 {
                 self.graph_pipeline_cache.clear();
             }
-            let layout = self.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("graph material layout"),
-                bind_group_layouts: &[&self.global_bgl, &self.material_bgl, &self.model_bgl],
-                push_constant_ranges: &[],
-            });
+            let layout = self
+                .device
+                .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: Some("graph material layout"),
+                    bind_group_layouts: &[&self.global_bgl, &self.material_bgl, &self.model_bgl],
+                    push_constant_ranges: &[],
+                });
             let vertex_layout = wgpu::VertexBufferLayout {
                 array_stride: std::mem::size_of::<Vertex>() as u64,
                 step_mode: wgpu::VertexStepMode::Vertex,
@@ -955,12 +1176,20 @@ fn vs_main(@location(0) pos: vec3<f32>) -> @builtin(position) vec4<f32> {
                 wgpu::PrimitiveTopology::TriangleList,
                 !blend,
                 wgpu::CompareFunction::Less,
-                if blend { wgpu::BlendState::ALPHA_BLENDING } else { wgpu::BlendState::REPLACE },
+                if blend {
+                    wgpu::BlendState::ALPHA_BLENDING
+                } else {
+                    wgpu::BlendState::REPLACE
+                },
             ));
             self.graph_pipeline_cache.insert(key, pipeline.clone());
             pipeline
         });
-        GpuMaterial { bind_group, blend, graph_pipeline }
+        GpuMaterial {
+            bind_group,
+            blend,
+            graph_pipeline,
+        }
     }
 
     /// Render the 3D view into `viewport` (x, y, w, h in physical pixels), then let `overlay`
@@ -970,15 +1199,28 @@ fn vs_main(@location(0) pos: vec3<f32>) -> @builtin(position) vec4<f32> {
         camera: &OrbitCamera,
         s: &ViewSettings,
         viewport: [f32; 4],
-        overlay: &mut dyn FnMut(&wgpu::Device, &wgpu::Queue, &mut wgpu::CommandEncoder, &wgpu::TextureView) -> Vec<wgpu::CommandBuffer>,
+        overlay: &mut dyn FnMut(
+            &wgpu::Device,
+            &wgpu::Queue,
+            &mut wgpu::CommandEncoder,
+            &wgpu::TextureView,
+        ) -> Vec<wgpu::CommandBuffer>,
     ) -> Result<(), wgpu::SurfaceError> {
         let (sw, sh) = (self.config.width as f32, self.config.height as f32);
         // Zero-size viewport (e.g. Rendering workspace) → clear only, no 3D geometry.
         let skip_3d = viewport[2] < 0.5 || viewport[3] < 0.5;
         let vx = viewport[0].clamp(0.0, (sw - 1.0).max(0.0));
         let vy = viewport[1].clamp(0.0, (sh - 1.0).max(0.0));
-        let vw = if skip_3d { 1.0 } else { viewport[2].min(sw - vx).max(1.0) };
-        let vh = if skip_3d { 1.0 } else { viewport[3].min(sh - vy).max(1.0) };
+        let vw = if skip_3d {
+            1.0
+        } else {
+            viewport[2].min(sw - vx).max(1.0)
+        };
+        let vh = if skip_3d {
+            1.0
+        } else {
+            viewport[3].min(sh - vy).max(1.0)
+        };
 
         let vp = camera.view_proj(vw / vh);
         let eye = camera.eye();
@@ -987,19 +1229,29 @@ fn vs_main(@location(0) pos: vec3<f32>) -> @builtin(position) vec4<f32> {
             view_proj: vp.to_cols_array_2d(),
             inv_view_proj: vp.inverse().to_cols_array_2d(),
             eye: [eye.x, eye.y, eye.z, 1.0],
-            env: [s.exposure, s.env_rotation, self.env_max_lod, s.shading as u32 as f32],
+            env: [
+                s.exposure,
+                s.env_rotation,
+                self.env_max_lod,
+                s.shading as u32 as f32,
+            ],
             opts: [
                 s.show_background as u32 as f32,
                 s.background_blur.clamp(0.0, 1.0) * self.env_max_lod,
                 s.env_strength,
-                if shadow_on { 1.0 + s.shadow_softness } else { 0.0 },
+                if shadow_on {
+                    1.0 + s.shadow_softness
+                } else {
+                    0.0
+                },
             ],
             sh: self.sh,
             light_info: [self.light_count as f32, self.shadow_light as f32, 0.0, 0.0],
             lights: self.lights,
             light_view_proj: self.light_view_proj.to_cols_array_2d(),
         };
-        self.queue.write_buffer(&self.global_buf, 0, bytemuck::bytes_of(&g));
+        self.queue
+            .write_buffer(&self.global_buf, 0, bytemuck::bytes_of(&g));
 
         let frame = match self.surface.get_current_texture() {
             Ok(f) => f,
@@ -1009,8 +1261,14 @@ fn vs_main(@location(0) pos: vec3<f32>) -> @builtin(position) vec4<f32> {
             }
             Err(e) => return Err(e),
         };
-        let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("frame") });
+        let view = frame
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        let mut enc = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("frame"),
+            });
 
         // ---- Shadow pass (depth from light) ----
         // HARD RULE: depth from the primary light — geometry blocks light.
@@ -1053,13 +1311,21 @@ fn vs_main(@location(0) pos: vec3<f32>) -> @builtin(position) vec4<f32> {
                     view: &view,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.02, g: 0.02, b: 0.025, a: 1.0 }),
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: 0.02,
+                            g: 0.02,
+                            b: 0.025,
+                            a: 1.0,
+                        }),
                         store: wgpu::StoreOp::Store,
                     },
                 })],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                     view: &self.depth_view,
-                    depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Store }),
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
                     stencil_ops: None,
                 }),
                 timestamp_writes: None,
@@ -1068,51 +1334,63 @@ fn vs_main(@location(0) pos: vec3<f32>) -> @builtin(position) vec4<f32> {
             pass.set_viewport(vx, vy, vw, vh, 0.0, 1.0);
             pass.set_scissor_rect(vx as u32, vy as u32, vw as u32, vh as u32);
             if !skip_3d {
-            pass.set_bind_group(0, &self.global_bg, &[]);
+                pass.set_bind_group(0, &self.global_bg, &[]);
 
-            if s.show_background {
-                pass.set_pipeline(&self.sky_pipeline);
-                pass.draw(0..3, 0..1);
-            }
+                if s.show_background {
+                    pass.set_pipeline(&self.sky_pipeline);
+                    pass.draw(0..3, 0..1);
+                }
 
-            pass.set_pipeline(&self.grid_pipeline);
-            pass.set_vertex_buffer(0, self.grid_vb.slice(..));
-            pass.draw(0..self.grid_count, 0..1);
+                pass.set_pipeline(&self.grid_pipeline);
+                pass.set_vertex_buffer(0, self.grid_vb.slice(..));
+                pass.draw(0..self.grid_count, 0..1);
 
-            if s.wireframe != WireMode::Only {
-                for blend in [false, true] {
-                    for o in &self.objects {
-                        let mut bound = false;
-                        for d in o.draws.iter().filter(|d| d.blend == blend) {
-                            let material = &self.materials[d.material];
-                            pass.set_pipeline(material.graph_pipeline.as_deref().unwrap_or(
-                                if blend { &self.mesh_blend } else { &self.mesh_opaque },
-                            ));
-                            if !bound {
-                                pass.set_bind_group(2, &o.model_bg, &[]);
-                                pass.set_vertex_buffer(0, o.buffers.vb.slice(..));
-                                pass.set_index_buffer(o.buffers.ib.slice(..), wgpu::IndexFormat::Uint32);
-                                bound = true;
+                if s.wireframe != WireMode::Only {
+                    for blend in [false, true] {
+                        for o in &self.objects {
+                            let mut bound = false;
+                            for d in o.draws.iter().filter(|d| d.blend == blend) {
+                                let material = &self.materials[d.material];
+                                pass.set_pipeline(material.graph_pipeline.as_deref().unwrap_or(
+                                    if blend {
+                                        &self.mesh_blend
+                                    } else {
+                                        &self.mesh_opaque
+                                    },
+                                ));
+                                if !bound {
+                                    pass.set_bind_group(2, &o.model_bg, &[]);
+                                    pass.set_vertex_buffer(0, o.buffers.vb.slice(..));
+                                    pass.set_index_buffer(
+                                        o.buffers.ib.slice(..),
+                                        wgpu::IndexFormat::Uint32,
+                                    );
+                                    bound = true;
+                                }
+                                pass.set_bind_group(1, &material.bind_group, &[]);
+                                pass.draw_indexed(d.first..d.first + d.count, 0, 0..1);
                             }
-                            pass.set_bind_group(1, &material.bind_group, &[]);
-                            pass.draw_indexed(d.first..d.first + d.count, 0, 0..1);
                         }
                     }
                 }
-            }
 
-            // wireframe for everything (if enabled) and always for selected objects
-            pass.set_pipeline(&self.wire_pipeline);
-            for o in self.objects.iter().filter(|o| o.highlight != Highlight::None || s.wireframe != WireMode::Off) {
-                pass.set_bind_group(1, &o.model_bg, &[]);
-                pass.set_vertex_buffer(0, o.buffers.vb.slice(..));
-                pass.set_index_buffer(o.buffers.wire_ib.slice(..), wgpu::IndexFormat::Uint32);
-                pass.draw_indexed(0..o.buffers.wire_count, 0, 0..1);
-            }
+                // wireframe for everything (if enabled) and always for selected objects
+                pass.set_pipeline(&self.wire_pipeline);
+                for o in self
+                    .objects
+                    .iter()
+                    .filter(|o| o.highlight != Highlight::None || s.wireframe != WireMode::Off)
+                {
+                    pass.set_bind_group(1, &o.model_bg, &[]);
+                    pass.set_vertex_buffer(0, o.buffers.vb.slice(..));
+                    pass.set_index_buffer(o.buffers.wire_ib.slice(..), wgpu::IndexFormat::Uint32);
+                    pass.draw_indexed(0..o.buffers.wire_count, 0, 0..1);
+                }
             } // !skip_3d
         }
         let extra = overlay(&self.device, &self.queue, &mut enc, &view);
-        self.queue.submit(extra.into_iter().chain(std::iter::once(enc.finish())));
+        self.queue
+            .submit(extra.into_iter().chain(std::iter::once(enc.finish())));
         frame.present();
         Ok(())
     }
@@ -1124,11 +1402,16 @@ fn vs_main(@location(0) pos: vec3<f32>) -> @builtin(position) vec4<f32> {
     /// Call this instead of `set_scene` when meshes/materials did not change.
     pub fn update_transforms(&mut self, scene: &Scene, highlight: &[Highlight]) {
         let worlds = scene.world_matrices();
-        let n = self.objects.len().min(scene.objects.len()).min(worlds.len());
+        let n = self
+            .objects
+            .len()
+            .min(scene.objects.len())
+            .min(worlds.len());
         for i in 0..n {
             let hl = highlight.get(i).copied().unwrap_or(Highlight::None);
             let mu = model_uniform(&worlds[i], hl);
-            self.queue.write_buffer(&self.objects[i].model_buf, 0, bytemuck::bytes_of(&mu));
+            self.queue
+                .write_buffer(&self.objects[i].model_buf, 0, bytemuck::bytes_of(&mu));
             self.objects[i].highlight = hl;
         }
     }
@@ -1168,7 +1451,11 @@ fn vs_main(@location(0) pos: vec3<f32>) -> @builtin(position) vec4<f32> {
         if need_new {
             let color_tex = self.device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("capture color"),
-                size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+                size: wgpu::Extent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: 1,
+                },
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
@@ -1207,23 +1494,35 @@ fn vs_main(@location(0) pos: vec3<f32>) -> @builtin(position) vec4<f32> {
             view_proj: vp.to_cols_array_2d(),
             inv_view_proj: vp.inverse().to_cols_array_2d(),
             eye: [eye.x, eye.y, eye.z, 1.0],
-            env: [s.exposure, s.env_rotation, self.env_max_lod, s.shading as u32 as f32],
+            env: [
+                s.exposure,
+                s.env_rotation,
+                self.env_max_lod,
+                s.shading as u32 as f32,
+            ],
             opts: [
                 s.show_background as u32 as f32,
                 s.background_blur.clamp(0.0, 1.0) * self.env_max_lod,
                 s.env_strength,
-                if shadow_on { 1.0 + s.shadow_softness } else { 0.0 },
+                if shadow_on {
+                    1.0 + s.shadow_softness
+                } else {
+                    0.0
+                },
             ],
             sh: self.sh,
             light_info: [self.light_count as f32, self.shadow_light as f32, 0.0, 0.0],
             lights: self.lights,
             light_view_proj: self.light_view_proj.to_cols_array_2d(),
         };
-        self.queue.write_buffer(&self.global_buf, 0, bytemuck::bytes_of(&g));
+        self.queue
+            .write_buffer(&self.global_buf, 0, bytemuck::bytes_of(&g));
 
-        let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("capture"),
-        });
+        let mut enc = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("capture"),
+            });
 
         if shadow_on {
             let mut spass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -1231,7 +1530,10 @@ fn vs_main(@location(0) pos: vec3<f32>) -> @builtin(position) vec4<f32> {
                 color_attachments: &[],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                     view: &self.shadow_view,
-                    depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Store }),
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
                     stencil_ops: None,
                 }),
                 timestamp_writes: None,
@@ -1256,13 +1558,21 @@ fn vs_main(@location(0) pos: vec3<f32>) -> @builtin(position) vec4<f32> {
                     view: &color_view,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.02, g: 0.02, b: 0.025, a: 1.0 }),
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: 0.02,
+                            g: 0.02,
+                            b: 0.025,
+                            a: 1.0,
+                        }),
                         store: wgpu::StoreOp::Store,
                     },
                 })],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                     view: &depth_view,
-                    depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Store }),
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
                     stencil_ops: None,
                 }),
                 timestamp_writes: None,
@@ -1285,12 +1595,19 @@ fn vs_main(@location(0) pos: vec3<f32>) -> @builtin(position) vec4<f32> {
                         for d in o.draws.iter().filter(|d| d.blend == blend) {
                             let material = &self.materials[d.material];
                             pass.set_pipeline(material.graph_pipeline.as_deref().unwrap_or(
-                                if blend { &self.mesh_blend } else { &self.mesh_opaque },
+                                if blend {
+                                    &self.mesh_blend
+                                } else {
+                                    &self.mesh_opaque
+                                },
                             ));
                             if !bound {
                                 pass.set_bind_group(2, &o.model_bg, &[]);
                                 pass.set_vertex_buffer(0, o.buffers.vb.slice(..));
-                                pass.set_index_buffer(o.buffers.ib.slice(..), wgpu::IndexFormat::Uint32);
+                                pass.set_index_buffer(
+                                    o.buffers.ib.slice(..),
+                                    wgpu::IndexFormat::Uint32,
+                                );
                                 bound = true;
                             }
                             pass.set_bind_group(1, &material.bind_group, &[]);
@@ -1320,7 +1637,11 @@ fn vs_main(@location(0) pos: vec3<f32>) -> @builtin(position) vec4<f32> {
                         rows_per_image: Some(height),
                     },
                 },
-                wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+                wgpu::Extent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: 1,
+                },
             );
         }
         self.queue.submit(std::iter::once(enc.finish()));
@@ -1346,7 +1667,9 @@ fn vs_main(@location(0) pos: vec3<f32>) -> @builtin(position) vec4<f32> {
         }
 
         // Surface format may be Bgra8UnormSrgb — convert to RGBA if needed
-        if format == wgpu::TextureFormat::Bgra8Unorm || format == wgpu::TextureFormat::Bgra8UnormSrgb {
+        if format == wgpu::TextureFormat::Bgra8Unorm
+            || format == wgpu::TextureFormat::Bgra8UnormSrgb
+        {
             for px in rgba.chunks_exact_mut(4) {
                 px.swap(0, 2);
             }
@@ -1358,7 +1681,11 @@ fn vs_main(@location(0) pos: vec3<f32>) -> @builtin(position) vec4<f32> {
 fn model_uniform(world: &Mat4, hl: Highlight) -> ModelUniform {
     let m3 = Mat3::from_mat4(*world);
     let det = m3.determinant();
-    let nm = if det.abs() > 1e-12 { Mat4::from_mat3(m3.inverse().transpose()) } else { Mat4::IDENTITY };
+    let nm = if det.abs() > 1e-12 {
+        Mat4::from_mat3(m3.inverse().transpose())
+    } else {
+        Mat4::IDENTITY
+    };
     let c = match hl {
         Highlight::Active => [1.0, 0.75, 0.2],
         Highlight::Selected => [0.9, 0.35, 0.0],
@@ -1384,11 +1711,26 @@ fn make_global_bg(
         label: Some("global bg"),
         layout: bgl,
         entries: &[
-            wgpu::BindGroupEntry { binding: 0, resource: buf.as_entire_binding() },
-            wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(env_view) },
-            wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(sampler) },
-            wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(shadow_view) },
-            wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(shadow_samp) },
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: buf.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::TextureView(env_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: wgpu::BindingResource::Sampler(sampler),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: wgpu::BindingResource::TextureView(shadow_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 4,
+                resource: wgpu::BindingResource::Sampler(shadow_samp),
+            },
         ],
     })
 }
@@ -1406,7 +1748,10 @@ fn build_environment(
         base = base.downsample();
     }
     let chain = base.mip_chain();
-    let sh_src = chain.iter().find(|m| m.width <= 256).unwrap_or_else(|| chain.last().unwrap());
+    let sh_src = chain
+        .iter()
+        .find(|m| m.width <= 256)
+        .unwrap_or_else(|| chain.last().unwrap());
     let sh9 = sh_src.sh9();
     let mut sh = [[0.0f32; 4]; 9];
     for (o, c) in sh.iter_mut().zip(sh9.iter()) {
@@ -1415,7 +1760,11 @@ fn build_environment(
 
     let tex = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("environment"),
-        size: wgpu::Extent3d { width: chain[0].width, height: chain[0].height, depth_or_array_layers: 1 },
+        size: wgpu::Extent3d {
+            width: chain[0].width,
+            height: chain[0].height,
+            depth_or_array_layers: 1,
+        },
         mip_level_count: chain.len() as u32,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
@@ -1427,7 +1776,11 @@ fn build_environment(
         let mut bytes = Vec::with_capacity((m.width * m.height * 8) as usize);
         for px in m.rgb.chunks_exact(3) {
             for c in [px[0], px[1], px[2], 1.0] {
-                let c = if c.is_finite() { c.clamp(0.0, 65000.0) } else { 0.0 };
+                let c = if c.is_finite() {
+                    c.clamp(0.0, 65000.0)
+                } else {
+                    0.0
+                };
                 bytes.extend_from_slice(&half::f16::from_f32(c).to_bits().to_le_bytes());
             }
         }
@@ -1439,18 +1792,34 @@ fn build_environment(
                 aspect: wgpu::TextureAspect::All,
             },
             &bytes,
-            wgpu::ImageDataLayout { offset: 0, bytes_per_row: Some(8 * m.width), rows_per_image: Some(m.height) },
-            wgpu::Extent3d { width: m.width, height: m.height, depth_or_array_layers: 1 },
+            wgpu::ImageDataLayout {
+                offset: 0,
+                bytes_per_row: Some(8 * m.width),
+                rows_per_image: Some(m.height),
+            },
+            wgpu::Extent3d {
+                width: m.width,
+                height: m.height,
+                depth_or_array_layers: 1,
+            },
         );
     }
-    (tex.create_view(&wgpu::TextureViewDescriptor::default()), sh, (chain.len() - 1) as f32)
+    (
+        tex.create_view(&wgpu::TextureViewDescriptor::default()),
+        sh,
+        (chain.len() - 1) as f32,
+    )
 }
 
 fn create_depth(device: &wgpu::Device, w: u32, h: u32) -> wgpu::TextureView {
     device
         .create_texture(&wgpu::TextureDescriptor {
             label: Some("depth"),
-            size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -1490,9 +1859,17 @@ fn make_pipeline(
             module: &module,
             entry_point: "fs_main",
             compilation_options: Default::default(),
-            targets: &[Some(wgpu::ColorTargetState { format, blend: Some(blend), write_mask: wgpu::ColorWrites::ALL })],
+            targets: &[Some(wgpu::ColorTargetState {
+                format,
+                blend: Some(blend),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
         }),
-        primitive: wgpu::PrimitiveState { topology, cull_mode: None, ..Default::default() },
+        primitive: wgpu::PrimitiveState {
+            topology,
+            cull_mode: None,
+            ..Default::default()
+        },
         depth_stencil: Some(wgpu::DepthStencilState {
             format: DEPTH_FORMAT,
             depth_write_enabled: depth_write,
@@ -1529,13 +1906,29 @@ fn build_grid(half: i32, step: f32) -> Vec<LineVertex> {
     for i in -half..=half {
         let t = i as f32 * step;
         let major = i % 5 == 0;
-        let c = if major { [0.28, 0.28, 0.31] } else { [0.14, 0.14, 0.16] };
+        let c = if major {
+            [0.28, 0.28, 0.31]
+        } else {
+            [0.14, 0.14, 0.16]
+        };
         let cx = if i == 0 { [0.75, 0.2, 0.2] } else { c };
         let cz = if i == 0 { [0.2, 0.35, 0.8] } else { c };
-        v.push(LineVertex { pos: [-extent, 0.0, t], color: cx });
-        v.push(LineVertex { pos: [extent, 0.0, t], color: cx });
-        v.push(LineVertex { pos: [t, 0.0, -extent], color: cz });
-        v.push(LineVertex { pos: [t, 0.0, extent], color: cz });
+        v.push(LineVertex {
+            pos: [-extent, 0.0, t],
+            color: cx,
+        });
+        v.push(LineVertex {
+            pos: [extent, 0.0, t],
+            color: cx,
+        });
+        v.push(LineVertex {
+            pos: [t, 0.0, -extent],
+            color: cz,
+        });
+        v.push(LineVertex {
+            pos: [t, 0.0, extent],
+            color: cz,
+        });
     }
     v
 }

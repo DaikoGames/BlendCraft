@@ -28,7 +28,16 @@ pub struct OrbitCamera {
 
 impl Default for OrbitCamera {
     fn default() -> Self {
-        Self { target: Vec3::ZERO, distance: 5.0, yaw: 0.6, pitch: 0.4, fov_y: 45f32.to_radians(), near: 0.05, far: 2000.0, fixed: None }
+        Self {
+            target: Vec3::ZERO,
+            distance: 5.0,
+            yaw: 0.6,
+            pitch: 0.4,
+            fov_y: 45f32.to_radians(),
+            near: 0.05,
+            far: 2000.0,
+            fixed: None,
+        }
     }
 }
 
@@ -53,7 +62,14 @@ impl OrbitCamera {
         let aspect = aspect.max(0.01);
         if let Some(f) = &self.fixed {
             let proj = match f.ortho_height {
-                Some(h) => Mat4::orthographic_rh(-h * aspect * 0.5, h * aspect * 0.5, -h * 0.5, h * 0.5, f.near, f.far),
+                Some(h) => Mat4::orthographic_rh(
+                    -h * aspect * 0.5,
+                    h * aspect * 0.5,
+                    -h * 0.5,
+                    h * 0.5,
+                    f.near,
+                    f.far,
+                ),
                 None => Mat4::perspective_rh(f.fov_y, aspect, f.near, f.far),
             };
             return proj * f.view;

@@ -30,8 +30,17 @@ impl Builder {
         self.views.len() - 1
     }
 
-    fn accessor(&mut self, view: usize, offset: usize, comp: u32, count: usize, ty: &str, minmax: Option<(Vec<f32>, Vec<f32>)>) -> usize {
-        let mut a = json!({ "bufferView": view, "componentType": comp, "count": count, "type": ty });
+    fn accessor(
+        &mut self,
+        view: usize,
+        offset: usize,
+        comp: u32,
+        count: usize,
+        ty: &str,
+        minmax: Option<(Vec<f32>, Vec<f32>)>,
+    ) -> usize {
+        let mut a =
+            json!({ "bufferView": view, "componentType": comp, "count": count, "type": ty });
         if offset > 0 {
             a["byteOffset"] = json!(offset);
         }
@@ -80,7 +89,12 @@ fn add_mesh(b: &mut Builder, o: &Object, nmat: usize) -> Value {
         push(b, 0, o.mesh.indices.len(), o.material);
     } else {
         for g in &o.mesh.groups {
-            push(b, g.first_index as usize, g.index_count as usize, g.material);
+            push(
+                b,
+                g.first_index as usize,
+                g.index_count as usize,
+                g.material,
+            );
         }
     }
     json!({ "name": o.mesh.name, "primitives": prims })
@@ -89,7 +103,11 @@ fn add_mesh(b: &mut Builder, o: &Object, nmat: usize) -> Value {
 /// `only`: if Some, only objects whose id is in the set are exported.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn export_glb(scene: &Scene, path: &Path, only: Option<&BTreeSet<u64>>) -> Result<()> {
-    let mut b = Builder { bin: Vec::new(), views: Vec::new(), accessors: Vec::new() };
+    let mut b = Builder {
+        bin: Vec::new(),
+        views: Vec::new(),
+        accessors: Vec::new(),
+    };
 
     // textures -> PNG images
     let mut images = Vec::new();
@@ -174,7 +192,10 @@ pub fn export_glb(scene: &Scene, path: &Path, only: Option<&BTreeSet<u64>>) -> R
     for (ni, &i) in order.iter().enumerate() {
         let o = &scene.objects[i];
         // parent node (if the parent is exported) -> local transform relative to it; else world transform
-        let parent_i = o.parent.and_then(|p| scene.index_of(p)).filter(|&pi| pi != i && node_of[pi].is_some());
+        let parent_i = o
+            .parent
+            .and_then(|p| scene.index_of(p))
+            .filter(|&pi| pi != i && node_of[pi].is_some());
         let local = match parent_i {
             Some(pi) if worlds[pi].determinant().abs() > 1e-12 => worlds[pi].inverse() * worlds[i],
             _ => worlds[i],
@@ -207,11 +228,14 @@ pub fn export_glb(scene: &Scene, path: &Path, only: Option<&BTreeSet<u64>>) -> R
                     lj["range"] = json!(l.range);
                 }
                 if l.kind == LightType::Spot {
-                    let outer = (l.spot_angle_deg * 0.5).to_radians().clamp(0.01, std::f32::consts::FRAC_PI_2);
+                    let outer = (l.spot_angle_deg * 0.5)
+                        .to_radians()
+                        .clamp(0.01, std::f32::consts::FRAC_PI_2);
                     lj["spot"] = json!({ "innerConeAngle": outer * (1.0 - l.spot_blend.clamp(0.0, 0.99)), "outerConeAngle": outer });
                 }
                 lights.push(lj);
-                node["extensions"] = json!({ "KHR_lights_punctual": { "light": lights.len() - 1 } });
+                node["extensions"] =
+                    json!({ "KHR_lights_punctual": { "light": lights.len() - 1 } });
             }
             ObjectKind::Mesh => {
                 let mat = o.material.filter(|&m| m < scene.materials.len());
@@ -244,7 +268,10 @@ pub fn export_glb(scene: &Scene, path: &Path, only: Option<&BTreeSet<u64>>) -> R
     }
 
     let mut root = Map::new();
-    root.insert("asset".into(), json!({ "version": "2.0", "generator": "Forge3D" }));
+    root.insert(
+        "asset".into(),
+        json!({ "version": "2.0", "generator": "Forge3D" }),
+    );
     root.insert("scene".into(), json!(0));
     root.insert("scenes".into(), json!([{ "nodes": roots }]));
     root.insert("nodes".into(), Value::Array(nodes));
@@ -256,7 +283,10 @@ pub fn export_glb(scene: &Scene, path: &Path, only: Option<&BTreeSet<u64>>) -> R
     }
     if !lights.is_empty() {
         root.insert("extensionsUsed".into(), json!(["KHR_lights_punctual"]));
-        root.insert("extensions".into(), json!({ "KHR_lights_punctual": { "lights": lights } }));
+        root.insert(
+            "extensions".into(),
+            json!({ "KHR_lights_punctual": { "lights": lights } }),
+        );
     }
     if !materials.is_empty() {
         root.insert("materials".into(), Value::Array(materials));
@@ -300,13 +330,21 @@ pub fn export_obj(scene: &Scene, path: &Path, only: Option<&BTreeSet<u64>>) -> R
     let mut s = String::from("# Exported by Forge3D\n");
     let mut off = 1usize;
     for (i, o) in scene.objects.iter().enumerate() {
-        if !scene.is_visible(i) || o.mesh.indices.is_empty() || !o.kind.is_mesh() || only.map_or(false, |s| !s.contains(&o.id)) {
+        if !scene.is_visible(i)
+            || o.mesh.indices.is_empty()
+            || !o.kind.is_mesh()
+            || only.map_or(false, |s| !s.contains(&o.id))
+        {
             continue;
         }
         let m = worlds[i];
         let nm = Mat3::from_mat4(m).inverse().transpose();
         let flip = Mat3::from_mat4(m).determinant() < 0.0;
-        let name: String = o.name.chars().map(|c| if c.is_whitespace() { '_' } else { c }).collect();
+        let name: String = o
+            .name
+            .chars()
+            .map(|c| if c.is_whitespace() { '_' } else { c })
+            .collect();
         writeln!(s, "o {name}")?;
         for v in &o.mesh.vertices {
             let p = m.transform_point3(v.position.into());
@@ -320,7 +358,11 @@ pub fn export_obj(scene: &Scene, path: &Path, only: Option<&BTreeSet<u64>>) -> R
             writeln!(s, "vn {} {} {}", n.x, n.y, n.z)?;
         }
         for t in o.mesh.indices.chunks_exact(3) {
-            let (a, b, c) = if flip { (t[0], t[2], t[1]) } else { (t[0], t[1], t[2]) };
+            let (a, b, c) = if flip {
+                (t[0], t[2], t[1])
+            } else {
+                (t[0], t[1], t[2])
+            };
             let (a, b, c) = (a as usize + off, b as usize + off, c as usize + off);
             writeln!(s, "f {a}/{a}/{a} {b}/{b}/{b} {c}/{c}/{c}")?;
         }

@@ -5,14 +5,26 @@ use std::path::Path;
 /// Wavefront OBJ import (triangulated, single index). Diffuse colors become base colors.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn load_obj(path: &Path) -> Result<Scene> {
-    let (models, mats) = tobj::load_obj(path, &tobj::LoadOptions { triangulate: true, single_index: true, ..Default::default() })?;
+    let (models, mats) = tobj::load_obj(
+        path,
+        &tobj::LoadOptions {
+            triangulate: true,
+            single_index: true,
+            ..Default::default()
+        },
+    )?;
     let mut scene = Scene::default();
     if let Ok(mats) = mats {
         scene.materials = mats
             .iter()
             .map(|m| {
                 let d = m.diffuse.unwrap_or([0.8; 3]);
-                Material { name: m.name.clone(), base_color: [d[0], d[1], d[2], 1.0], roughness: 0.8, ..Default::default() }
+                Material {
+                    name: m.name.clone(),
+                    base_color: [d[0], d[1], d[2], 1.0],
+                    roughness: 0.8,
+                    ..Default::default()
+                }
             })
             .collect();
     }
@@ -23,12 +35,33 @@ pub fn load_obj(path: &Path) -> Result<Scene> {
         let has_t = me.texcoords.len() == n * 2;
         let vertices = (0..n)
             .map(|i| Vertex {
-                position: [me.positions[i * 3], me.positions[i * 3 + 1], me.positions[i * 3 + 2]],
-                normal: if has_n { [me.normals[i * 3], me.normals[i * 3 + 1], me.normals[i * 3 + 2]] } else { [0.0; 3] },
-                uv: if has_t { [me.texcoords[i * 2], 1.0 - me.texcoords[i * 2 + 1]] } else { [0.0; 2] },
+                position: [
+                    me.positions[i * 3],
+                    me.positions[i * 3 + 1],
+                    me.positions[i * 3 + 2],
+                ],
+                normal: if has_n {
+                    [
+                        me.normals[i * 3],
+                        me.normals[i * 3 + 1],
+                        me.normals[i * 3 + 2],
+                    ]
+                } else {
+                    [0.0; 3]
+                },
+                uv: if has_t {
+                    [me.texcoords[i * 2], 1.0 - me.texcoords[i * 2 + 1]]
+                } else {
+                    [0.0; 2]
+                },
             })
             .collect();
-        let mut md = MeshData { name: model.name.clone(), vertices, indices: me.indices.clone(), ..Default::default() };
+        let mut md = MeshData {
+            name: model.name.clone(),
+            vertices,
+            indices: me.indices.clone(),
+            ..Default::default()
+        };
         if !has_n {
             md.compute_normals();
         }

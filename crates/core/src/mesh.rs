@@ -1,7 +1,7 @@
 use bytemuck::{Pod, Zeroable};
 use glam::{Mat3, Mat4, Vec3};
-use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, Pod, Zeroable, Serialize, Deserialize)]
@@ -19,7 +19,10 @@ pub struct Aabb {
 
 impl Aabb {
     pub fn union(self, o: Aabb) -> Aabb {
-        Aabb { min: self.min.min(o.min), max: self.max.max(o.max) }
+        Aabb {
+            min: self.min.min(o.min),
+            max: self.max.max(o.max),
+        }
     }
     pub fn center(&self) -> Vec3 {
         (self.min + self.max) * 0.5
@@ -65,7 +68,12 @@ impl MeshData {
                 t.swap(1, 2); // mirrored transform: keep front faces front
             }
         }
-        MeshData { name: self.name.clone(), vertices, indices, groups: self.groups.clone() }
+        MeshData {
+            name: self.name.clone(),
+            vertices,
+            indices,
+            groups: self.groups.clone(),
+        }
     }
 
     /// Reconstruct quad faces from pairs of consistently wound, coplanar
@@ -79,21 +87,32 @@ impl MeshData {
             let [a, b, c] = [tri[0], tri[1], tri[2]];
             for (from, to, other) in [(a, b, c), (b, c, a), (c, a, b)] {
                 let edge = if from < to { (from, to) } else { (to, from) };
-                edge_owners.entry(edge).or_default().push((face, from, to, other));
+                edge_owners
+                    .entry(edge)
+                    .or_default()
+                    .push((face, from, to, other));
             }
         }
         let mut paired = std::collections::HashSet::new();
         let mut quads = Vec::new();
         for owners in edge_owners.values() {
-            if owners.len() != 2 { continue; }
+            if owners.len() != 2 {
+                continue;
+            }
             let (f0, a0, b0, x) = owners[0];
             let (f1, a1, b1, y) = owners[1];
-            if f0 == f1 || a0 != b1 || b0 != a1 { continue; }
-            if !paired.insert((f0.min(f1), f0.max(f1))) { continue; }
+            if f0 == f1 || a0 != b1 || b0 != a1 {
+                continue;
+            }
+            if !paired.insert((f0.min(f1), f0.max(f1))) {
+                continue;
+            }
             let p = |i: u32| Vec3::from(self.vertices[i as usize].position);
             let n0 = (p(b0) - p(a0)).cross(p(x) - p(a0)).normalize_or_zero();
             let n1 = (p(a1) - p(b1)).cross(p(y) - p(b1)).normalize_or_zero();
-            if n0.dot(n1) < 0.999 { continue; }
+            if n0.dot(n1) < 0.999 {
+                continue;
+            }
             // Boundary order: first triangle's outer corner, shared edge,
             // second triangle's outer corner, then the other shared corner.
             quads.push([x, a0, y, b0]);
@@ -142,7 +161,8 @@ impl MeshData {
                 (p[2] * 1_000_000.0).round() as i32,
             )
         };
-        let mut map: std::collections::HashMap<(i32, i32, i32), u32> = std::collections::HashMap::new();
+        let mut map: std::collections::HashMap<(i32, i32, i32), u32> =
+            std::collections::HashMap::new();
         let mut new_verts: Vec<Vertex> = Vec::new();
         let mut remap = vec![0u32; self.vertices.len()];
         for (i, v) in self.vertices.iter().enumerate() {
@@ -211,7 +231,11 @@ impl MeshData {
     /// Make sure the mesh has explicit material groups (needed before appending other meshes).
     pub fn ensure_groups(&mut self, material: Option<usize>) {
         if self.groups.is_empty() && !self.indices.is_empty() {
-            self.groups.push(MeshGroup { first_index: 0, index_count: self.indices.len() as u32, material });
+            self.groups.push(MeshGroup {
+                first_index: 0,
+                index_count: self.indices.len() as u32,
+                material,
+            });
         }
     }
 
@@ -219,7 +243,9 @@ impl MeshData {
         let mut out: Vec<MeshGroup> = Vec::new();
         for g in &self.groups {
             if let Some(last) = out.last_mut() {
-                if last.material == g.material && last.first_index + last.index_count == g.first_index {
+                if last.material == g.material
+                    && last.first_index + last.index_count == g.first_index
+                {
                     last.index_count += g.index_count;
                     continue;
                 }
@@ -238,10 +264,18 @@ impl MeshData {
         self.vertices.extend_from_slice(&o.vertices);
         self.indices.extend(o.indices.iter().map(|i| i + vbase));
         if o.groups.is_empty() {
-            self.groups.push(MeshGroup { first_index: ibase, index_count: o.indices.len() as u32, material: fallback });
+            self.groups.push(MeshGroup {
+                first_index: ibase,
+                index_count: o.indices.len() as u32,
+                material: fallback,
+            });
         } else {
             for g in &o.groups {
-                self.groups.push(MeshGroup { first_index: g.first_index + ibase, index_count: g.index_count, material: g.material });
+                self.groups.push(MeshGroup {
+                    first_index: g.first_index + ibase,
+                    index_count: g.index_count,
+                    material: g.material,
+                });
             }
         }
     }
@@ -252,7 +286,10 @@ impl MeshData {
         }
         let mut tm = vec![None; self.indices.len() / 3];
         for g in &self.groups {
-            let (a, b) = (g.first_index as usize / 3, (g.first_index + g.index_count) as usize / 3);
+            let (a, b) = (
+                g.first_index as usize / 3,
+                (g.first_index + g.index_count) as usize / 3,
+            );
             for t in a..b.min(tm.len()) {
                 tm[t] = g.material;
             }
@@ -263,7 +300,10 @@ impl MeshData {
     /// New mesh made from the given triangles (vertices are re-indexed).
     fn subset(&self, tris: &[usize], tm: &Option<Vec<Option<usize>>>, name: String) -> MeshData {
         let mut remap: HashMap<u32, u32> = HashMap::new();
-        let mut m = MeshData { name, ..Default::default() };
+        let mut m = MeshData {
+            name,
+            ..Default::default()
+        };
         for &t in tris {
             for k in 0..3 {
                 let old = self.indices[t * 3 + k];
@@ -282,7 +322,11 @@ impl MeshData {
                 let mat = tm[t];
                 match m.groups.last_mut() {
                     Some(g) if g.material == mat => g.index_count += 3,
-                    _ => m.groups.push(MeshGroup { first_index: (m.indices.len() - 3) as u32, index_count: 3, material: mat }),
+                    _ => m.groups.push(MeshGroup {
+                        first_index: (m.indices.len() - 3) as u32,
+                        index_count: 3,
+                        material: mat,
+                    }),
                 }
             }
         }
@@ -309,7 +353,11 @@ impl MeshData {
         // vertices at the same position count as connected (flat-shaded meshes duplicate vertices per face)
         let mut weld: HashMap<(i64, i64, i64), usize> = HashMap::new();
         for (vi, v) in self.vertices.iter().enumerate() {
-            let key = ((v.position[0] * 1e5).round() as i64, (v.position[1] * 1e5).round() as i64, (v.position[2] * 1e5).round() as i64);
+            let key = (
+                (v.position[0] * 1e5).round() as i64,
+                (v.position[1] * 1e5).round() as i64,
+                (v.position[2] * 1e5).round() as i64,
+            );
             match weld.get(&key) {
                 Some(&first) => {
                     let (ra, rb) = (find(&mut parent, vi), find(&mut parent, first));
@@ -337,11 +385,13 @@ impl MeshData {
         let mut comps: HashMap<usize, Vec<usize>> = HashMap::new();
         for (ti, t) in self.indices.chunks_exact(3).enumerate() {
             let r = find(&mut parent, t[0] as usize);
-            comps.entry(r).or_insert_with(|| {
-                order.push(r);
-                Vec::new()
-            })
-            .push(ti);
+            comps
+                .entry(r)
+                .or_insert_with(|| {
+                    order.push(r);
+                    Vec::new()
+                })
+                .push(ti);
         }
         if order.len() < 2 {
             return vec![self.clone()];
@@ -351,7 +401,11 @@ impl MeshData {
             .iter()
             .enumerate()
             .map(|(k, r)| {
-                let name = if k == 0 { self.name.clone() } else { format!("{}.{:03}", self.name, k) };
+                let name = if k == 0 {
+                    self.name.clone()
+                } else {
+                    format!("{}.{:03}", self.name, k)
+                };
                 self.subset(&comps[r], &tm, name)
             })
             .collect()
@@ -372,7 +426,11 @@ impl MeshData {
             .enumerate()
             .map(|(k, mat)| {
                 let tris: Vec<usize> = (0..tm.len()).filter(|&t| tm[t] == mat).collect();
-                let name = if k == 0 { self.name.clone() } else { format!("{}.{:03}", self.name, k) };
+                let name = if k == 0 {
+                    self.name.clone()
+                } else {
+                    format!("{}.{:03}", self.name, k)
+                };
                 (mat, self.subset(&tris, &None, name))
             })
             .collect()

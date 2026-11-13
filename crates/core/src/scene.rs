@@ -1,7 +1,8 @@
-use crate::constraints::Constraint;
-use crate::armature::SkinBinding;
-use crate::kinds::{helper_radius, ObjectKind};
 use crate::animation::AnimationData;
+use crate::armature::SkinBinding;
+use crate::compositor::CompositorGraph;
+use crate::constraints::Constraint;
+use crate::kinds::{helper_radius, ObjectKind};
 use crate::material::{Material, TextureData};
 use crate::mesh::{Aabb, MeshData};
 use crate::primitives::Primitive;
@@ -92,6 +93,9 @@ pub struct Scene {
     /// Timeline + object transform keyframes (Object Mode animation).
     #[serde(default)]
     pub animation: AnimationData,
+    /// Image compositing graph evaluated over the most recent render.
+    #[serde(default)]
+    pub compositor_graph: CompositorGraph,
 }
 
 struct Eval<'a> {
@@ -150,7 +154,13 @@ impl Scene {
 
     /// Give every object a unique non-zero id.
     pub fn fix_ids(&mut self) {
-        let max = self.objects.iter().map(|o| o.id).chain(self.collections.iter().map(|c| c.id)).max().unwrap_or(0);
+        let max = self
+            .objects
+            .iter()
+            .map(|o| o.id)
+            .chain(self.collections.iter().map(|c| c.id))
+            .max()
+            .unwrap_or(0);
         self.next_id = self.next_id.max(max);
         let mut used: HashSet<u64> = HashSet::new();
         for o in self.objects.iter_mut() {
@@ -167,7 +177,12 @@ impl Scene {
         let n = self.objects.len();
         let mut e = Eval {
             s: self,
-            ids: self.objects.iter().enumerate().map(|(i, o)| (o.id, i)).collect(),
+            ids: self
+                .objects
+                .iter()
+                .enumerate()
+                .map(|(i, o)| (o.id, i))
+                .collect(),
             out: vec![None; n],
             state: vec![0; n],
         };
@@ -185,7 +200,11 @@ impl Scene {
     /// Set the local transform so the object ends up with `world` (given the current parent).
     pub fn set_world(&mut self, i: usize, world: Mat4, worlds: &[Mat4]) {
         let pw = self.parent_world(i, worlds);
-        let local = if pw.determinant().abs() < 1e-12 { world } else { pw.inverse() * world };
+        let local = if pw.determinant().abs() < 1e-12 {
+            world
+        } else {
+            pw.inverse() * world
+        };
         let (s, r, t) = local.to_scale_rotation_translation();
         let o = &mut self.objects[i];
         o.scale = s;
@@ -195,18 +214,29 @@ impl Scene {
 
     /// Visible = object not hidden and its collection not hidden.
     pub fn is_visible(&self, i: usize) -> bool {
-        let Some(o) = self.objects.get(i) else { return false };
+        let Some(o) = self.objects.get(i) else {
+            return false;
+        };
         if !o.visible {
             return false;
         }
         match o.collection {
             None => true,
-            Some(c) => self.collections.iter().find(|x| x.id == c).map_or(true, |x| x.visible),
+            Some(c) => self
+                .collections
+                .iter()
+                .find(|x| x.id == c)
+                .map_or(true, |x| x.visible),
         }
     }
 
     pub fn children_of(&self, id: u64) -> Vec<usize> {
-        self.objects.iter().enumerate().filter(|(_, o)| o.parent == Some(id)).map(|(i, _)| i).collect()
+        self.objects
+            .iter()
+            .enumerate()
+            .filter(|(_, o)| o.parent == Some(id))
+            .map(|(i, _)| i)
+            .collect()
     }
 
     /// Is object `anc` an ancestor of object `i`?
@@ -225,7 +255,10 @@ impl Scene {
 
     /// Subset of `sel` whose ancestors are not in `sel` (moving these moves everything).
     pub fn roots(&self, sel: &[usize]) -> Vec<usize> {
-        sel.iter().copied().filter(|&i| !sel.iter().any(|&a| a != i && self.is_ancestor(a, i))).collect()
+        sel.iter()
+            .copied()
+            .filter(|&i| !sel.iter().any(|&a| a != i && self.is_ancestor(a, i)))
+            .collect()
     }
 
     pub fn object_world_bounds(&self, i: usize, world: &Mat4) -> Option<Aabb> {
@@ -233,7 +266,10 @@ impl Scene {
         if !o.kind.is_mesh() {
             let r = Vec3::splat(helper_radius(o, world));
             let t = world.w_axis.truncate();
-            return Some(Aabb { min: t - r, max: t + r });
+            return Some(Aabb {
+                min: t - r,
+                max: t + r,
+            });
         }
         let b = o.mesh.bounds()?;
         let mut out: Option<Aabb> = None;
@@ -252,7 +288,10 @@ impl Scene {
 
     pub fn bounds(&self) -> Option<Aabb> {
         let w = self.world_matrices();
-        (0..self.objects.len()).filter(|&i| self.is_visible(i)).filter_map(|i| self.object_world_bounds(i, &w[i])).reduce(Aabb::union)
+        (0..self.objects.len())
+            .filter(|&i| self.is_visible(i))
+            .filter_map(|i| self.object_world_bounds(i, &w[i]))
+            .reduce(Aabb::union)
     }
 
     /// Nearest visible object hit by a world-space ray, with the ray parameter.
@@ -265,7 +304,8 @@ impl Scene {
             }
             let m = worlds[i];
             if !o.kind.is_mesh() {
-                if let Some(t) = ray_sphere(origin, dir, m.w_axis.truncate(), helper_radius(o, &m)) {
+                if let Some(t) = ray_sphere(origin, dir, m.w_axis.truncate(), helper_radius(o, &m))
+                {
                     if best.map_or(true, |(_, bt)| t < bt) {
                         best = Some((i, t));
                     }

@@ -44,6 +44,15 @@ texture vector inputs use per-fragment object-space positions, so meshes without
 procedural patterns; explicit coordinate links take precedence. The CPU bake fallback still relies
 on UVs. Use **Bake** when an image texture is needed for export.
 
+Color Ramp supports up to 32 stops, Blender's RGB/HSV/HSL color modes, hue direction, and
+Linear/Ease/B-Spline/Cardinal/Constant interpolation. Stop handles can be selected and dragged;
+position, alpha, color, and stop count are editable. Ramps using HSV/HSL or more than four stops use
+the CPU bake path to stay within the real-time uniform-buffer limit. Shader nodes can be moved
+by dragging their body or title and resized from their edges; their layout is saved with the material.
+Drag empty canvas to pan, or use middle mouse anywhere in the canvas. Drag an output socket to an
+input socket to connect them; right-click a visible wire to remove it. Socket clicks can also be
+used to select the two ends of a connection.
+
 Wave exposes Bands/Rings, direction, profile, and distortion detail controls; Brick exposes
 offset/frequency and squash/frequency settings; Magic exposes its iteration depth. White Noise
 matches Blender's 1D-4D dimension choices and has no Scale or Detail input: use a Mapping node to
@@ -57,6 +66,35 @@ so a single mode cannot match both. Run `cargo run --release -p forge-app`, open
 workspace, and try the **Noise Demo** (Noise → Color Ramp → Principled) to see the live GPU path.
 See the [Blender Shader Nodes manual](https://docs.blender.org/manual/en/latest/render/shader_nodes/index.html)
 for Blender's reference behavior.
+
+## Compositing
+The **Compositing** workspace captures the current frame and evaluates a saved image node graph
+off the UI thread. The initial graph passes Render Layers to Composite and Viewer. Supported nodes
+are Brightness/Contrast, Exposure, Blur, Glare, and Invert; render results can be previewed and
+saved as PNG. Nodes can be added, moved, connected by dragging their sockets, and deleted; pan the
+canvas by dragging empty space or middle-drag, zoom with the wheel, and right-click a wire to remove
+it. The graph is stored in `.forge` projects, which are written as FRG4; existing FRG3 projects
+remain readable.
+
+This is a functional starter compositor, not full Blender compositor parity. It currently uses
+8-bit RGBA CPU image operations and does not implement Blender's full node catalog, multi-input
+compositing, masks, multilayer render passes, or color-management pipeline.
+
+## Scripting
+The **Scripting** workspace runs Python in an embedded CPython runtime from a background worker,
+so scripts do not block the UI. BlendCraft itself and its scene bridge remain Rust; the small
+`bpy`-named compatibility module is implemented natively in Rust and is not copied from Blender.
+The project must be built with CPython development libraries available, and packaged builds need
+the corresponding CPython runtime.
+
+The implemented subset supports scene object lookup and selection, object names and transforms,
+`mathutils.Vector`/`Euler`/`Quaternion`, common mesh-add operators, and basic material creation,
+color, metallic/roughness, and single-slot object assignment through `bpy.data.materials` and
+`obj.data.materials`. Scene changes are applied together as one undoable operation only after a
+script finishes successfully. This is not full `bpy` compatibility: node trees, modifiers, mesh
+editing, UI context, rendering, external Blender modules, and many other Blender systems are not
+implemented. Scripts using unsupported APIs will fail explicitly rather than being silently
+emulated. Use `examples/blendcraft_blender_compat_test.py` in either app.
 
 ## Navigation
 - Middle mouse drag: orbit

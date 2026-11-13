@@ -44,7 +44,11 @@ impl EnvironmentMap {
     pub fn texel_dir(x: u32, y: u32, w: u32, h: u32) -> Vec3 {
         let phi = ((x as f32 + 0.5) / w as f32 - 0.5) * TAU;
         let theta = (y as f32 + 0.5) / h as f32 * PI;
-        Vec3::new(theta.sin() * phi.cos(), theta.cos(), theta.sin() * phi.sin())
+        Vec3::new(
+            theta.sin() * phi.cos(),
+            theta.cos(),
+            theta.sin() * phi.sin(),
+        )
     }
 
     /// Clear-sky gradient + sun + ground bounce. Used when no HDRI is loaded.
@@ -64,7 +68,9 @@ impl EnvironmentMap {
                 };
                 if d.y > -0.05 {
                     let cs = d.dot(sun);
-                    c += Vec3::splat(6.0 * ((cs - 1.0) * 250.0).exp() + 30.0 * smoothstep(0.9985, 0.9998, cs));
+                    c += Vec3::splat(
+                        6.0 * ((cs - 1.0) * 250.0).exp() + 30.0 * smoothstep(0.9985, 0.9998, cs),
+                    );
                 }
                 rgb.extend_from_slice(&c.to_array());
             }
@@ -92,7 +98,11 @@ impl EnvironmentMap {
                 }
             }
         }
-        Self { width: nw, height: nh, rgb }
+        Self {
+            width: nw,
+            height: nh,
+            rgb,
+        }
     }
 
     /// Level 0 (self) down to 1x1.
@@ -127,7 +137,17 @@ impl EnvironmentMap {
             }
         }
         // A_l / pi : band0 = 1, band1 = 2/3, band2 = 1/4
-        let band = [1.0, 2.0 / 3.0, 2.0 / 3.0, 2.0 / 3.0, 0.25, 0.25, 0.25, 0.25, 0.25];
+        let band = [
+            1.0,
+            2.0 / 3.0,
+            2.0 / 3.0,
+            2.0 / 3.0,
+            0.25,
+            0.25,
+            0.25,
+            0.25,
+            0.25,
+        ];
         let mut out = [[0.0f32; 3]; 9];
         for k in 0..9 {
             for c in 0..3 {
@@ -147,7 +167,11 @@ mod tests {
         let env = EnvironmentMap::uniform(64, 32, [1.0; 3]);
         let sh = env.sh9();
         for n in [Vec3::Y, Vec3::X, Vec3::new(1.0, 1.0, 1.0).normalize()] {
-            let v: f32 = sh_basis(n).iter().zip(sh.iter()).map(|(y, c)| y * c[0]).sum();
+            let v: f32 = sh_basis(n)
+                .iter()
+                .zip(sh.iter())
+                .map(|(y, c)| y * c[0])
+                .sum();
             assert!((v - 1.0).abs() < 0.02, "got {v}");
         }
     }

@@ -11,9 +11,15 @@ pub const AXES: [Vec3; 3] = [Vec3::X, Vec3::Y, Vec3::Z];
 #[derive(Clone, Copy, Debug)]
 pub enum Op {
     Move(Vec3),
-    Rotate { axis: Vec3, angle: f32 },
+    Rotate {
+        axis: Vec3,
+        angle: f32,
+    },
     /// `axis: None` = uniform scale
-    Scale { axis: Option<Vec3>, factor: f32 },
+    Scale {
+        axis: Option<Vec3>,
+        factor: f32,
+    },
 }
 
 struct Item {
@@ -42,8 +48,13 @@ pub fn pivot_point(doc: &Document, mode: Pivot) -> Option<Vec3> {
     let pos = |i: usize| w[i].w_axis.truncate();
     Some(match mode {
         Pivot::Cursor => doc.scene.cursor,
-        Pivot::Active => doc.active_index().filter(|i| sel.contains(i)).map_or_else(|| pos(sel[0]), pos),
-        Pivot::Median | Pivot::Individual => sel.iter().map(|&i| pos(i)).sum::<Vec3>() / sel.len() as f32,
+        Pivot::Active => doc
+            .active_index()
+            .filter(|i| sel.contains(i))
+            .map_or_else(|| pos(sel[0]), pos),
+        Pivot::Median | Pivot::Individual => {
+            sel.iter().map(|&i| pos(i)).sum::<Vec3>() / sel.len() as f32
+        }
         Pivot::BoundsCenter => sel
             .iter()
             .filter_map(|&i| doc.scene.object_world_bounds(i, &w[i]))
@@ -87,22 +98,41 @@ impl Session {
                     r: o.rotation,
                     s: o.scale,
                     world: worlds[i],
-                    parent_inv: if pw.determinant().abs() < 1e-12 { Mat4::IDENTITY } else { pw.inverse() },
+                    parent_inv: if pw.determinant().abs() < 1e-12 {
+                        Mat4::IDENTITY
+                    } else {
+                        pw.inverse()
+                    },
                 }
             })
             .collect();
-        Some(Session { items, pivot: pv, individual: pivot == Pivot::Individual, exclude: doc.selection.clone().into_iter().collect() })
+        Some(Session {
+            items,
+            pivot: pv,
+            individual: pivot == Pivot::Individual,
+            exclude: doc.selection.clone().into_iter().collect(),
+        })
     }
 
     /// Apply `op` relative to the START state (so it can be called repeatedly while dragging).
     pub fn apply(&self, doc: &mut Document, op: Op) {
         for it in &self.items {
-            let p = if self.individual { it.world.w_axis.truncate() } else { self.pivot };
+            let p = if self.individual {
+                it.world.w_axis.truncate()
+            } else {
+                self.pivot
+            };
             let around = |m: Mat4| Mat4::from_translation(p) * m * Mat4::from_translation(-p);
             let t = match op {
                 Op::Move(d) => Mat4::from_translation(d),
-                Op::Rotate { axis, angle } => around(Mat4::from_quat(Quat::from_axis_angle(axis.normalize_or_zero(), angle))),
-                Op::Scale { axis: Some(a), factor } => {
+                Op::Rotate { axis, angle } => around(Mat4::from_quat(Quat::from_axis_angle(
+                    axis.normalize_or_zero(),
+                    angle,
+                ))),
+                Op::Scale {
+                    axis: Some(a),
+                    factor,
+                } => {
                     let a = a.normalize_or_zero();
                     let outer = Mat3::from_cols(a * a.x, a * a.y, a * a.z);
                     around(Mat4::from_mat3(Mat3::IDENTITY + outer * (factor - 1.0)))
@@ -163,7 +193,13 @@ pub fn ray_plane(ro: Vec3, rd: Vec3, point: Vec3, normal: Vec3) -> Option<Vec3> 
 }
 
 /// Nearest vertex (of objects not in `exclude`) to the cursor, within 20 px.
-pub fn vertex_snap(doc: &Document, cam: &OrbitCamera, vp: [f32; 4], cursor: (f64, f64), exclude: &HashSet<u64>) -> Option<Vec3> {
+pub fn vertex_snap(
+    doc: &Document,
+    cam: &OrbitCamera,
+    vp: [f32; 4],
+    cursor: (f64, f64),
+    exclude: &HashSet<u64>,
+) -> Option<Vec3> {
     let worlds = doc.scene.world_matrices();
     let m = cam.view_proj(vp[2] / vp[3]);
     let cur = Vec2::new(cursor.0 as f32, cursor.1 as f32);
@@ -180,7 +216,10 @@ pub fn vertex_snap(doc: &Document, cam: &OrbitCamera, vp: [f32; 4], cursor: (f64
             if c.w <= 1e-4 {
                 continue;
             }
-            let s = Vec2::new(vp[0] + (c.x / c.w * 0.5 + 0.5) * vp[2], vp[1] + (1.0 - (c.y / c.w * 0.5 + 0.5)) * vp[3]);
+            let s = Vec2::new(
+                vp[0] + (c.x / c.w * 0.5 + 0.5) * vp[2],
+                vp[1] + (1.0 - (c.y / c.w * 0.5 + 0.5)) * vp[3],
+            );
             let d = (s - cur).length();
             if d < 20.0 && best.map_or(true, |(bd, _)| d < bd) {
                 best = Some((d, p));
@@ -220,7 +259,15 @@ pub struct Modal {
 }
 
 impl Modal {
-    pub fn start(kind: ModalKind, doc: &mut Document, cam: &OrbitCamera, vp: [f32; 4], cursor: (f64, f64), pivot: Pivot, checkpoint: bool) -> Option<Modal> {
+    pub fn start(
+        kind: ModalKind,
+        doc: &mut Document,
+        cam: &OrbitCamera,
+        vp: [f32; 4],
+        cursor: (f64, f64),
+        pivot: Pivot,
+        checkpoint: bool,
+    ) -> Option<Modal> {
         let session = Session::new(doc, pivot)?;
         if checkpoint {
             doc.checkpoint();
@@ -246,7 +293,11 @@ impl Modal {
     }
 
     fn dir(&self, a: usize, local: bool) -> Vec3 {
-        if local { self.local_rot * AXES[a] } else { AXES[a] }
+        if local {
+            self.local_rot * AXES[a]
+        } else {
+            AXES[a]
+        }
     }
 
     pub fn status(&self) -> String {
@@ -326,11 +377,23 @@ impl Modal {
         match self.constrain {
             Constrain::Free => String::new(),
             Constrain::Axis(a, l) => format!("  [{}{}]", if l { "local " } else { "" }, axis(a)),
-            Constrain::Plane(a, l) => format!("  [plane, not {}{}]", if l { "local " } else { "" }, axis(a)),
+            Constrain::Plane(a, l) => format!(
+                "  [plane, not {}{}]",
+                if l { "local " } else { "" },
+                axis(a)
+            ),
         }
     }
 
-    pub fn update(&mut self, doc: &mut Document, cam: &OrbitCamera, vp: [f32; 4], cursor: (f64, f64), snap: &SnapSettings, ctrl: bool) {
+    pub fn update(
+        &mut self,
+        doc: &mut Document,
+        cam: &OrbitCamera,
+        vp: [f32; 4],
+        cursor: (f64, f64),
+        snap: &SnapSettings,
+        ctrl: bool,
+    ) {
         let snapping = snap.enabled ^ ctrl;
         let num = self.numeric.parse::<f32>().ok();
         let (ro, rd) = cursor_ray(cursor, cam, vp);
@@ -351,19 +414,27 @@ impl Modal {
                 } else {
                     match self.constrain {
                         Constrain::Free => {
-                            if let (Some(p0), Some(p1)) = (ray_plane(r0, d0, pivot, back), ray_plane(ro, rd, pivot, back)) {
+                            if let (Some(p0), Some(p1)) = (
+                                ray_plane(r0, d0, pivot, back),
+                                ray_plane(ro, rd, pivot, back),
+                            ) {
                                 d = p1 - p0;
                             }
                         }
                         Constrain::Axis(a, l) => {
                             let ax = self.dir(a, l);
-                            if let (Some(t0), Some(t1)) = (closest_param(r0, d0, pivot, ax), closest_param(ro, rd, pivot, ax)) {
+                            if let (Some(t0), Some(t1)) = (
+                                closest_param(r0, d0, pivot, ax),
+                                closest_param(ro, rd, pivot, ax),
+                            ) {
                                 d = ax * (t1 - t0);
                             }
                         }
                         Constrain::Plane(a, l) => {
                             let n = self.dir(a, l);
-                            if let (Some(p0), Some(p1)) = (ray_plane(r0, d0, pivot, n), ray_plane(ro, rd, pivot, n)) {
+                            if let (Some(p0), Some(p1)) =
+                                (ray_plane(r0, d0, pivot, n), ray_plane(ro, rd, pivot, n))
+                            {
                                 d = p1 - p0;
                             }
                         }
@@ -377,11 +448,17 @@ impl Modal {
                                         let ax = self.dir(a, l);
                                         ax * ((d.dot(ax) / st).round() * st)
                                     }
-                                    _ => Vec3::new((d.x / st).round() * st, (d.y / st).round() * st, (d.z / st).round() * st),
+                                    _ => Vec3::new(
+                                        (d.x / st).round() * st,
+                                        (d.y / st).round() * st,
+                                        (d.z / st).round() * st,
+                                    ),
                                 };
                             }
                             SnapMode::Vertex => {
-                                if let Some(p) = vertex_snap(doc, cam, vp, cursor, &self.session.exclude) {
+                                if let Some(p) =
+                                    vertex_snap(doc, cam, vp, cursor, &self.session.exclude)
+                                {
                                     let mut dd = p - pivot;
                                     if let Constrain::Axis(a, l) = self.constrain {
                                         let ax = self.dir(a, l);
@@ -393,7 +470,14 @@ impl Modal {
                         }
                     }
                 }
-                self.info = format!("Move  D: {:.3}  {:.3}  {:.3}{}{}", d.x, d.y, d.z, self.constraint_label(), self.numeric_label());
+                self.info = format!(
+                    "Move  D: {:.3}  {:.3}  {:.3}{}{}",
+                    d.x,
+                    d.y,
+                    d.z,
+                    self.constraint_label(),
+                    self.numeric_label()
+                );
                 Op::Move(d)
             }
             ModalKind::Rotate => {
@@ -417,14 +501,23 @@ impl Modal {
                         self.accum += dlt;
                         self.last_angle = a1;
                     }
-                    let mut a = if axis.dot(back) >= 0.0 { -self.accum } else { self.accum };
+                    let mut a = if axis.dot(back) >= 0.0 {
+                        -self.accum
+                    } else {
+                        self.accum
+                    };
                     if snapping {
                         let st = snap.rotate_step_deg.to_radians().max(1e-3);
                         a = (a / st).round() * st;
                     }
                     a
                 };
-                self.info = format!("Rotate  {:.1}°{}{}", angle.to_degrees(), self.constraint_label(), self.numeric_label());
+                self.info = format!(
+                    "Rotate  {:.1}°{}{}",
+                    angle.to_degrees(),
+                    self.constraint_label(),
+                    self.numeric_label()
+                );
                 Op::Rotate { axis, angle }
             }
             ModalKind::Scale => {
@@ -444,7 +537,12 @@ impl Modal {
                     Constrain::Axis(a, l) => Some(self.dir(a, l)),
                     _ => None,
                 };
-                self.info = format!("Scale  {:.3}{}{}", f, self.constraint_label(), self.numeric_label());
+                self.info = format!(
+                    "Scale  {:.3}{}{}",
+                    f,
+                    self.constraint_label(),
+                    self.numeric_label()
+                );
                 Op::Scale { axis, factor: f }
             }
         };
@@ -452,7 +550,11 @@ impl Modal {
     }
 
     fn numeric_label(&self) -> String {
-        if self.numeric.is_empty() { String::new() } else { format!("  = {}", self.numeric) }
+        if self.numeric.is_empty() {
+            String::new()
+        } else {
+            format!("  = {}", self.numeric)
+        }
     }
 
     pub fn confirm(self, doc: &mut Document) {

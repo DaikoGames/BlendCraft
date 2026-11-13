@@ -28,6 +28,24 @@ pub(super) fn compile(graph: &ShaderGraph) -> Result<Program, String> {
             "graph exceeds the {MAX_GRAPH_NODES}-node real-time compilation limit"
         ));
     }
+    for node in graph
+        .nodes
+        .iter()
+        .filter(|node| node.kind == ShaderNodeKind::ColorRamp)
+    {
+        let (colors, _, interp, color_mode) = forge_core::shader_graph::ramp_get_stops(node);
+        if colors.len() > 4 {
+            return Err("Color Ramp with more than 4 stops uses the CPU bake path".into());
+        }
+        if color_mode != 0 {
+            return Err("HSV/HSL Color Ramp modes use the CPU bake path".into());
+        }
+        if interp > 4 {
+            return Err(format!(
+                "Color Ramp interpolation mode {interp} is unsupported"
+            ));
+        }
+    }
     let mut nodes = HashMap::with_capacity(graph.nodes.len());
     let mut node_slots = HashMap::with_capacity(graph.nodes.len());
     let mut params = vec![[0.0; 4]; GRAPH_PARAM_COUNT];
@@ -277,6 +295,34 @@ fn graph_brick(
     let tint = clamp(graph_brick_noise(row, brick) + bias, 0.0, 1.0);
     let brick_color = mix(color1, color2, tint);
     return GraphBrickSample(mix(brick_color, mortar_color, mortar), mortar);
+}}
+
+fn graph_ramp_spline(
+    before: vec4<f32>,
+    left: vec4<f32>,
+    right: vec4<f32>,
+    after: vec4<f32>,
+    t: f32,
+    cardinal: bool,
+) -> vec4<f32> {{
+    let t2 = t * t;
+    let t3 = t2 * t;
+    var result = vec4<f32>(0.0);
+    if (cardinal) {{
+        let tension = 0.71;
+        let w0 = -tension * t3 + 2.0 * tension * t2 - tension * t;
+        let w1 = (2.0 - tension) * t3 + (tension - 3.0) * t2 + 1.0;
+        let w2 = (tension - 2.0) * t3 + (3.0 - 2.0 * tension) * t2 + tension * t;
+        let w3 = tension * t3 - tension * t2;
+        result = before * w0 + left * w1 + right * w2 + after * w3;
+    }} else {{
+        let w0 = pow(1.0 - t, 3.0) / 6.0;
+        let w1 = (3.0 * t3 - 6.0 * t2 + 4.0) / 6.0;
+        let w2 = (-3.0 * t3 + 3.0 * t2 + 3.0 * t + 1.0) / 6.0;
+        let w3 = t3 / 6.0;
+        result = before * w0 + left * w1 + right * w2 + after * w3;
+    }}
+    return clamp(result, vec4<f32>(0.0), vec4<f32>(1.0));
 }}
 
 fn graph_wave(
@@ -1112,7 +1158,7 @@ impl Compiler<'_> {
                     let right = color(index + 1);
                     let start = position(index);
                     let end = position(index + 1);
-                    let t = if interp == 2 {
+                    let t = if interp == 4 {
                         "0.0".to_string()
                     } else {
                         let f = format!(
@@ -1124,8 +1170,17 @@ impl Compiler<'_> {
                             f
                         }
                     };
-                    expression =
-                        format!("select({expression}, mix({left}, {right}, {t}), {fac} < {end})");
+                    let segment = if interp == 2 || interp == 3 {
+                        let before = color(index.saturating_sub(1));
+                        let after = color((index + 2).min(colors.len() - 1));
+                        format!(
+                            "graph_ramp_spline({before}, {left}, {right}, {after}, {t}, {})",
+                            interp == 3
+                        )
+                    } else {
+                        format!("mix({left}, {right}, {t})")
+                    };
+                    expression = format!("select({expression}, {segment}, {fac} < {end})");
                 }
                 self.line(id, 0, "vec4<f32>", expression);
                 self.line(
@@ -1359,6 +1414,72 @@ mod tests {
             next_id: 5,
         };
         validate_graph(&graph);
+    }
+
+    #[test]
+    fn color_ramp_spline_modes_generate_wgsl_and_large_ramps_fall_back() {
+        for mode in [2, 3, 4] {
+            let mut ramp = ShaderNode::with_kind(1, ShaderNodeKind::ColorRamp, [0.0, 0.0]);
+            ramp.mode = mode;
+            let graph = ShaderGraph {
+                nodes: vec![
+                    ramp,
+                    ShaderNode::with_kind(2, ShaderNodeKind::Principled, [1.0, 0.0]),
+                    ShaderNode::with_kind(3, ShaderNodeKind::Output, [2.0, 0.0]),
+                ],
+                links: vec![
+                    ShaderLink {
+                        from: 1,
+                        to: 2,
+                        from_socket: 0,
+                        to_socket: 0,
+                    },
+                    ShaderLink {
+                        from: 2,
+                        to: 3,
+                        from_socket: 0,
+                        to_socket: 0,
+                    },
+                ],
+                next_id: 4,
+            };
+            let program = compile(&graph).expect("up to four stops should compile live");
+            if mode == 2 || mode == 3 {
+                assert!(program.source.contains("graph_ramp_spline"));
+            }
+            validate_graph(&graph);
+        }
+
+        let mut ramp = ShaderNode::with_kind(1, ShaderNodeKind::ColorRamp, [0.0, 0.0]);
+        ramp.ramp_stops = (0..5)
+            .map(|index| forge_core::shader_graph::ColorRampStop {
+                color: [index as f32 / 4.0, 0.0, 0.0, 1.0],
+                position: index as f32 / 4.0,
+            })
+            .collect();
+        let graph = ShaderGraph {
+            nodes: vec![
+                ramp,
+                ShaderNode::with_kind(2, ShaderNodeKind::Principled, [1.0, 0.0]),
+                ShaderNode::with_kind(3, ShaderNodeKind::Output, [2.0, 0.0]),
+            ],
+            links: vec![
+                ShaderLink {
+                    from: 1,
+                    to: 2,
+                    from_socket: 0,
+                    to_socket: 0,
+                },
+                ShaderLink {
+                    from: 2,
+                    to: 3,
+                    from_socket: 0,
+                    to_socket: 0,
+                },
+            ],
+            next_id: 4,
+        };
+        assert!(compile(&graph).unwrap_err().contains("more than 4 stops"));
     }
 
     #[test]

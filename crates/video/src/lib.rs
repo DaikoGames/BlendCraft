@@ -279,7 +279,10 @@ fn build_header(p: &Params, frames: u32, max_chunk: u32, movi_payload: u32) -> V
     put_u16(&mut strf, 1); // biPlanes
     put_u16(&mut strf, 24); // biBitCount
     strf.extend_from_slice(b"MJPG"); // biCompression
-    put_u32(&mut strf, p.width.saturating_mul(p.height).saturating_mul(3)); // biSizeImage
+    put_u32(
+        &mut strf,
+        p.width.saturating_mul(p.height).saturating_mul(3),
+    ); // biSizeImage
     put_u32(&mut strf, 0); // biXPelsPerMeter
     put_u32(&mut strf, 0); // biYPelsPerMeter
     put_u32(&mut strf, 0); // biClrUsed
@@ -464,7 +467,8 @@ mod tests {
 
     #[test]
     fn rejects_short_buffer() {
-        let path = std::env::temp_dir().join(format!("forge_video_short_{}.avi", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("forge_video_short_{}.avi", std::process::id()));
         let mut vw = VideoWriter::create(&path, 16, 16, 24, 90).unwrap();
         assert!(vw.push_rgba(vec![0; 10]).is_err());
         let _ = vw.finish();

@@ -7,10 +7,18 @@ pub struct MipLevel {
 }
 
 fn srgb_to_linear(c: f32) -> f32 {
-    if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
+    if c <= 0.04045 {
+        c / 12.92
+    } else {
+        ((c + 0.055) / 1.055).powf(2.4)
+    }
 }
 fn linear_to_srgb(c: f32) -> f32 {
-    if c <= 0.0031308 { c * 12.92 } else { 1.055 * c.powf(1.0 / 2.4) - 0.055 }
+    if c <= 0.0031308 {
+        c * 12.92
+    } else {
+        1.055 * c.powf(1.0 / 2.4) - 0.055
+    }
 }
 
 fn downsample(src: &MipLevel, srgb: bool) -> MipLevel {
@@ -26,16 +34,28 @@ fn downsample(src: &MipLevel, srgb: bool) -> MipLevel {
                 for &sy in &ys {
                     for &sx in &xs {
                         let v = src.data[((sy * src.w + sx) as usize) * 4 + c];
-                        sum += if srgb && c < 3 { lut[v as usize] } else { v as f32 / 255.0 };
+                        sum += if srgb && c < 3 {
+                            lut[v as usize]
+                        } else {
+                            v as f32 / 255.0
+                        };
                     }
                 }
                 let avg = sum * 0.25;
-                let enc = if srgb && c < 3 { linear_to_srgb(avg) } else { avg };
+                let enc = if srgb && c < 3 {
+                    linear_to_srgb(avg)
+                } else {
+                    avg
+                };
                 out[((y * nw + x) as usize) * 4 + c] = (enc * 255.0 + 0.5).clamp(0.0, 255.0) as u8;
             }
         }
     }
-    MipLevel { w: nw, h: nh, data: out }
+    MipLevel {
+        w: nw,
+        h: nh,
+        data: out,
+    }
 }
 
 pub fn mip_chain_rgba8(w: u32, h: u32, data: Vec<u8>, srgb: bool) -> Vec<MipLevel> {
@@ -56,11 +76,18 @@ pub fn upload_mips(
     format: wgpu::TextureFormat,
 ) -> wgpu::TextureView {
     let max = device.limits().max_texture_dimension_2d;
-    let start = levels.iter().position(|l| l.w <= max && l.h <= max).unwrap_or(levels.len() - 1);
+    let start = levels
+        .iter()
+        .position(|l| l.w <= max && l.h <= max)
+        .unwrap_or(levels.len() - 1);
     let levels = &levels[start..];
     let tex = device.create_texture(&wgpu::TextureDescriptor {
         label: Some(label),
-        size: wgpu::Extent3d { width: levels[0].w, height: levels[0].h, depth_or_array_layers: 1 },
+        size: wgpu::Extent3d {
+            width: levels[0].w,
+            height: levels[0].h,
+            depth_or_array_layers: 1,
+        },
         mip_level_count: levels.len() as u32,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
@@ -77,8 +104,16 @@ pub fn upload_mips(
                 aspect: wgpu::TextureAspect::All,
             },
             &l.data,
-            wgpu::ImageDataLayout { offset: 0, bytes_per_row: Some(4 * l.w), rows_per_image: Some(l.h) },
-            wgpu::Extent3d { width: l.w, height: l.h, depth_or_array_layers: 1 },
+            wgpu::ImageDataLayout {
+                offset: 0,
+                bytes_per_row: Some(4 * l.w),
+                rows_per_image: Some(l.h),
+            },
+            wgpu::Extent3d {
+                width: l.w,
+                height: l.h,
+                depth_or_array_layers: 1,
+            },
         );
     }
     tex.create_view(&wgpu::TextureViewDescriptor::default())

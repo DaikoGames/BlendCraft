@@ -34,15 +34,36 @@ fn clip_project(m: Mat4, vp: [f32; 4], a: Vec3, b: Vec3) -> Option<(Vec2, Vec2)>
         let t = (eps - c1.w) / (c0.w - c1.w);
         c1 += (c0 - c1) * t;
     }
-    let s = |c: Vec4| Vec2::new(vp[0] + (c.x / c.w * 0.5 + 0.5) * vp[2], vp[1] + (1.0 - (c.y / c.w * 0.5 + 0.5)) * vp[3]);
+    let s = |c: Vec4| {
+        Vec2::new(
+            vp[0] + (c.x / c.w * 0.5 + 0.5) * vp[2],
+            vp[1] + (1.0 - (c.y / c.w * 0.5 + 0.5)) * vp[3],
+        )
+    };
     Some((s(c0), s(c1)))
 }
 
-pub fn draw(ctx: &egui::Context, cam: &OrbitCamera, rect: egui::Rect, doc: &Document, extra: &Extra) {
+pub fn draw(
+    ctx: &egui::Context,
+    cam: &OrbitCamera,
+    rect: egui::Rect,
+    doc: &Document,
+    extra: &Extra,
+) {
     let ppp = ctx.pixels_per_point();
-    let vp = [rect.min.x * ppp, rect.min.y * ppp, rect.width() * ppp, rect.height() * ppp];
+    let vp = [
+        rect.min.x * ppp,
+        rect.min.y * ppp,
+        rect.width() * ppp,
+        rect.height() * ppp,
+    ];
     let pt = |p: Vec2| egui::pos2(p.x / ppp, p.y / ppp);
-    let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Middle, egui::Id::new("helpers"))).with_clip_rect(rect);
+    let painter = ctx
+        .layer_painter(egui::LayerId::new(
+            egui::Order::Middle,
+            egui::Id::new("helpers"),
+        ))
+        .with_clip_rect(rect);
 
     // helper icons for non-mesh objects
     if doc.scene.objects.iter().any(|o| !o.kind.is_mesh()) {
@@ -73,7 +94,8 @@ pub fn draw(ctx: &egui::Context, cam: &OrbitCamera, rect: egui::Rect, doc: &Docu
                         } else {
                             Color32::from_rgb(185, 195, 215)
                         };
-                        let bone_stroke = Stroke::new(if bone_selected { 2.8_f32 } else { 1.5_f32 }, bone_color);
+                        let bone_stroke =
+                            Stroke::new(if bone_selected { 2.8_f32 } else { 1.5_f32 }, bone_color);
                         let a = worlds[i].transform_point3(a);
                         let b = worlds[i].transform_point3(b);
                         if let Some((p0, p1)) = clip_project(m, vp, a, b) {
@@ -89,11 +111,23 @@ pub fn draw(ctx: &egui::Context, cam: &OrbitCamera, rect: egui::Rect, doc: &Docu
                             for (point, is_tail) in [(head, false), (tail, true)] {
                                 if let Some(screen) = project_px(cam, vp, point) {
                                     let center = pt(screen);
-                                    let fill = if is_tail { Color32::from_rgb(255, 175, 55) } else { Color32::from_rgb(90, 205, 255) };
-                                    painter.circle_filled(center, 5.0, Color32::from_black_alpha(210));
+                                    let fill = if is_tail {
+                                        Color32::from_rgb(255, 175, 55)
+                                    } else {
+                                        Color32::from_rgb(90, 205, 255)
+                                    };
+                                    painter.circle_filled(
+                                        center,
+                                        5.0,
+                                        Color32::from_black_alpha(210),
+                                    );
                                     painter.circle_filled(center, 3.2, fill);
                                     if arm.active == Some(bone_index as u32) {
-                                        painter.circle_stroke(center, 6.5, Stroke::new(1.0, Color32::WHITE));
+                                        painter.circle_stroke(
+                                            center,
+                                            6.5,
+                                            Stroke::new(1.0, Color32::WHITE),
+                                        );
                                     }
                                 }
                             }
@@ -113,10 +147,24 @@ pub fn draw(ctx: &egui::Context, cam: &OrbitCamera, rect: egui::Rect, doc: &Docu
 
     // Armature mode badge and per-bone selection feedback.
     if (doc.armature_edit || doc.pose_mode) && doc.active_armature().is_some() {
-        let label = if doc.armature_edit { "Armature Edit Mode" } else { "Pose Mode" };
-        let galley = ctx.fonts(|f| f.layout_no_wrap(label.into(), egui::FontId::proportional(14.0), Color32::from_rgb(255, 210, 90)));
+        let label = if doc.armature_edit {
+            "Armature Edit Mode"
+        } else {
+            "Pose Mode"
+        };
+        let galley = ctx.fonts(|f| {
+            f.layout_no_wrap(
+                label.into(),
+                egui::FontId::proportional(14.0),
+                Color32::from_rgb(255, 210, 90),
+            )
+        });
         let pos = egui::pos2(rect.min.x + 12.0, rect.min.y + 12.0);
-        painter.rect_filled(egui::Rect::from_min_size(pos, galley.size()).expand(6.0), 4.0, Color32::from_black_alpha(180));
+        painter.rect_filled(
+            egui::Rect::from_min_size(pos, galley.size()).expand(6.0),
+            4.0,
+            Color32::from_black_alpha(180),
+        );
         painter.galley(pos, galley, Color32::from_rgb(255, 210, 90));
     }
 
@@ -124,9 +172,19 @@ pub fn draw(ctx: &egui::Context, cam: &OrbitCamera, rect: egui::Rect, doc: &Docu
     if let Some(c) = project_px(cam, vp, doc.scene.cursor) {
         let c = pt(c);
         painter.circle_stroke(c, 10.0, Stroke::new(3.0_f32, Color32::WHITE));
-        painter.circle_stroke(c, 10.0, Stroke::new(1.5_f32, Color32::from_rgb(230, 40, 40)));
+        painter.circle_stroke(
+            c,
+            10.0,
+            Stroke::new(1.5_f32, Color32::from_rgb(230, 40, 40)),
+        );
         for (dx, dy) in [(1.0, 0.0), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0)] {
-            painter.line_segment([c + egui::vec2(dx * 6.0, dy * 6.0), c + egui::vec2(dx * 15.0, dy * 15.0)], Stroke::new(1.5_f32, Color32::WHITE));
+            painter.line_segment(
+                [
+                    c + egui::vec2(dx * 6.0, dy * 6.0),
+                    c + egui::vec2(dx * 15.0, dy * 15.0),
+                ],
+                Stroke::new(1.5_f32, Color32::WHITE),
+            );
         }
     }
 
@@ -153,7 +211,11 @@ pub fn draw(ctx: &egui::Context, cam: &OrbitCamera, rect: egui::Rect, doc: &Docu
     let m = cam.view_proj(vp[2] / vp[3].max(1.0));
     let draw_measurement = |a: Vec3, b: Vec3, preview: bool| {
         if let Some((pa, pb)) = clip_project(m, vp, a, b) {
-            let color = if preview { Color32::from_rgb(255, 240, 130) } else { Color32::from_rgb(255, 205, 45) };
+            let color = if preview {
+                Color32::from_rgb(255, 240, 130)
+            } else {
+                Color32::from_rgb(255, 205, 45)
+            };
             let stroke = Stroke::new(if preview { 2.5_f32 } else { 2.0_f32 }, color);
             painter.line_segment([pt(pa), pt(pb)], stroke);
             painter.circle_filled(pt(pa), 4.0, color);
@@ -195,10 +257,14 @@ pub fn draw(ctx: &egui::Context, cam: &OrbitCamera, rect: egui::Rect, doc: &Docu
         draw_stroke(stroke);
     }
 
-
     // Edit Mode: vertices / edges / faces
     if let Some(session) = doc.edit.as_ref() {
-        if let Some(idx) = doc.scene.objects.iter().position(|o| o.id == session.object_id) {
+        if let Some(idx) = doc
+            .scene
+            .objects
+            .iter()
+            .position(|o| o.id == session.object_id)
+        {
             let world = doc.scene.world_matrices()[idx];
             let verts: Vec<Vec3> = session
                 .mesh
@@ -214,7 +280,9 @@ pub fn draw(ctx: &egui::Context, cam: &OrbitCamera, rect: egui::Rect, doc: &Docu
                 let (Some(p0), Some(p1)) = (
                     project_px(cam, vp, verts[a as usize]),
                     project_px(cam, vp, verts[b as usize]),
-                ) else { continue };
+                ) else {
+                    continue;
+                };
                 let edge_selected = session.selection.edges.contains(&(a, b))
                     || session.selection.edges.contains(&(b, a));
                 let both_sel = selected_verts.contains(&a) && selected_verts.contains(&b);
@@ -227,7 +295,9 @@ pub fn draw(ctx: &egui::Context, cam: &OrbitCamera, rect: egui::Rect, doc: &Docu
             }
             // Vertices as connected joints
             for (i, w) in verts.iter().enumerate() {
-                let Some(p) = project_px(cam, vp, *w) else { continue };
+                let Some(p) = project_px(cam, vp, *w) else {
+                    continue;
+                };
                 let sel = selected_verts.contains(&(i as u32));
                 let r = if sel { 6.5 } else { 4.5 };
                 let fill = if sel {
@@ -239,14 +309,25 @@ pub fn draw(ctx: &egui::Context, cam: &OrbitCamera, rect: egui::Rect, doc: &Docu
                 painter.circle_stroke(
                     pt(p),
                     r / ppp,
-                    Stroke::new(1.2_f32, if sel { Color32::WHITE } else { Color32::from_rgb(180, 200, 230) }),
+                    Stroke::new(
+                        1.2_f32,
+                        if sel {
+                            Color32::WHITE
+                        } else {
+                            Color32::from_rgb(180, 200, 230)
+                        },
+                    ),
                 );
             }
             // face centers for face mode
             if session.selection.domain == EditDomain::Face {
                 for (fi, tri) in session.mesh.indices.chunks_exact(3).enumerate() {
-                    let c = (verts[tri[0] as usize] + verts[tri[1] as usize] + verts[tri[2] as usize]) / 3.0;
-                    let Some(p) = project_px(cam, vp, c) else { continue };
+                    let c =
+                        (verts[tri[0] as usize] + verts[tri[1] as usize] + verts[tri[2] as usize])
+                            / 3.0;
+                    let Some(p) = project_px(cam, vp, c) else {
+                        continue;
+                    };
                     let sel = session.selection.faces.contains(&(fi as u32));
                     let col = if sel {
                         Color32::from_rgba_unmultiplied(255, 160, 0, 200)
@@ -263,7 +344,11 @@ pub fn draw(ctx: &egui::Context, cam: &OrbitCamera, rect: egui::Rect, doc: &Docu
                 EditDomain::Face => "Edit Mode — Face".to_string(),
             };
             let galley = ctx.fonts(|f| {
-                f.layout_no_wrap(label, egui::FontId::proportional(14.0), Color32::from_rgb(255, 200, 80))
+                f.layout_no_wrap(
+                    label,
+                    egui::FontId::proportional(14.0),
+                    Color32::from_rgb(255, 200, 80),
+                )
             });
             let pos = egui::pos2(rect.min.x + 12.0, rect.min.y + 12.0);
             painter.rect_filled(
@@ -277,10 +362,20 @@ pub fn draw(ctx: &egui::Context, cam: &OrbitCamera, rect: egui::Rect, doc: &Docu
 
     // modal status line
     if let Some(text) = extra.modal {
-        let galley = ctx.fonts(|f| f.layout_no_wrap(text.to_string(), egui::FontId::proportional(15.0), Color32::WHITE));
+        let galley = ctx.fonts(|f| {
+            f.layout_no_wrap(
+                text.to_string(),
+                egui::FontId::proportional(15.0),
+                Color32::WHITE,
+            )
+        });
         let size = galley.size();
         let pos = egui::pos2(rect.center().x - size.x * 0.5, rect.max.y - size.y - 18.0);
-        painter.rect_filled(egui::Rect::from_min_size(pos, size).expand(7.0), 5.0, Color32::from_black_alpha(190));
+        painter.rect_filled(
+            egui::Rect::from_min_size(pos, size).expand(7.0),
+            5.0,
+            Color32::from_black_alpha(190),
+        );
         painter.galley(pos, galley, Color32::WHITE);
     }
 }

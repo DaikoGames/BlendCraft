@@ -1,14 +1,18 @@
+mod fonts_io;
 mod gizmo;
 mod keymap;
 mod overlay;
 mod recent;
-mod fonts_io;
+mod scripting;
 mod tools;
 mod transform;
 mod ui;
 
 use egui_wgpu::wgpu;
-use forge_core::{project, Constraint, Document, EditDomain, EnvironmentMap, FixedView, ObjectKind, OrbitCamera, SameKind, SculptSettings};
+use forge_core::{
+    project, Constraint, Document, EditDomain, EnvironmentMap, FixedView, ObjectKind, OrbitCamera,
+    SameKind, SculptSettings,
+};
 use forge_render::{Highlight, Renderer, ViewSettings};
 use glam::{Mat4, Vec2};
 use keymap::{Action, Binding};
@@ -65,7 +69,6 @@ struct EditXform {
     /// true = drag while holding LMB (click-drag verts); false = modal G/R/S
     confirm_on_release: bool,
 }
-
 
 use ui::{Rename, UiState};
 use winit::{
@@ -177,7 +180,11 @@ fn highlights(doc: &Document) -> Vec<Highlight> {
         .iter()
         .map(|o| {
             if doc.selection.contains(&o.id) {
-                if doc.active == Some(o.id) { Highlight::Active } else { Highlight::Selected }
+                if doc.active == Some(o.id) {
+                    Highlight::Active
+                } else {
+                    Highlight::Selected
+                }
             } else {
                 Highlight::None
             }
@@ -186,13 +193,15 @@ fn highlights(doc: &Document) -> Vec<Highlight> {
 }
 
 fn ext_of(p: &Path) -> String {
-    p.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase()
+    p.extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase()
 }
 
 fn err_string<E: std::fmt::Display>(e: E) -> String {
     e.to_string()
 }
-
 
 fn edit_sel_world_center(doc: &Document) -> Option<(glam::Vec3, glam::Mat4)> {
     let session = doc.edit.as_ref()?;
@@ -215,13 +224,23 @@ fn draw_edit_gizmo_ui(
     hover: Option<usize>,
     drag_axis: Option<usize>,
 ) {
-    let Some((origin, _)) = edit_sel_world_center(doc) else { return };
+    let Some((origin, _)) = edit_sel_world_center(doc) else {
+        return;
+    };
     let dist = (origin - camera.target).length().max(0.5);
     let len = (dist * 0.15).clamp(0.3, 8.0);
     let ppp = ctx.pixels_per_point();
-    let vp = [rect.min.x * ppp, rect.min.y * ppp, rect.width() * ppp, rect.height() * ppp];
+    let vp = [
+        rect.min.x * ppp,
+        rect.min.y * ppp,
+        rect.width() * ppp,
+        rect.height() * ppp,
+    ];
     let painter = ctx
-        .layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("edit_gizmo")))
+        .layer_painter(egui::LayerId::new(
+            egui::Order::Foreground,
+            egui::Id::new("edit_gizmo"),
+        ))
         .with_clip_rect(rect);
     let pt = |p: glam::Vec2| egui::pos2(p.x / ppp, p.y / ppp);
     use crate::tools::project_px;
@@ -338,12 +357,15 @@ impl App {
     }
 
     fn frame(&mut self, selected_only: bool) {
-        let b = if selected_only { self.doc.selected_bounds() } else { None };
+        let b = if selected_only {
+            self.doc.selected_bounds()
+        } else {
+            None
+        };
         if let Some(b) = b.or_else(|| self.doc.scene.bounds()) {
             self.camera.frame(b);
         }
     }
-
 
     /// Raycast against ground plane y=0 or return point along ray at distance 5.
 
@@ -371,7 +393,12 @@ impl App {
             self.status("Tab into Edit Mode first");
             return;
         }
-        let empty = self.doc.edit.as_ref().map(|e| e.selection.is_empty()).unwrap_or(true);
+        let empty = self
+            .doc
+            .edit
+            .as_ref()
+            .map(|e| e.selection.is_empty())
+            .unwrap_or(true);
         // LoopCut/Knife can work with empty selection differently; others need selection
         let needs_sel = !matches!(self.ts.tool, Tool::Knife | Tool::LoopCut);
         if empty && needs_sel {
@@ -388,11 +415,16 @@ impl App {
             start: self.cursor,
             last_amount: 0.0,
         });
-        self.status(format!("{}: drag to adjust, release to confirm", self.ts.tool.name()));
+        self.status(format!(
+            "{}: drag to adjust, release to confirm",
+            self.ts.tool.name()
+        ));
     }
 
     fn update_tool_drag(&mut self) {
-        let Some(drag) = self.tool_drag.as_ref() else { return };
+        let Some(drag) = self.tool_drag.as_ref() else {
+            return;
+        };
         let tool = drag.tool;
         let start = drag.start;
         let dy = (start.1 - self.cursor.1) as f32; // mouse up = positive
@@ -428,7 +460,10 @@ impl App {
                 }
                 Tool::ShrinkFatten => {
                     e.shrink_fatten(amount);
-                    self.status(format!("Shrink/Fatten: {:.3}  (release to confirm)", amount));
+                    self.status(format!(
+                        "Shrink/Fatten: {:.3}  (release to confirm)",
+                        amount
+                    ));
                 }
                 Tool::Smooth => {
                     e.smooth_verts(amount);
@@ -493,9 +528,20 @@ impl App {
         if !self.doc.in_edit_mode() {
             return;
         }
-        let center = self.doc.edit.as_ref().map(|e| e.selection_center()).unwrap_or(glam::Vec3::ZERO);
+        let center = self
+            .doc
+            .edit
+            .as_ref()
+            .map(|e| e.selection_center())
+            .unwrap_or(glam::Vec3::ZERO);
         let world_center = if let Some(session) = self.doc.edit.as_ref() {
-            if let Some(idx) = self.doc.scene.objects.iter().position(|o| o.id == session.object_id) {
+            if let Some(idx) = self
+                .doc
+                .scene
+                .objects
+                .iter()
+                .position(|o| o.id == session.object_id)
+            {
                 let w = self.doc.scene.world_matrices()[idx];
                 w.transform_point3(center)
             } else {
@@ -506,7 +552,13 @@ impl App {
         };
         let normal = (self.camera.target - self.camera.eye()).normalize_or_zero();
         if let Some(session) = self.doc.edit.as_ref() {
-            if let Some(idx) = self.doc.scene.objects.iter().position(|o| o.id == session.object_id) {
+            if let Some(idx) = self
+                .doc
+                .scene
+                .objects
+                .iter()
+                .position(|o| o.id == session.object_id)
+            {
                 let inv = self.doc.scene.world_matrices()[idx].inverse();
                 let local_pt = inv.transform_point3(world_center);
                 let local_n = inv.transform_vector3(normal).normalize_or_zero();
@@ -515,7 +567,6 @@ impl App {
             }
         }
     }
-
 
     fn sync_sculpt_brush_from_tool(&mut self) {
         use forge_core::SculptBrush as B;
@@ -540,11 +591,16 @@ impl App {
         };
     }
 
-
     fn paint_sample(&mut self) {
         if let Some(uv) = self.paint_sample_at(self.cursor) {
-            let color = if self.ts.tool == Tool::PaintErase { [0.78, 0.78, 0.78, 1.0] } else { self.ts.paint_color };
-            let _ = self.doc.paint_at_uv(uv, color, self.ts.paint_radius, self.ts.paint_strength);
+            let color = if self.ts.tool == Tool::PaintErase {
+                [0.78, 0.78, 0.78, 1.0]
+            } else {
+                self.ts.paint_color
+            };
+            let _ = self
+                .doc
+                .paint_at_uv(uv, color, self.ts.paint_radius, self.ts.paint_strength);
         }
     }
 
@@ -552,10 +608,18 @@ impl App {
         if !self.doc.paint_mode {
             return None;
         }
-        let (vx, vy, vw, vh) = (self.viewport[0], self.viewport[1], self.viewport[2], self.viewport[3]);
-        if vw < 1.0 || vh < 1.0
-            || cursor.0 < vx as f64 || cursor.1 < vy as f64
-            || cursor.0 > (vx + vw) as f64 || cursor.1 > (vy + vh) as f64
+        let (vx, vy, vw, vh) = (
+            self.viewport[0],
+            self.viewport[1],
+            self.viewport[2],
+            self.viewport[3],
+        );
+        if vw < 1.0
+            || vh < 1.0
+            || cursor.0 < vx as f64
+            || cursor.1 < vy as f64
+            || cursor.0 > (vx + vw) as f64
+            || cursor.1 > (vy + vh) as f64
         {
             return None;
         }
@@ -563,8 +627,12 @@ impl App {
         let ny = 1.0 - ((cursor.1 as f32 - vy) / vh) * 2.0;
         let (origin, dir) = self.camera.ray((nx, ny), vw / vh);
         // Raycast active mesh for UV
-        let Some(id) = self.doc.active else { return None };
-        let Some(idx) = self.doc.scene.objects.iter().position(|o| o.id == id) else { return None };
+        let Some(id) = self.doc.active else {
+            return None;
+        };
+        let Some(idx) = self.doc.scene.objects.iter().position(|o| o.id == id) else {
+            return None;
+        };
         let world = self.doc.scene.world_matrices()[idx];
         let inv = world.inverse();
         let local_o = inv.transform_point3(origin);
@@ -572,7 +640,12 @@ impl App {
         let mesh = &self.doc.scene.objects[idx].mesh;
         let mut best: Option<(f32, glam::Vec2)> = None;
         for tri in mesh.indices.chunks_exact(3) {
-            if tri.iter().any(|&index| index as usize >= mesh.vertices.len()) { continue; }
+            if tri
+                .iter()
+                .any(|&index| index as usize >= mesh.vertices.len())
+            {
+                continue;
+            }
             let a = glam::Vec3::from(mesh.vertices[tri[0] as usize].position);
             let b = glam::Vec3::from(mesh.vertices[tri[1] as usize].position);
             let c = glam::Vec3::from(mesh.vertices[tri[2] as usize].position);
@@ -581,16 +654,24 @@ impl App {
             let e2 = c - a;
             let p = local_d.cross(e2);
             let det = e1.dot(p);
-            if det.abs() < 1e-10 { continue; }
+            if det.abs() < 1e-10 {
+                continue;
+            }
             let inv_det = 1.0 / det;
             let tvec = local_o - a;
             let u = tvec.dot(p) * inv_det;
-            if !(0.0..=1.0).contains(&u) { continue; }
+            if !(0.0..=1.0).contains(&u) {
+                continue;
+            }
             let q = tvec.cross(e1);
             let v = local_d.dot(q) * inv_det;
-            if v < 0.0 || u + v > 1.0 { continue; }
+            if v < 0.0 || u + v > 1.0 {
+                continue;
+            }
             let t = e2.dot(q) * inv_det;
-            if t <= 1e-5 { continue; }
+            if t <= 1e-5 {
+                continue;
+            }
             if best.map(|(bt, _)| t < bt).unwrap_or(true) {
                 let ua = glam::Vec2::from(mesh.vertices[tri[0] as usize].uv);
                 let ub = glam::Vec2::from(mesh.vertices[tri[1] as usize].uv);
@@ -618,14 +699,25 @@ impl App {
 
         self.sync_sculpt_brush_from_tool();
         self.sculpt.invert = self.ctrl();
-        let (vx, vy, vw, vh) = (self.viewport[0], self.viewport[1], self.viewport[2], self.viewport[3]);
+        let (vx, vy, vw, vh) = (
+            self.viewport[0],
+            self.viewport[1],
+            self.viewport[2],
+            self.viewport[3],
+        );
         if vw < 1.0 || vh < 1.0 {
             return;
         }
         let nx = ((self.cursor.0 as f32 - vx) / vw) * 2.0 - 1.0;
         let ny = 1.0 - ((self.cursor.1 as f32 - vy) / vh) * 2.0;
         let (origin, dir) = self.camera.ray((nx, ny), vw / vh);
-        let grab_delta = if matches!(self.sculpt.brush, forge_core::SculptBrush::Grab | forge_core::SculptBrush::SnakeHook | forge_core::SculptBrush::Nudge | forge_core::SculptBrush::Thumb) {
+        let grab_delta = if matches!(
+            self.sculpt.brush,
+            forge_core::SculptBrush::Grab
+                | forge_core::SculptBrush::SnakeHook
+                | forge_core::SculptBrush::Nudge
+                | forge_core::SculptBrush::Thumb
+        ) {
             let dx = (self.cursor.0 - self.press.0) as f32 * 0.0025 * self.camera.distance;
             let dy = (self.press.1 - self.cursor.1) as f32 * 0.0025 * self.camera.distance;
             let view = self.camera.view().inverse();
@@ -635,7 +727,9 @@ impl App {
         } else {
             None
         };
-        let _ = self.doc.sculpt_stroke(origin, dir, &self.sculpt, grab_delta);
+        let _ = self
+            .doc
+            .sculpt_stroke(origin, dir, &self.sculpt, grab_delta);
         // Live status: vertex count + dyntopo
         if let Some(id) = self.doc.active {
             if let Some(obj) = self.doc.scene.objects.iter().find(|o| o.id == id) {
@@ -652,7 +746,12 @@ impl App {
     }
 
     fn raycast_ground_or_mesh(&self) -> Option<glam::Vec3> {
-        let (vx, vy, vw, vh) = (self.viewport[0], self.viewport[1], self.viewport[2], self.viewport[3]);
+        let (vx, vy, vw, vh) = (
+            self.viewport[0],
+            self.viewport[1],
+            self.viewport[2],
+            self.viewport[3],
+        );
         if vw < 1.0 || vh < 1.0 {
             return None;
         }
@@ -740,7 +839,10 @@ impl App {
             return;
         }
         let is_cam = |o: &forge_core::Object| matches!(o.kind, ObjectKind::Camera(_));
-        let from_active = self.doc.active_index().filter(|&i| is_cam(&self.doc.scene.objects[i]));
+        let from_active = self
+            .doc
+            .active_index()
+            .filter(|&i| is_cam(&self.doc.scene.objects[i]));
         let idx = from_active.or_else(|| self.doc.scene.objects.iter().position(is_cam));
         match idx {
             Some(i) => {
@@ -768,13 +870,16 @@ impl App {
             (None, false) => self.doc.select_none(),
             (None, true) => {}
         }
-        if !self.doc.armature_edit && !self.doc.pose_mode
-            && matches!(self.ts.tool, Tool::BoneAdd | Tool::BoneExtrude | Tool::BoneDelete | Tool::PoseClear)
+        if !self.doc.armature_edit
+            && !self.doc.pose_mode
+            && matches!(
+                self.ts.tool,
+                Tool::BoneAdd | Tool::BoneExtrude | Tool::BoneDelete | Tool::PoseClear
+            )
         {
             self.ts.tool = Tool::Select;
         }
     }
-
 
     /// If verts are selected, start a free Move grab (same as G). Returns true if started.
     /// Select component under cursor and start a hold-to-drag move.
@@ -799,7 +904,9 @@ impl App {
 
     fn edit_gizmo_hover_test(&mut self) {
         self.edit_gizmo_hover = None;
-        let Some((origin, _, _)) = self.edit_selection_world_center() else { return };
+        let Some((origin, _, _)) = self.edit_selection_world_center() else {
+            return;
+        };
         let len = self.edit_gizmo_len(origin);
         let [vx, vy, vw, vh] = self.viewport;
         let cam = &self.camera;
@@ -812,7 +919,9 @@ impl App {
             let (Some(p0), Some(p1)) = (
                 project_px(cam, vp, origin),
                 project_px(cam, vp, origin + *dir * len),
-            ) else { continue };
+            ) else {
+                continue;
+            };
             // distance from cursor to segment
             let ab = p1 - p0;
             let t = ((cursor - p0).dot(ab) / ab.length_squared().max(1e-6)).clamp(0.0, 1.0);
@@ -826,13 +935,19 @@ impl App {
     }
 
     fn begin_edit_gizmo_drag(&mut self) -> bool {
-        let Some(axis) = self.edit_gizmo_hover else { return false };
-        let Some(session) = self.doc.edit.as_ref() else { return false };
+        let Some(axis) = self.edit_gizmo_hover else {
+            return false;
+        };
+        let Some(session) = self.doc.edit.as_ref() else {
+            return false;
+        };
         let verts = session.snapshot_positions();
         if verts.is_empty() {
             return false;
         }
-        let Some((origin, world, _)) = self.edit_selection_world_center() else { return false };
+        let Some((origin, world, _)) = self.edit_selection_world_center() else {
+            return false;
+        };
         let axis_dir = [glam::Vec3::X, glam::Vec3::Y, glam::Vec3::Z][axis];
         let (ro, rd) = {
             let [vx, vy, vw, vh] = self.viewport;
@@ -880,7 +995,9 @@ impl App {
     }
 
     fn update_edit_gizmo_drag(&mut self) {
-        let Some(d) = self.edit_gizmo_drag.as_ref() else { return };
+        let Some(d) = self.edit_gizmo_drag.as_ref() else {
+            return;
+        };
         let (ro, rd) = {
             let [vx, vy, vw, vh] = self.viewport;
             let nx = (self.cursor.0 as f32 - vx) / vw * 2.0 - 1.0;
@@ -918,39 +1035,72 @@ impl App {
         self.edit_gizmo_drag = None;
     }
 
-
     /// Start an extrusion directly from a visible bone joint. The new bone
     /// begins exactly at the clicked head or tail and is placed by dragging.
     fn start_bone_extrude_from_joint(&mut self, parent: u32, from_head: bool) -> bool {
-        if !self.doc.armature_edit { return false; }
+        if !self.doc.armature_edit {
+            return false;
+        }
         let joint = {
-            let Some(arm) = self.doc.active_armature() else { return false };
-            let Some(bone) = arm.bones.get(parent as usize) else { return false };
-            if from_head { bone.head_v() } else { bone.tail_v() }
+            let Some(arm) = self.doc.active_armature() else {
+                return false;
+            };
+            let Some(bone) = arm.bones.get(parent as usize) else {
+                return false;
+            };
+            if from_head {
+                bone.head_v()
+            } else {
+                bone.tail_v()
+            }
         };
         self.doc.checkpoint();
-        let new_index = self.doc.active_armature_mut().and_then(|arm| arm.extrude_from_joint(parent, from_head));
-        let Some(new_index) = new_index else { self.doc.undo(); return false; };
+        let new_index = self
+            .doc
+            .active_armature_mut()
+            .and_then(|arm| arm.extrude_from_joint(parent, from_head));
+        let Some(new_index) = new_index else {
+            self.doc.undo();
+            return false;
+        };
         let head = joint;
-        self.bone_extrude_drag = Some(BoneExtrudeDrag { bone_idx: new_index, head });
+        self.bone_extrude_drag = Some(BoneExtrudeDrag {
+            bone_idx: new_index,
+            head,
+        });
         self.update_bone_extrude();
-        self.status(if from_head { "Extruding branch from bone head" } else { "Extruding child from bone tail" });
+        self.status(if from_head {
+            "Extruding branch from bone head"
+        } else {
+            "Extruding child from bone tail"
+        });
         true
     }
 
     /// Hit-test the visible head/tail handles. Returns true when a drag starts.
     fn try_start_bone_joint_extrude(&mut self) -> bool {
-        if !self.doc.armature_edit { return false; }
-        let Some(id) = self.doc.active else { return false };
-        let Some(object_index) = self.doc.scene.objects.iter().position(|o| o.id == id) else { return false };
+        if !self.doc.armature_edit {
+            return false;
+        }
+        let Some(id) = self.doc.active else {
+            return false;
+        };
+        let Some(object_index) = self.doc.scene.objects.iter().position(|o| o.id == id) else {
+            return false;
+        };
         let world = self.doc.scene.world_matrices()[object_index];
-        let Some(arm) = self.doc.active_armature() else { return false };
+        let Some(arm) = self.doc.active_armature() else {
+            return false;
+        };
         let cursor = glam::Vec2::new(self.cursor.0 as f32, self.cursor.1 as f32);
         let mut best: Option<(f32, u32, bool)> = None;
         for (index, bone) in arm.bones.iter().enumerate() {
             for (point, from_head) in [(bone.head_v(), true), (bone.tail_v(), false)] {
                 let point_world = world.transform_point3(point);
-                let Some(screen) = tools::project_px(&self.camera, self.viewport, point_world) else { continue };
+                let Some(screen) = tools::project_px(&self.camera, self.viewport, point_world)
+                else {
+                    continue;
+                };
                 let distance = (screen - cursor).length();
                 if distance <= 10.0 && best.map_or(true, |(d, _, _)| distance < d) {
                     best = Some((distance, index as u32, from_head));
@@ -1002,14 +1152,18 @@ impl App {
     }
 
     fn update_bone_extrude(&mut self) {
-        let Some(drag) = self.bone_extrude_drag.as_ref() else { return };
+        let Some(drag) = self.bone_extrude_drag.as_ref() else {
+            return;
+        };
         let bi = drag.bone_idx;
         let head = drag.head;
         let id = match self.doc.active {
             Some(id) => id,
             None => return,
         };
-        let Some(idx) = self.doc.scene.objects.iter().position(|o| o.id == id) else { return };
+        let Some(idx) = self.doc.scene.objects.iter().position(|o| o.id == id) else {
+            return;
+        };
         let [vx, vy, vw, vh] = self.viewport;
         if vw < 1.0 || vh < 1.0 {
             return;
@@ -1071,47 +1225,74 @@ impl App {
         };
         let mut indices: Vec<u32> = arm.selected.iter().copied().collect();
         if indices.is_empty() {
-            if let Some(active) = arm.active { indices.push(active); }
+            if let Some(active) = arm.active {
+                indices.push(active);
+            }
         }
         if indices.is_empty() {
             self.status("Select one or more bones first");
             return;
         }
-        let snapshots: Vec<_> = indices.into_iter().filter_map(|i| {
-            arm.bones.get(i as usize).map(|b| (
-                i, b.head, b.tail, b.pose_rot, b.pose_loc, b.pose_scale
-            ))
-        }).collect();
-        if snapshots.is_empty() { return; }
-        let rest_joints: Vec<_> = arm.bones.iter()
-            .map(|b| (b.head_v(), b.tail_v()))
+        let snapshots: Vec<_> = indices
+            .into_iter()
+            .filter_map(|i| {
+                arm.bones
+                    .get(i as usize)
+                    .map(|b| (i, b.head, b.tail, b.pose_rot, b.pose_loc, b.pose_scale))
+            })
             .collect();
+        if snapshots.is_empty() {
+            return;
+        }
+        let rest_joints: Vec<_> = arm.bones.iter().map(|b| (b.head_v(), b.tail_v())).collect();
         let center = snapshots.iter().fold(glam::Vec3::ZERO, |sum, b| {
             sum + glam::Vec3::from(b.1) + glam::Vec3::from(b.2)
         }) / (snapshots.len() as f32 * 2.0);
         let Some(id) = self.doc.active else { return };
-        let Some(idx) = self.doc.scene.objects.iter().position(|o| o.id == id) else { return };
+        let Some(idx) = self.doc.scene.objects.iter().position(|o| o.id == id) else {
+            return;
+        };
         let inv_world = self.doc.scene.world_matrices()[idx].inverse();
         self.doc.checkpoint();
         self.bone_xform_drag = Some(BoneXform {
-            kind, start_cursor: self.cursor, bones: snapshots, rest_joints, center, inv_world,
+            kind,
+            start_cursor: self.cursor,
+            bones: snapshots,
+            rest_joints,
+            center,
+            inv_world,
         });
-        let name = match kind { EditXformKind::Move => "Move", EditXformKind::Rotate => "Rotate", EditXformKind::Scale => "Scale" };
-        self.status(if confirm_on_release { format!("Bone {name} — drag and release to confirm") } else { format!("Bone {name} — LMB confirm, RMB/Esc cancel") });
+        let name = match kind {
+            EditXformKind::Move => "Move",
+            EditXformKind::Rotate => "Rotate",
+            EditXformKind::Scale => "Scale",
+        };
+        self.status(if confirm_on_release {
+            format!("Bone {name} — drag and release to confirm")
+        } else {
+            format!("Bone {name} — LMB confirm, RMB/Esc cancel")
+        });
     }
 
     fn update_bone_xform(&mut self) {
-        let Some(xf) = self.bone_xform_drag.as_ref() else { return };
+        let Some(xf) = self.bone_xform_drag.as_ref() else {
+            return;
+        };
         let dx = (self.cursor.0 - xf.start_cursor.0) as f32;
         let dy = (self.cursor.1 - xf.start_cursor.1) as f32;
         let inv_view = self.camera.view().inverse();
         let right = inv_view.x_axis.truncate().normalize_or_zero();
         let up = inv_view.y_axis.truncate().normalize_or_zero();
         let view_axis = inv_view.z_axis.truncate().normalize_or_zero();
-        let dist = (self.camera.target - inv_view.w_axis.truncate()).length().max(0.1);
+        let dist = (self.camera.target - inv_view.w_axis.truncate())
+            .length()
+            .max(0.1);
         let world_delta = right * (dx * dist * 0.0025) + up * (-dy * dist * 0.0025);
         let local_delta = xf.inv_world.transform_vector3(world_delta);
-        let local_axis = xf.inv_world.transform_vector3(view_axis).normalize_or_zero();
+        let local_axis = xf
+            .inv_world
+            .transform_vector3(view_axis)
+            .normalize_or_zero();
         let angle = dx * 0.01;
         let rotation = glam::Quat::from_axis_angle(local_axis, angle);
         let factor = (-dy * 0.01).exp().clamp(0.01, 100.0);
@@ -1119,11 +1300,14 @@ impl App {
         let kind = xf.kind;
         let snapshots = xf.bones.clone();
         let rest_joints = xf.rest_joints.clone();
-        let selected_bones: std::collections::BTreeSet<u32> = snapshots.iter().map(|b| b.0).collect();
+        let selected_bones: std::collections::BTreeSet<u32> =
+            snapshots.iter().map(|b| b.0).collect();
         let pose_mode = self.doc.pose_mode;
         if let Some(arm) = self.doc.active_armature_mut() {
             for (i, head, tail, pose_rot, pose_loc, pose_scale) in snapshots {
-                let Some(b) = arm.bones.get_mut(i as usize) else { continue };
+                let Some(b) = arm.bones.get_mut(i as usize) else {
+                    continue;
+                };
                 if pose_mode {
                     match kind {
                         EditXformKind::Move => {
@@ -1131,16 +1315,29 @@ impl App {
                             b.pose_loc = p.to_array();
                         }
                         EditXformKind::Rotate => {
-                            let rest_dir = (glam::Vec3::from(tail) - glam::Vec3::from(head)).normalize_or_zero();
-                            let rest_rot = if rest_dir.length_squared() < 1e-10 { glam::Quat::IDENTITY } else { glam::Quat::from_rotation_arc(glam::Vec3::Y, rest_dir) };
+                            let rest_dir = (glam::Vec3::from(tail) - glam::Vec3::from(head))
+                                .normalize_or_zero();
+                            let rest_rot = if rest_dir.length_squared() < 1e-10 {
+                                glam::Quat::IDENTITY
+                            } else {
+                                glam::Quat::from_rotation_arc(glam::Vec3::Y, rest_dir)
+                            };
                             let bone_axis = rest_rot.conjugate() * local_axis;
                             let bone_delta = glam::Quat::from_axis_angle(bone_axis, angle);
-                            let q = glam::Quat::from_xyzw(pose_rot[0], pose_rot[1], pose_rot[2], pose_rot[3]).normalize();
+                            let q = glam::Quat::from_xyzw(
+                                pose_rot[0],
+                                pose_rot[1],
+                                pose_rot[2],
+                                pose_rot[3],
+                            )
+                            .normalize();
                             let q = (bone_delta * q).normalize();
                             b.pose_rot = [q.x, q.y, q.z, q.w];
                         }
                         EditXformKind::Scale => {
-                            b.pose_scale = (glam::Vec3::from(pose_scale) * factor).clamp(glam::Vec3::splat(0.01), glam::Vec3::splat(100.0)).to_array();
+                            b.pose_scale = (glam::Vec3::from(pose_scale) * factor)
+                                .clamp(glam::Vec3::splat(0.01), glam::Vec3::splat(100.0))
+                                .to_array();
                         }
                     }
                 } else {
@@ -1148,8 +1345,14 @@ impl App {
                     let t = glam::Vec3::from(tail);
                     let (h, t) = match kind {
                         EditXformKind::Move => (h + local_delta, t + local_delta),
-                        EditXformKind::Rotate => (center + rotation * (h - center), center + rotation * (t - center)),
-                        EditXformKind::Scale => (center + (h - center) * factor, center + (t - center) * factor),
+                        EditXformKind::Rotate => (
+                            center + rotation * (h - center),
+                            center + rotation * (t - center),
+                        ),
+                        EditXformKind::Scale => (
+                            center + (h - center) * factor,
+                            center + (t - center) * factor,
+                        ),
                     };
                     b.head = h.to_array();
                     b.tail = t.to_array();
@@ -1159,7 +1362,9 @@ impl App {
                 arm.propagate_connected_rest_joints(&rest_joints, &selected_bones);
             }
         }
-        if pose_mode { self.doc.apply_all_skinning(); }
+        if pose_mode {
+            self.doc.apply_all_skinning();
+        }
         self.doc.touch();
     }
 
@@ -1179,9 +1384,13 @@ impl App {
     }
 
     fn try_pick_bone(&mut self, extend: bool) -> bool {
-        let Some(session_arm) = self.doc.active_armature() else { return false };
+        let Some(session_arm) = self.doc.active_armature() else {
+            return false;
+        };
         let id = self.doc.active.unwrap();
-        let Some(idx) = self.doc.scene.objects.iter().position(|o| o.id == id) else { return false };
+        let Some(idx) = self.doc.scene.objects.iter().position(|o| o.id == id) else {
+            return false;
+        };
         let [vx, vy, vw, vh] = self.viewport;
         if vw < 1.0 || vh < 1.0 {
             return false;
@@ -1193,7 +1402,9 @@ impl App {
         let inv = world.inverse();
         let local_o = inv.transform_point3(ro);
         let local_d = inv.transform_vector3(rd);
-        let dist = (world.w_axis.truncate() - self.camera.target).length().max(0.5);
+        let dist = (world.w_axis.truncate() - self.camera.target)
+            .length()
+            .max(0.5);
         let thresh = dist * 0.12;
         let pick = if self.doc.armature_edit {
             session_arm.pick_bone_rest(local_o, local_d, thresh)
@@ -1203,14 +1414,21 @@ impl App {
         let Some(bi) = pick else { return false };
         let was_selected = session_arm.selected.contains(&bi);
         let preserve_multi_selection = self.ts.tool.is_gizmo() && was_selected && !extend;
-        if !preserve_multi_selection { self.doc.checkpoint(); }
+        if !preserve_multi_selection {
+            self.doc.checkpoint();
+        }
         let selected_after_pick = if let Some(a) = self.doc.active_armature_mut() {
             // Clicking an already-selected bone with a transform tool should
             // preserve the whole multi-selection so it can be transformed.
-            if preserve_multi_selection { a.active = Some(bi); }
-            else { a.select_bone(bi, extend); }
+            if preserve_multi_selection {
+                a.active = Some(bi);
+            } else {
+                a.select_bone(bi, extend);
+            }
             a.selected.contains(&bi)
-        } else { false };
+        } else {
+            false
+        };
         self.status(format!("Bone {}", bi + 1));
         if selected_after_pick && self.ts.tool.is_gizmo() {
             let kind = match self.ts.tool {
@@ -1225,9 +1443,13 @@ impl App {
     }
 
     fn try_edit_click_drag(&mut self, extend: bool) -> bool {
-        let Some(session) = self.doc.edit.as_ref() else { return false };
+        let Some(session) = self.doc.edit.as_ref() else {
+            return false;
+        };
         let id = session.object_id;
-        let Some(idx) = self.doc.scene.objects.iter().position(|o| o.id == id) else { return false };
+        let Some(idx) = self.doc.scene.objects.iter().position(|o| o.id == id) else {
+            return false;
+        };
         let [vx, vy, vw, vh] = self.viewport;
         if vw < 1.0 || vh < 1.0 {
             return false;
@@ -1239,7 +1461,9 @@ impl App {
         let inv = world.inverse();
         let local_o = inv.transform_point3(ro);
         let local_d = inv.transform_vector3(rd);
-        let dist = (world.w_axis.truncate() - self.camera.target).length().max(0.5);
+        let dist = (world.w_axis.truncate() - self.camera.target)
+            .length()
+            .max(0.5);
         let thresh = dist * 0.08;
         // Edge mode: pick in screen space so clicking the drawn line always hits
         let pick = if session.selection.domain == forge_core::EditDomain::Edge {
@@ -1281,7 +1505,9 @@ impl App {
     }
 
     fn begin_edit_axis_grab(&mut self) -> bool {
-        let Some(session) = self.doc.edit.as_ref() else { return false };
+        let Some(session) = self.doc.edit.as_ref() else {
+            return false;
+        };
         if session.selected_vert_indices().is_empty() {
             return false;
         }
@@ -1294,7 +1520,9 @@ impl App {
     }
 
     fn start_edit_xform_ex(&mut self, kind: EditXformKind, confirm_on_release: bool) {
-        let Some(session) = self.doc.edit.as_ref() else { return };
+        let Some(session) = self.doc.edit.as_ref() else {
+            return;
+        };
         let verts = session.snapshot_positions();
         if verts.is_empty() {
             self.status("Nothing selected");
@@ -1302,7 +1530,9 @@ impl App {
         }
         let center = session.selection_center();
         let id = session.object_id;
-        let Some(idx) = self.doc.scene.objects.iter().position(|o| o.id == id) else { return };
+        let Some(idx) = self.doc.scene.objects.iter().position(|o| o.id == id) else {
+            return;
+        };
         let world = self.doc.scene.world_matrices()[idx];
         let inv_world = world.inverse();
         self.doc.checkpoint();
@@ -1327,26 +1557,34 @@ impl App {
     }
 
     fn update_edit_xform(&mut self) {
-        let Some(xf) = self.edit_xform.as_ref() else { return };
+        let Some(xf) = self.edit_xform.as_ref() else {
+            return;
+        };
         let dx = (self.cursor.0 - xf.start_cursor.0) as f32;
         let dy = (self.cursor.1 - xf.start_cursor.1) as f32;
         let inv_view = self.camera.view().inverse();
         let right = inv_view.x_axis.truncate().normalize_or_zero();
         let up = inv_view.y_axis.truncate().normalize_or_zero();
-        let dist = (self.camera.target - inv_view.w_axis.truncate()).length().max(0.1);
+        let dist = (self.camera.target - inv_view.w_axis.truncate())
+            .length()
+            .max(0.1);
 
         let positions: Vec<(u32, glam::Vec3)> = match xf.kind {
             EditXformKind::Move => {
                 let scale = dist * 0.0025;
                 let world_delta = right * (dx * scale) + up * (-dy * scale);
                 let local_delta = xf.inv_world.transform_vector3(world_delta);
-                xf.verts.iter().map(|(vi, p)| (*vi, *p + local_delta)).collect()
+                xf.verts
+                    .iter()
+                    .map(|(vi, p)| (*vi, *p + local_delta))
+                    .collect()
             }
             EditXformKind::Rotate => {
                 let angle = dx * 0.01;
-                let axis = xf.inv_world.transform_vector3(
-                    inv_view.z_axis.truncate().normalize_or_zero()
-                ).normalize_or_zero();
+                let axis = xf
+                    .inv_world
+                    .transform_vector3(inv_view.z_axis.truncate().normalize_or_zero())
+                    .normalize_or_zero();
                 let q = glam::Quat::from_axis_angle(axis, angle);
                 xf.verts
                     .iter()
@@ -1388,9 +1626,13 @@ impl App {
     }
 
     fn pick_edit(&mut self, extend: bool) {
-        let Some(session) = self.doc.edit.as_ref() else { return };
+        let Some(session) = self.doc.edit.as_ref() else {
+            return;
+        };
         let id = session.object_id;
-        let Some(idx) = self.doc.scene.objects.iter().position(|o| o.id == id) else { return };
+        let Some(idx) = self.doc.scene.objects.iter().position(|o| o.id == id) else {
+            return;
+        };
         let [vx, vy, vw, vh] = self.viewport;
         let nx = (self.cursor.0 as f32 - vx) / vw * 2.0 - 1.0;
         let ny = 1.0 - (self.cursor.1 as f32 - vy) / vh * 2.0;
@@ -1400,7 +1642,9 @@ impl App {
         let local_o = inv.transform_point3(ro);
         let local_d = inv.transform_vector3(rd);
         // threshold ~ 12px in world units near the object
-        let dist = (world.w_axis.truncate() - self.camera.target).length().max(0.5);
+        let dist = (world.w_axis.truncate() - self.camera.target)
+            .length()
+            .max(0.5);
         let thresh = dist * 0.03;
         let pick = session.pick_component(local_o, local_d, thresh);
         match pick {
@@ -1438,13 +1682,25 @@ impl App {
             SelectOp::Replace
         };
         let p = Vec2::new(self.cursor.0 as f32, self.cursor.1 as f32);
-        self.sel_drag = Some(SelDrag { tool: self.ts.tool, start: self.cursor, points: vec![p], op });
-        if self.doc.armature_edit || self.doc.pose_mode { self.doc.checkpoint(); }
+        self.sel_drag = Some(SelDrag {
+            tool: self.ts.tool,
+            start: self.cursor,
+            points: vec![p],
+            op,
+        });
+        if self.doc.armature_edit || self.doc.pose_mode {
+            self.doc.checkpoint();
+        }
         if self.ts.tool == Tool::Circle {
             if op == SelectOp::Replace {
                 if self.doc.armature_edit || self.doc.pose_mode {
-                    if let Some(a) = self.doc.active_armature_mut() { a.selected.clear(); a.active = None; }
-                } else { self.doc.select_none(); }
+                    if let Some(a) = self.doc.active_armature_mut() {
+                        a.selected.clear();
+                        a.active = None;
+                    }
+                } else {
+                    self.doc.select_none();
+                }
             }
             self.circle_paint(op);
         }
@@ -1454,19 +1710,37 @@ impl App {
         let c = Vec2::new(self.cursor.0 as f32, self.cursor.1 as f32);
         let r = self.ts.circle_radius;
         if self.doc.armature_edit || self.doc.pose_mode {
-            let bone_op = if op == SelectOp::Replace { SelectOp::Extend } else { op };
+            let bone_op = if op == SelectOp::Replace {
+                SelectOp::Extend
+            } else {
+                op
+            };
             self.select_bones_in_shape(bone_op, |p| (p - c).length() <= r);
             return;
         }
-        let hits: Vec<usize> = anchors(&self.doc, &self.camera, self.viewport).into_iter().filter(|(_, p)| (*p - c).length() <= r).map(|(i, _)| i).collect();
-        apply_selection(&mut self.doc, &hits, if op == SelectOp::Subtract { SelectOp::Subtract } else { SelectOp::Extend });
+        let hits: Vec<usize> = anchors(&self.doc, &self.camera, self.viewport)
+            .into_iter()
+            .filter(|(_, p)| (*p - c).length() <= r)
+            .map(|(i, _)| i)
+            .collect();
+        apply_selection(
+            &mut self.doc,
+            &hits,
+            if op == SelectOp::Subtract {
+                SelectOp::Subtract
+            } else {
+                SelectOp::Extend
+            },
+        );
     }
 
     fn update_sel_drag(&mut self) {
         let p = Vec2::new(self.cursor.0 as f32, self.cursor.1 as f32);
         let (tool, op) = match self.sel_drag.as_mut() {
             Some(d) => {
-                if d.tool == Tool::Lasso && d.points.last().map_or(true, |l| (*l - p).length() > 3.0) {
+                if d.tool == Tool::Lasso
+                    && d.points.last().map_or(true, |l| (*l - p).length() > 3.0)
+                {
                     d.points.push(p);
                 }
                 (d.tool, d.op)
@@ -1479,7 +1753,9 @@ impl App {
     }
 
     fn finish_sel_drag(&mut self) {
-        let Some(d) = self.sel_drag.take() else { return };
+        let Some(d) = self.sel_drag.take() else {
+            return;
+        };
         if d.tool == Tool::Circle {
             return;
         }
@@ -1488,7 +1764,9 @@ impl App {
         if (cur - start).length() < 4.0 {
             if self.doc.armature_edit || self.doc.pose_mode {
                 self.try_pick_bone(d.op == SelectOp::Extend);
-            } else { self.pick(d.op == SelectOp::Extend); }
+            } else {
+                self.pick(d.op == SelectOp::Extend);
+            }
             return;
         }
         let (lo, hi) = (start.min(cur), start.max(cur));
@@ -1519,31 +1797,53 @@ impl App {
 
     fn select_bones_in_shape(&mut self, op: SelectOp, mut contains: impl FnMut(Vec2) -> bool) {
         let Some(id) = self.doc.active else { return };
-        let Some(idx) = self.doc.scene.objects.iter().position(|o| o.id == id) else { return };
+        let Some(idx) = self.doc.scene.objects.iter().position(|o| o.id == id) else {
+            return;
+        };
         let world = self.doc.scene.world_matrices()[idx];
         let cam = self.camera.clone();
         let vp = self.viewport;
-        let Some(arm) = self.doc.active_armature() else { return };
-        let deform = if self.doc.pose_mode { Some(arm.deform_matrices_hierarchical()) } else { None };
+        let Some(arm) = self.doc.active_armature() else {
+            return;
+        };
+        let deform = if self.doc.pose_mode {
+            Some(arm.deform_matrices_hierarchical())
+        } else {
+            None
+        };
         let mut hits = Vec::new();
         for (i, b) in arm.bones.iter().enumerate() {
             let (head, tail) = if let Some(mats) = deform.as_ref() {
                 let dir = b.direction();
-                let rest_rot = if dir.length_squared() < 1e-10 { glam::Quat::IDENTITY } else { glam::Quat::from_rotation_arc(glam::Vec3::Y, dir) };
+                let rest_rot = if dir.length_squared() < 1e-10 {
+                    glam::Quat::IDENTITY
+                } else {
+                    glam::Quat::from_rotation_arc(glam::Vec3::Y, dir)
+                };
                 let rest = glam::Mat4::from_rotation_translation(rest_rot, b.head_v());
                 let posed = mats[i] * rest;
-                (posed.transform_point3(glam::Vec3::ZERO), posed.transform_point3(glam::Vec3::new(0.0, b.length(), 0.0)))
-            } else { (b.head_v(), b.tail_v()) };
+                (
+                    posed.transform_point3(glam::Vec3::ZERO),
+                    posed.transform_point3(glam::Vec3::new(0.0, b.length(), 0.0)),
+                )
+            } else {
+                (b.head_v(), b.tail_v())
+            };
             let mid = world.transform_point3((head + tail) * 0.5);
             let head_world = world.transform_point3(head);
             let tail_world = world.transform_point3(tail);
             let mut inside = false;
             for point in [mid, head_world, tail_world] {
                 if let Some(px) = crate::tools::project_px(&cam, vp, point) {
-                    if contains(px) { inside = true; break; }
+                    if contains(px) {
+                        inside = true;
+                        break;
+                    }
                 }
             }
-            if inside { hits.push(i as u32); }
+            if inside {
+                hits.push(i as u32);
+            }
         }
         if let Some(arm) = self.doc.active_armature_mut() {
             match op {
@@ -1551,21 +1851,34 @@ impl App {
                 SelectOp::Extend | SelectOp::Subtract => {}
             }
             for i in hits {
-                if op == SelectOp::Subtract { arm.selected.remove(&i); }
-                else { arm.selected.insert(i); arm.active = Some(i); }
+                if op == SelectOp::Subtract {
+                    arm.selected.remove(&i);
+                } else {
+                    arm.selected.insert(i);
+                    arm.active = Some(i);
+                }
             }
-            if arm.active.map_or(false, |active| !arm.selected.contains(&active)) {
+            if arm
+                .active
+                .map_or(false, |active| !arm.selected.contains(&active))
+            {
                 arm.active = arm.selected.iter().next_back().copied();
             }
-            if op == SelectOp::Replace && arm.selected.is_empty() { arm.active = None; }
+            if op == SelectOp::Replace && arm.selected.is_empty() {
+                arm.active = None;
+            }
         }
         self.doc.touch();
     }
 
     fn finish_edit_sel_rect(&mut self, lo: Vec2, hi: Vec2, extend: bool) {
-        let Some(session) = self.doc.edit.as_mut() else { return };
+        let Some(session) = self.doc.edit.as_mut() else {
+            return;
+        };
         let id = session.object_id;
-        let Some(idx) = self.doc.scene.objects.iter().position(|o| o.id == id) else { return };
+        let Some(idx) = self.doc.scene.objects.iter().position(|o| o.id == id) else {
+            return;
+        };
         let world = self.doc.scene.world_matrices()[idx];
         let cam = self.camera.clone();
         let vp = self.viewport;
@@ -1582,7 +1895,10 @@ impl App {
         let d = self.sel_drag.as_ref()?;
         let cur = Vec2::new(self.cursor.0 as f32, self.cursor.1 as f32);
         match d.tool {
-            Tool::BoxSelect => Some(SelShape::Box { a: Vec2::new(d.start.0 as f32, d.start.1 as f32), b: cur }),
+            Tool::BoxSelect => Some(SelShape::Box {
+                a: Vec2::new(d.start.0 as f32, d.start.1 as f32),
+                b: cur,
+            }),
             Tool::Lasso => Some(SelShape::Lasso(d.points.clone())),
             _ => None,
         }
@@ -1593,7 +1909,15 @@ impl App {
         if self.modal.is_some() {
             return;
         }
-        match Modal::start(kind, &mut self.doc, &self.camera, self.viewport, self.cursor, self.ts.pivot, checkpoint) {
+        match Modal::start(
+            kind,
+            &mut self.doc,
+            &self.camera,
+            self.viewport,
+            self.cursor,
+            self.ts.pivot,
+            checkpoint,
+        ) {
             Some(m) => {
                 self.modal = Some(m);
                 self.update_modal();
@@ -1605,7 +1929,14 @@ impl App {
     fn update_modal(&mut self) {
         let ctrl = self.ctrl();
         if let Some(m) = self.modal.as_mut() {
-            m.update(&mut self.doc, &self.camera, self.viewport, self.cursor, &self.ts.snap, ctrl);
+            m.update(
+                &mut self.doc,
+                &self.camera,
+                self.viewport,
+                self.cursor,
+                &self.ts.snap,
+                ctrl,
+            );
         }
     }
 
@@ -1647,7 +1978,9 @@ impl App {
         }
         #[cfg(not(target_arch = "wasm32"))]
         {
-            let res = std::fs::read(&path).map_err(err_string).and_then(|b| project::from_bytes(&b).map_err(err_string));
+            let res = std::fs::read(&path)
+                .map_err(err_string)
+                .and_then(|b| project::from_bytes(&b).map_err(err_string));
             match res {
                 Ok(scene) => {
                     self.doc = Document::from_scene(scene, Some(path.clone()));
@@ -1720,7 +2053,11 @@ impl App {
             let path = match (&self.doc.path, save_as) {
                 (Some(p), false) => p.clone(),
                 _ => {
-                    let Some(mut p) = rfd::FileDialog::new().add_filter("BlendCraft project", &["forge"]).set_file_name("untitled.forge").save_file() else {
+                    let Some(mut p) = rfd::FileDialog::new()
+                        .add_filter("BlendCraft project", &["forge"])
+                        .set_file_name("untitled.forge")
+                        .save_file()
+                    else {
                         return;
                     };
                     if p.extension().is_none() {
@@ -1732,7 +2069,9 @@ impl App {
             // Edit Mode owns a working mesh copy. Commit it before serializing so
             // UV edits and geometry changes cannot be omitted from the project.
             self.doc.sync_edit_mesh();
-            match project::to_bytes(&self.doc.scene).and_then(|b| std::fs::write(&path, b).map_err(Into::into)) {
+            match project::to_bytes(&self.doc.scene)
+                .and_then(|b| std::fs::write(&path, b).map_err(Into::into))
+            {
                 Ok(()) => {
                     self.doc.path = Some(path.clone());
                     self.doc.dirty = false;
@@ -1758,7 +2097,11 @@ impl App {
                 "fbx" => ("Autodesk FBX", "fbx", "model.fbx"),
                 _ => ("Wavefront OBJ", "obj", "model.obj"),
             };
-            let Some(mut p) = rfd::FileDialog::new().add_filter(filter, &[ext]).set_file_name(default).save_file() else {
+            let Some(mut p) = rfd::FileDialog::new()
+                .add_filter(filter, &[ext])
+                .set_file_name(default)
+                .save_file()
+            else {
                 return;
             };
             if p.extension().is_none() {
@@ -1796,7 +2139,10 @@ impl App {
                 #[cfg(not(target_arch = "wasm32"))]
                 {
                     if self.confirm_discard() {
-                        if let Some(p) = rfd::FileDialog::new().add_filter("BlendCraft project", &["forge"]).pick_file() {
+                        if let Some(p) = rfd::FileDialog::new()
+                            .add_filter("BlendCraft project", &["forge"])
+                            .pick_file()
+                        {
                             self.open_project(p);
                         }
                     }
@@ -1828,7 +2174,10 @@ impl App {
                 }
                 #[cfg(not(target_arch = "wasm32"))]
                 {
-                    if let Some(p) = rfd::FileDialog::new().add_filter("3D models", &["glb", "gltf", "obj", "fbx"]).pick_file() {
+                    if let Some(p) = rfd::FileDialog::new()
+                        .add_filter("3D models", &["glb", "gltf", "obj", "fbx"])
+                        .pick_file()
+                    {
                         self.import_path(&p);
                     }
                 }
@@ -1906,12 +2255,17 @@ impl App {
                 } else {
                     self.doc.delete_selected();
                 }
-            },
+            }
             A::Extrude => {
                 if self.doc.armature_edit && self.doc.active_armature().is_some() {
                     self.start_bone_extrude();
                 } else if self.doc.in_edit_mode() {
-                    let empty = self.doc.edit.as_ref().map(|e| e.selection.is_empty()).unwrap_or(true);
+                    let empty = self
+                        .doc
+                        .edit
+                        .as_ref()
+                        .map(|e| e.selection.is_empty())
+                        .unwrap_or(true);
                     if empty {
                         self.status("Extrude: select verts/edges/faces first (1/2/3 for domain, click components)");
                     } else {
@@ -1923,13 +2277,19 @@ impl App {
                 } else {
                     self.status("Extrude: Tab into Edit Mode first");
                 }
-            },
+            }
             A::InsetFaces => {
                 if self.doc.in_edit_mode() {
-                    let ok = self.doc.edit.as_ref().map(|e| {
-                        !e.selection.faces.is_empty()
-                            || (!e.selection.verts.is_empty() && e.selection.domain == forge_core::EditDomain::Vertex)
-                    }).unwrap_or(false);
+                    let ok = self
+                        .doc
+                        .edit
+                        .as_ref()
+                        .map(|e| {
+                            !e.selection.faces.is_empty()
+                                || (!e.selection.verts.is_empty()
+                                    && e.selection.domain == forge_core::EditDomain::Vertex)
+                        })
+                        .unwrap_or(false);
                     if !ok {
                         self.status("Inset: switch to Face select (3) and select faces, or select face verts");
                     } else {
@@ -1939,10 +2299,15 @@ impl App {
                 } else {
                     self.status("Inset: Tab into Edit Mode first");
                 }
-            },
+            }
             A::Bevel => {
                 if self.doc.in_edit_mode() {
-                    let empty = self.doc.edit.as_ref().map(|e| e.selection.is_empty()).unwrap_or(true);
+                    let empty = self
+                        .doc
+                        .edit
+                        .as_ref()
+                        .map(|e| e.selection.is_empty())
+                        .unwrap_or(true);
                     if empty {
                         self.status("Bevel: select edges/verts/faces first");
                     } else {
@@ -1952,12 +2317,15 @@ impl App {
                 } else {
                     self.status("Bevel: Tab into Edit Mode first");
                 }
-            },
+            }
             A::LoopCut => {
                 if self.doc.in_edit_mode() {
-                    let empty = self.doc.edit.as_ref().map(|e| {
-                        e.selection.edges.is_empty() && e.selection.faces.is_empty()
-                    }).unwrap_or(true);
+                    let empty = self
+                        .doc
+                        .edit
+                        .as_ref()
+                        .map(|e| e.selection.edges.is_empty() && e.selection.faces.is_empty())
+                        .unwrap_or(true);
                     if empty {
                         self.status("Loop Cut: select edges (2) or faces (3) first");
                     } else {
@@ -1967,24 +2335,43 @@ impl App {
                 } else {
                     self.status("Loop Cut: Tab into Edit Mode first");
                 }
-            },
+            }
             A::Knife => {
                 if self.doc.in_edit_mode() {
                     // Bisect through selection center with view plane normal
-                    let center = self.doc.edit.as_ref()
+                    let center = self
+                        .doc
+                        .edit
+                        .as_ref()
                         .map(|e| e.selection_center())
                         .unwrap_or(glam::Vec3::ZERO);
                     // Transform center to world
                     let world_center = if let Some(session) = self.doc.edit.as_ref() {
-                        if let Some(idx) = self.doc.scene.objects.iter().position(|o| o.id == session.object_id) {
+                        if let Some(idx) = self
+                            .doc
+                            .scene
+                            .objects
+                            .iter()
+                            .position(|o| o.id == session.object_id)
+                        {
                             let w = self.doc.scene.world_matrices()[idx];
                             w.transform_point3(center)
-                        } else { center }
-                    } else { center };
+                        } else {
+                            center
+                        }
+                    } else {
+                        center
+                    };
                     let normal = (self.camera.target - self.camera.eye()).normalize_or_zero();
                     // Convert plane into object local space
                     if let Some(session) = self.doc.edit.as_ref() {
-                        if let Some(idx) = self.doc.scene.objects.iter().position(|o| o.id == session.object_id) {
+                        if let Some(idx) = self
+                            .doc
+                            .scene
+                            .objects
+                            .iter()
+                            .position(|o| o.id == session.object_id)
+                        {
                             let inv = self.doc.scene.world_matrices()[idx].inverse();
                             let local_pt = inv.transform_point3(world_center);
                             let local_n = inv.transform_vector3(normal).normalize_or_zero();
@@ -1995,7 +2382,7 @@ impl App {
                 } else {
                     self.status("Knife only works in Edit Mode");
                 }
-            },
+            }
             A::PolyBuild => {
                 if self.doc.in_edit_mode() {
                     self.doc.edit_poly_build(0.25);
@@ -2003,7 +2390,7 @@ impl App {
                 } else {
                     self.status("Poly Build only works in Edit Mode (select edge/verts)");
                 }
-            },
+            }
             A::Spin => {
                 if self.doc.in_edit_mode() {
                     self.doc.edit_spin(8, 360.0);
@@ -2011,10 +2398,15 @@ impl App {
                 } else {
                     self.status("Spin only works in Edit Mode");
                 }
-            },
+            }
             A::SmoothVerts => {
                 if self.doc.in_edit_mode() {
-                    let empty = self.doc.edit.as_ref().map(|e| e.selection.is_empty()).unwrap_or(true);
+                    let empty = self
+                        .doc
+                        .edit
+                        .as_ref()
+                        .map(|e| e.selection.is_empty())
+                        .unwrap_or(true);
                     if empty {
                         self.status("Smooth: select vertices first (1)");
                     } else {
@@ -2024,10 +2416,15 @@ impl App {
                 } else {
                     self.status("Smooth: Tab into Edit Mode first");
                 }
-            },
+            }
             A::EdgeSlide => {
                 if self.doc.in_edit_mode() {
-                    let empty = self.doc.edit.as_ref().map(|e| e.selection.is_empty()).unwrap_or(true);
+                    let empty = self
+                        .doc
+                        .edit
+                        .as_ref()
+                        .map(|e| e.selection.is_empty())
+                        .unwrap_or(true);
                     if empty {
                         self.status("Edge Slide: select edges first (2)");
                     } else {
@@ -2037,10 +2434,15 @@ impl App {
                 } else {
                     self.status("Edge Slide: Tab into Edit Mode first");
                 }
-            },
+            }
             A::ShrinkFatten => {
                 if self.doc.in_edit_mode() {
-                    let empty = self.doc.edit.as_ref().map(|e| e.selection.is_empty()).unwrap_or(true);
+                    let empty = self
+                        .doc
+                        .edit
+                        .as_ref()
+                        .map(|e| e.selection.is_empty())
+                        .unwrap_or(true);
                     if empty {
                         self.status("Shrink/Fatten: select verts/faces first");
                     } else {
@@ -2050,10 +2452,15 @@ impl App {
                 } else {
                     self.status("Shrink/Fatten: Tab into Edit Mode first");
                 }
-            },
+            }
             A::Shear => {
                 if self.doc.in_edit_mode() {
-                    let empty = self.doc.edit.as_ref().map(|e| e.selection.is_empty()).unwrap_or(true);
+                    let empty = self
+                        .doc
+                        .edit
+                        .as_ref()
+                        .map(|e| e.selection.is_empty())
+                        .unwrap_or(true);
                     if empty {
                         self.status("Shear: select verts first");
                     } else {
@@ -2063,10 +2470,15 @@ impl App {
                 } else {
                     self.status("Shear: Tab into Edit Mode first");
                 }
-            },
+            }
             A::RipRegion => {
                 if self.doc.in_edit_mode() {
-                    let empty = self.doc.edit.as_ref().map(|e| e.selection.is_empty()).unwrap_or(true);
+                    let empty = self
+                        .doc
+                        .edit
+                        .as_ref()
+                        .map(|e| e.selection.is_empty())
+                        .unwrap_or(true);
                     if empty {
                         self.status("Rip: select verts first");
                     } else {
@@ -2076,13 +2488,13 @@ impl App {
                 } else {
                     self.status("Rip: Tab into Edit Mode first");
                 }
-            },
+            }
             A::MergeVerts => {
                 if self.doc.in_edit_mode() {
                     self.doc.edit_merge_verts();
                     self.status("Merged vertices");
                 }
-            },
+            }
             A::Rename => {
                 if let Some(i) = self.doc.active_index() {
                     self.ui.renaming = Some(Rename::Object(self.doc.scene.objects[i].id));
@@ -2106,24 +2518,29 @@ impl App {
                 } else {
                     self.doc.select_all();
                 }
-            },
+            }
             A::SelectNone => {
                 if self.doc.uv_mode {
                     self.doc.uv_select_none();
                 } else if self.doc.armature_edit || self.doc.pose_mode {
-                    if let Some(a) = self.doc.active_armature_mut() { a.selected.clear(); a.active = None; }
+                    if let Some(a) = self.doc.active_armature_mut() {
+                        a.selected.clear();
+                        a.active = None;
+                    }
                     self.doc.touch();
                 } else if self.doc.in_edit_mode() {
                     self.doc.edit_select_none();
                 } else {
                     self.doc.select_none();
                 }
-            },
+            }
             A::SelectInvert => {
                 if self.doc.armature_edit || self.doc.pose_mode {
                     if let Some(a) = self.doc.active_armature_mut() {
                         let old = a.selected.clone();
-                        a.selected = (0..a.bones.len() as u32).filter(|i| !old.contains(i)).collect();
+                        a.selected = (0..a.bones.len() as u32)
+                            .filter(|i| !old.contains(i))
+                            .collect();
                         a.active = a.selected.iter().next_back().copied();
                     }
                     self.doc.touch();
@@ -2132,7 +2549,7 @@ impl App {
                 } else {
                     self.doc.select_invert();
                 }
-            },
+            }
             A::SelectRandom => self.doc.select_random(0.5),
             A::SelectChildren => self.doc.select_children(),
             A::SelectParent => self.doc.select_parent(),
@@ -2166,7 +2583,7 @@ impl App {
                 } else {
                     self.start_modal(ModalKind::Move, true);
                 }
-            },
+            }
             A::ModalRotate => {
                 if self.doc.armature_edit || self.doc.pose_mode {
                     self.start_bone_pose_rotate();
@@ -2175,7 +2592,7 @@ impl App {
                 } else {
                     self.start_modal(ModalKind::Rotate, true);
                 }
-            },
+            }
             A::ModalScale => {
                 if self.doc.armature_edit || self.doc.pose_mode {
                     self.start_bone_xform(EditXformKind::Scale, false);
@@ -2184,7 +2601,7 @@ impl App {
                 } else {
                     self.start_modal(ModalKind::Scale, true);
                 }
-            },
+            }
 
             A::Hide => self.doc.hide_selected(),
             A::HideUnselected => self.doc.hide_unselected(),
@@ -2198,7 +2615,14 @@ impl App {
             A::NewCollection => {
                 let id = self.doc.new_collection();
                 self.ui.renaming = Some(Rename::Collection(id));
-                self.ui.rename_buf = self.doc.scene.collections.iter().find(|c| c.id == id).map(|c| c.name.clone()).unwrap_or_default();
+                self.ui.rename_buf = self
+                    .doc
+                    .scene
+                    .collections
+                    .iter()
+                    .find(|c| c.id == id)
+                    .map(|c| c.name.clone())
+                    .unwrap_or_default();
                 self.ui.rename_focus = true;
             }
             A::OpenMoveToCollection => self.ui.show_move_popup = true,
@@ -2217,11 +2641,19 @@ impl App {
             }
             A::SeparateLoose => {
                 let n = self.doc.separate_loose();
-                self.status(if n == 0 { "Nothing to separate (mesh is one piece)".to_string() } else { format!("Separated {n} new object(s)") });
+                self.status(if n == 0 {
+                    "Nothing to separate (mesh is one piece)".to_string()
+                } else {
+                    format!("Separated {n} new object(s)")
+                });
             }
             A::SeparateMaterial => {
                 let n = self.doc.separate_material();
-                self.status(if n == 0 { "Nothing to separate (needs a mesh with several materials)".to_string() } else { format!("Separated {n} new object(s)") });
+                self.status(if n == 0 {
+                    "Nothing to separate (needs a mesh with several materials)".to_string()
+                } else {
+                    format!("Separated {n} new object(s)")
+                });
             }
             A::SetOrigin(m) => self.doc.set_origin(m),
             A::GeometryToOrigin => self.doc.geometry_to_origin(),
@@ -2233,7 +2665,7 @@ impl App {
                 } else {
                     self.doc.apply_transform(loc, rot, scale);
                 }
-            },
+            }
             A::ClearLocation => self.doc.clear_transform(true, false, false),
             A::ClearRotation => self.doc.clear_transform(false, true, false),
             A::ClearScale => self.doc.clear_transform(false, false, true),
@@ -2246,7 +2678,9 @@ impl App {
             A::AddConstraint(k) => {
                 if let Some(i) = self.doc.active_index() {
                     self.doc.checkpoint();
-                    self.doc.scene.objects[i].constraints.push(Constraint::new(k));
+                    self.doc.scene.objects[i]
+                        .constraints
+                        .push(Constraint::new(k));
                 }
             }
             A::ClearConstraints => {
@@ -2265,7 +2699,10 @@ impl App {
                 }
                 #[cfg(not(target_arch = "wasm32"))]
                 {
-                    if let Some(p) = rfd::FileDialog::new().add_filter("Images", &["png", "jpg", "jpeg"]).pick_file() {
+                    if let Some(p) = rfd::FileDialog::new()
+                        .add_filter("Images", &["png", "jpg", "jpeg"])
+                        .pick_file()
+                    {
                         match forge_io::load_image(&p) {
                             Ok(t) => {
                                 let name = t.name.clone();
@@ -2284,14 +2721,18 @@ impl App {
                 }
                 #[cfg(not(target_arch = "wasm32"))]
                 {
-                    if let Some(p) = rfd::FileDialog::new().add_filter("HDR image", &["hdr", "png", "jpg", "jpeg"]).pick_file() {
+                    if let Some(p) = rfd::FileDialog::new()
+                        .add_filter("HDR image", &["hdr", "png", "jpg", "jpeg"])
+                        .pick_file()
+                    {
                         self.load_hdri(&p);
                     }
                 }
             }
             A::ResetSky => {
                 if let Some(g) = self.gfx.as_mut() {
-                    g.renderer.set_environment(&EnvironmentMap::procedural_sky(512, 256));
+                    g.renderer
+                        .set_environment(&EnvironmentMap::procedural_sky(512, 256));
                 }
             }
 
@@ -2305,6 +2746,11 @@ impl App {
             A::ExposureUp => self.settings.exposure = (self.settings.exposure * 1.15).min(20.0),
             A::EnvRotate(d) => self.settings.env_rotation += 0.1 * d as f32,
             A::RenderImage => self.render_image(),
+            A::RunPythonScript => self.run_python_script(),
+            A::OpenPythonScript => self.open_python_script(),
+            A::SavePythonScript => self.save_python_script(),
+            A::RenderCompositor => self.render_compositor(),
+            A::SaveCompositor => self.save_compositor(),
             A::RenderAnimation => self.render_animation(),
             A::InsertKeyframeLocRotScale => self.insert_keyframe(true, true, true),
             A::InsertKeyframeLocation => self.insert_keyframe(true, false, false),
@@ -2335,19 +2781,17 @@ impl App {
             A::SavePaintImage => self.save_paint_image(),
             A::UvSaveMap => self.save_uv_map(),
             A::UvLoadMap => self.load_uv_map(),
-            A::TogglePaintMode => {
-                match self.doc.toggle_paint_mode() {
-                    Ok(()) => {
-                        if self.doc.paint_mode {
-                            self.ts.tool = Tool::PaintBrush;
-                            self.status("Texture Paint – LMB paint · Erase tool · Wheel radius");
-                        } else {
-                            self.ts.tool = Tool::Select;
-                            self.status("Object Mode");
-                        }
+            A::TogglePaintMode => match self.doc.toggle_paint_mode() {
+                Ok(()) => {
+                    if self.doc.paint_mode {
+                        self.ts.tool = Tool::PaintBrush;
+                        self.status("Texture Paint – LMB paint · Erase tool · Wheel radius");
+                    } else {
+                        self.ts.tool = Tool::Select;
+                        self.status("Object Mode");
                     }
-                    Err(e) => self.status(e),
                 }
+                Err(e) => self.status(e),
             },
             A::ToggleUvMode => {
                 match self.doc.toggle_uv_mode() {
@@ -2356,14 +2800,23 @@ impl App {
                             self.ts.tool = Tool::UvSelect;
                             // Auto smart unwrap if UVs look unset (all near zero)
                             if let Some(id) = self.doc.active {
-                                if let Some(obj) = self.doc.scene.objects.iter().find(|o| o.id == id) {
-                                    let max_u = obj.mesh.vertices.iter().map(|v| v.uv[0].abs() + v.uv[1].abs()).fold(0.0f32, f32::max);
+                                if let Some(obj) =
+                                    self.doc.scene.objects.iter().find(|o| o.id == id)
+                                {
+                                    let max_u = obj
+                                        .mesh
+                                        .vertices
+                                        .iter()
+                                        .map(|v| v.uv[0].abs() + v.uv[1].abs())
+                                        .fold(0.0f32, f32::max);
                                     if max_u < 1e-5 {
                                         self.doc.uv_unwrap_smart();
                                     }
                                 }
                             }
-                            self.status("UV Editing – unwrap tools in toolbar · select & drag in UV Editor");
+                            self.status(
+                                "UV Editing – unwrap tools in toolbar · select & drag in UV Editor",
+                            );
                         } else {
                             self.ts.tool = Tool::Select;
                             self.status("Object Mode");
@@ -2371,27 +2824,27 @@ impl App {
                     }
                     Err(e) => self.status(e),
                 }
-            },
+            }
             A::UvUnwrapSmart => {
                 self.doc.uv_unwrap_smart();
                 self.status("Smart UV Project");
-            },
+            }
             A::UvUnwrapCube => {
                 self.doc.uv_unwrap_cube();
                 self.status("Cube Projection");
-            },
+            }
             A::UvUnwrapPlanar => {
                 self.doc.uv_unwrap_planar();
                 self.status("Project from View (planar)");
-            },
+            }
             A::UvPack => {
                 self.doc.uv_pack();
                 self.status("Pack Islands");
-            },
+            }
             A::UvReset => {
                 self.doc.uv_unwrap_reset();
                 self.status("Reset UVs");
-            },
+            }
             A::UvExportLayout => self.export_uv_layout(),
             A::ToggleSculptMode => {
                 match self.doc.toggle_sculpt_mode() {
@@ -2406,7 +2859,7 @@ impl App {
                     }
                     Err(e) => self.status(e),
                 }
-            },
+            }
             A::ToggleEditMode => {
                 // Drop any object-gizmo drag so it cannot move the whole object
                 if self.gizmo.dragging() {
@@ -2417,7 +2870,10 @@ impl App {
                     Ok(()) => {
                         if self.doc.armature_edit {
                             self.ts.tool = Tool::Select;
-                            self.status("Armature Edit Mode — select bone, E extrude tip, X delete".to_string());
+                            self.status(
+                                "Armature Edit Mode — select bone, E extrude tip, X delete"
+                                    .to_string(),
+                            );
                         } else if self.doc.in_edit_mode() {
                             self.ts.tool = Tool::Select;
                             self.status("Edit Mode — select points, then G to move".to_string());
@@ -2431,12 +2887,18 @@ impl App {
                 }
             }
             A::TogglePoseMode => {
-                if self.gizmo.dragging() { self.gizmo.end(); }
+                if self.gizmo.dragging() {
+                    self.gizmo.end();
+                }
                 self.bone_xform_drag = None;
                 match self.doc.toggle_pose_mode() {
                     Ok(()) => {
                         self.ts.tool = Tool::Select;
-                        self.status(if self.doc.pose_mode { "Pose Mode — select bones and use G/R/S to transform" } else { "Object Mode" });
+                        self.status(if self.doc.pose_mode {
+                            "Pose Mode — select bones and use G/R/S to transform"
+                        } else {
+                            "Object Mode"
+                        });
                     }
                     Err(e) => self.status(e),
                 }
@@ -2457,7 +2919,9 @@ impl App {
                 if self.doc.armature_edit {
                     self.doc.armature_add_bone();
                     self.status("Bone added");
-                } else { self.status("Enter Armature Edit Mode to add bones"); }
+                } else {
+                    self.status("Enter Armature Edit Mode to add bones");
+                }
             }
             A::ArmatureExtrude => {
                 if self.doc.armature_edit {
@@ -2470,46 +2934,69 @@ impl App {
                 if self.doc.armature_edit {
                     self.doc.armature_delete_bones();
                     self.status("Deleted bones");
-                } else { self.status("Enter Armature Edit Mode to delete bones"); }
+                } else {
+                    self.status("Enter Armature Edit Mode to delete bones");
+                }
             }
             A::ArmatureClearPose => {
                 if self.doc.pose_mode {
                     self.doc.armature_clear_pose();
                     self.status("Selected bone pose cleared");
-                } else { self.status("Enter Pose Mode to clear bone poses"); }
-            }
-            A::ArmatureBindMeshes => {
-                match self.doc.bind_selected_to_armature() {
-                    Ok(n) => self.status(format!("Bound {n} mesh(es) to armature")),
-                    Err(e) => self.status(e),
+                } else {
+                    self.status("Enter Pose Mode to clear bone poses");
                 }
             }
-
+            A::ArmatureBindMeshes => match self.doc.bind_selected_to_armature() {
+                Ok(n) => self.status(format!("Bound {n} mesh(es) to armature")),
+                Err(e) => self.status(e),
+            },
         }
     }
 
     /// Save UV coordinates as an independent, portable BlendCraft UV-map file.
     fn save_uv_map(&mut self) {
         #[cfg(target_arch = "wasm32")]
-        { self.status("Saving UV maps is not available on WebAssembly yet"); return; }
+        {
+            self.status("Saving UV maps is not available on WebAssembly yet");
+            return;
+        }
         #[cfg(not(target_arch = "wasm32"))]
         {
             self.doc.sync_edit_mesh();
-            let Some(id) = self.doc.active else { self.status("Select a mesh before saving its UV map"); return };
-            let Some(obj) = self.doc.scene.objects.iter().find(|o| o.id == id) else { self.status("Active object no longer exists"); return };
-            if obj.mesh.vertices.is_empty() || obj.mesh.indices.is_empty() { self.status("Active mesh has no UV faces"); return; }
+            let Some(id) = self.doc.active else {
+                self.status("Select a mesh before saving its UV map");
+                return;
+            };
+            let Some(obj) = self.doc.scene.objects.iter().find(|o| o.id == id) else {
+                self.status("Active object no longer exists");
+                return;
+            };
+            if obj.mesh.vertices.is_empty() || obj.mesh.indices.is_empty() {
+                self.status("Active mesh has no UV faces");
+                return;
+            }
             let file = UvMapFile {
-                format: "BlendCraft UV Map".to_string(), version: 1,
-                object_name: obj.name.clone(), vertex_count: obj.mesh.vertices.len(),
+                format: "BlendCraft UV Map".to_string(),
+                version: 1,
+                object_name: obj.name.clone(),
+                vertex_count: obj.mesh.vertices.len(),
                 positions: obj.mesh.vertices.iter().map(|v| v.position).collect(),
                 indices: obj.mesh.indices.clone(),
                 uvs: obj.mesh.vertices.iter().map(|v| v.uv).collect(),
             };
             let Some(mut path) = rfd::FileDialog::new()
                 .add_filter("BlendCraft UV Map", &["uvmap"])
-                .set_file_name(&format!("{}.uvmap", obj.name.replace('/', "_").replace('\\', "_")))
-                .save_file() else { return };
-            if path.extension().is_none() { path.set_extension("uvmap"); }
+                .set_file_name(&format!(
+                    "{}.uvmap",
+                    obj.name.replace('/', "_").replace('\\', "_")
+                ))
+                .save_file()
+            else {
+                return;
+            };
+            if path.extension().is_none() {
+                path.set_extension("uvmap");
+            }
             match serde_json::to_vec_pretty(&file) {
                 Ok(bytes) => match std::fs::write(&path, bytes) {
                     Ok(()) => self.status(format!("Saved UV map to {}", path.display())),
@@ -2523,32 +3010,78 @@ impl App {
     /// Load a standalone UV-map file, requiring an exact mesh topology match.
     fn load_uv_map(&mut self) {
         #[cfg(target_arch = "wasm32")]
-        { self.status("Loading UV maps is not available on WebAssembly yet"); return; }
+        {
+            self.status("Loading UV maps is not available on WebAssembly yet");
+            return;
+        }
         #[cfg(not(target_arch = "wasm32"))]
         {
-            let Some(path) = rfd::FileDialog::new().add_filter("BlendCraft UV Map", &["uvmap"]).pick_file() else { return };
+            let Some(path) = rfd::FileDialog::new()
+                .add_filter("BlendCraft UV Map", &["uvmap"])
+                .pick_file()
+            else {
+                return;
+            };
             let loaded: Result<UvMapFile, String> = std::fs::read(&path)
                 .map_err(|e| format!("Could not read UV map: {e}"))
-                .and_then(|bytes| serde_json::from_slice(&bytes).map_err(|e| format!("Invalid UV map file: {e}")));
-            let file = match loaded { Ok(f) => f, Err(e) => { self.status(e); return; } };
+                .and_then(|bytes| {
+                    serde_json::from_slice(&bytes).map_err(|e| format!("Invalid UV map file: {e}"))
+                });
+            let file = match loaded {
+                Ok(f) => f,
+                Err(e) => {
+                    self.status(e);
+                    return;
+                }
+            };
             if file.format != "BlendCraft UV Map" || file.version != 1 {
-                self.status("Unsupported UV map file format or version"); return;
+                self.status("Unsupported UV map file format or version");
+                return;
             }
-            let Some(id) = self.doc.active else { self.status("Select the target mesh before loading a UV map"); return };
-            let current_mesh = self.doc.edit.as_ref().filter(|e| e.object_id == id).map(|e| e.mesh.clone())
-                .or_else(|| self.doc.scene.objects.iter().find(|o| o.id == id).map(|o| (*o.mesh).clone()));
-            let Some(current_mesh) = current_mesh else { self.status("Active object no longer exists"); return };
-            if current_mesh.vertices.len() != file.vertex_count || current_mesh.indices != file.indices
-                || file.uvs.len() != file.vertex_count || file.positions.len() != file.vertex_count
-                || current_mesh.vertices.iter().zip(file.positions.iter()).any(|(v, p)| v.position != *p) {
-                self.status("UV map does not match this mesh geometry/topology. Select the original mesh or matching duplicate."); return;
+            let Some(id) = self.doc.active else {
+                self.status("Select the target mesh before loading a UV map");
+                return;
+            };
+            let current_mesh = self
+                .doc
+                .edit
+                .as_ref()
+                .filter(|e| e.object_id == id)
+                .map(|e| e.mesh.clone())
+                .or_else(|| {
+                    self.doc
+                        .scene
+                        .objects
+                        .iter()
+                        .find(|o| o.id == id)
+                        .map(|o| (*o.mesh).clone())
+                });
+            let Some(current_mesh) = current_mesh else {
+                self.status("Active object no longer exists");
+                return;
+            };
+            if current_mesh.vertices.len() != file.vertex_count
+                || current_mesh.indices != file.indices
+                || file.uvs.len() != file.vertex_count
+                || file.positions.len() != file.vertex_count
+                || current_mesh
+                    .vertices
+                    .iter()
+                    .zip(file.positions.iter())
+                    .any(|(v, p)| v.position != *p)
+            {
+                self.status("UV map does not match this mesh geometry/topology. Select the original mesh or matching duplicate.");
+                return;
             }
             if file.uvs.iter().flatten().any(|v| !v.is_finite()) {
-                self.status("UV map contains invalid coordinates"); return;
+                self.status("UV map contains invalid coordinates");
+                return;
             }
             self.doc.checkpoint();
             let mut mesh = current_mesh;
-            for (vertex, uv) in mesh.vertices.iter_mut().zip(file.uvs.iter()) { vertex.uv = *uv; }
+            for (vertex, uv) in mesh.vertices.iter_mut().zip(file.uvs.iter()) {
+                vertex.uv = *uv;
+            }
             if let Some(session) = self.doc.edit.as_mut().filter(|e| e.object_id == id) {
                 session.mesh = mesh.clone();
             }
@@ -2557,7 +3090,11 @@ impl App {
                 obj.primitive = None;
             }
             self.doc.touch();
-            self.status(format!("Loaded UV map '{}' from {}", file.object_name, path.display()));
+            self.status(format!(
+                "Loaded UV map '{}' from {}",
+                file.object_name,
+                path.display()
+            ));
         }
     }
 
@@ -2573,16 +3110,29 @@ impl App {
             let mesh = if let Some(session) = self.doc.edit.as_ref() {
                 Some(session.mesh.clone())
             } else {
-                self.doc.active.and_then(|id| self.doc.scene.objects.iter().find(|o| o.id == id))
+                self.doc
+                    .active
+                    .and_then(|id| self.doc.scene.objects.iter().find(|o| o.id == id))
                     .map(|o| (*o.mesh).clone())
             };
-            let Some(mesh) = mesh else { self.status("Select a mesh before exporting its UV layout"); return };
-            if mesh.indices.len() < 3 { self.status("The active mesh has no UV faces"); return; }
+            let Some(mesh) = mesh else {
+                self.status("Select a mesh before exporting its UV layout");
+                return;
+            };
+            if mesh.indices.len() < 3 {
+                self.status("The active mesh has no UV faces");
+                return;
+            }
             let Some(mut path) = rfd::FileDialog::new()
                 .add_filter("PNG image", &["png"])
                 .set_file_name("uv-layout.png")
-                .save_file() else { return };
-            if path.extension().is_none() { path.set_extension("png"); }
+                .save_file()
+            else {
+                return;
+            };
+            if path.extension().is_none() {
+                path.set_extension("png");
+            }
 
             const SIZE: u32 = 1024;
             let mut rgba = vec![0u8; (SIZE * SIZE * 4) as usize];
@@ -2592,10 +3142,21 @@ impl App {
                 internal_diagonals.insert((a, b));
             }
             let mut draw_line = |a: glam::Vec2, b: glam::Vec2| {
-                if !a.is_finite() || !b.is_finite() { return; }
+                if !a.is_finite() || !b.is_finite() {
+                    return;
+                }
                 // Clip to the standard 0..1 UV tile, as Blender's UV layout export does.
-                if a.x < 0.0 || a.x > 1.0 || a.y < 0.0 || a.y > 1.0
-                    || b.x < 0.0 || b.x > 1.0 || b.y < 0.0 || b.y > 1.0 { return; }
+                if a.x < 0.0
+                    || a.x > 1.0
+                    || a.y < 0.0
+                    || a.y > 1.0
+                    || b.x < 0.0
+                    || b.x > 1.0
+                    || b.y < 0.0
+                    || b.y > 1.0
+                {
+                    return;
+                }
                 let ax = a.x * (SIZE - 1) as f32;
                 let ay = (1.0 - a.y) * (SIZE - 1) as f32;
                 let bx = b.x * (SIZE - 1) as f32;
@@ -2609,7 +3170,9 @@ impl App {
                         for ox in -1..=1 {
                             let px = x + ox;
                             let py = y + oy;
-                            if px < 0 || py < 0 || px >= SIZE as i32 || py >= SIZE as i32 { continue; }
+                            if px < 0 || py < 0 || px >= SIZE as i32 || py >= SIZE as i32 {
+                                continue;
+                            }
                             let i = ((py as u32 * SIZE + px as u32) * 4) as usize;
                             rgba[i..i + 4].copy_from_slice(&[245, 205, 90, 255]);
                         }
@@ -2617,10 +3180,14 @@ impl App {
                 }
             };
             for tri in mesh.indices.chunks_exact(3) {
-                if tri.iter().any(|&i| i as usize >= mesh.vertices.len()) { continue; }
+                if tri.iter().any(|&i| i as usize >= mesh.vertices.len()) {
+                    continue;
+                }
                 for (a, b) in [(tri[0], tri[1]), (tri[1], tri[2]), (tri[2], tri[0])] {
                     let edge = (a.min(b), a.max(b));
-                    if internal_diagonals.contains(&edge) { continue; }
+                    if internal_diagonals.contains(&edge) {
+                        continue;
+                    }
                     draw_line(
                         glam::Vec2::from(mesh.vertices[a as usize].uv),
                         glam::Vec2::from(mesh.vertices[b as usize].uv),
@@ -2643,20 +3210,42 @@ impl App {
         }
         #[cfg(not(target_arch = "wasm32"))]
         {
-            let Some(id) = self.doc.active else { self.status("No active paint object"); return };
-            let image = self.doc.scene.objects.iter().find(|o| o.id == id)
+            let Some(id) = self.doc.active else {
+                self.status("No active paint object");
+                return;
+            };
+            let image = self
+                .doc
+                .scene
+                .objects
+                .iter()
+                .find(|o| o.id == id)
                 .and_then(|o| o.material.or(Some(0)))
                 .and_then(|mi| self.doc.scene.materials.get(mi))
                 .and_then(|m| m.base_color_tex)
                 .and_then(|ti| self.doc.scene.textures.get(ti))
                 .cloned();
-            let Some(image) = image else { self.status("No paint image assigned"); return };
+            let Some(image) = image else {
+                self.status("No paint image assigned");
+                return;
+            };
             let Some(mut path) = rfd::FileDialog::new()
                 .add_filter("PNG image", &["png"])
                 .set_file_name("paint-texture.png")
-                .save_file() else { return };
-            if path.extension().is_none() { path.set_extension("png"); }
-            match image::save_buffer(&path, &image.rgba8, image.width, image.height, image::ColorType::Rgba8) {
+                .save_file()
+            else {
+                return;
+            };
+            if path.extension().is_none() {
+                path.set_extension("png");
+            }
+            match image::save_buffer(
+                &path,
+                &image.rgba8,
+                image.width,
+                image.height,
+                image::ColorType::Rgba8,
+            ) {
                 Ok(()) => self.status(format!("Saved paint image to {}", path.display())),
                 Err(e) => self.status(format!("Could not save paint image: {e}")),
             }
@@ -2680,7 +3269,6 @@ impl App {
         }
     }
 
-
     fn insert_keyframe(&mut self, loc: bool, rot: bool, scl: bool) {
         if self.doc.in_edit_mode() || self.doc.sculpt_mode || self.doc.uv_mode {
             self.status("Keyframes: switch to Object Mode");
@@ -2699,7 +3287,9 @@ impl App {
         self.doc.checkpoint();
         let mut n = 0;
         for id in ids {
-            let Some(idx) = self.doc.scene.index_of(id) else { continue };
+            let Some(idx) = self.doc.scene.index_of(id) else {
+                continue;
+            };
             let o = &self.doc.scene.objects[idx];
             let loc_v = loc.then_some(o.translation);
             let rot_v = rot.then_some(o.rotation);
@@ -2714,7 +3304,9 @@ impl App {
             n += 1;
         }
         self.doc.touch();
-        self.status(format!("Inserted keyframe at frame {frame} on {n} object(s)"));
+        self.status(format!(
+            "Inserted keyframe at frame {frame} on {n} object(s)"
+        ));
     }
 
     fn delete_keyframe(&mut self) {
@@ -2742,7 +3334,10 @@ impl App {
     /// Write evaluated animation onto object transforms for the current frame.
     fn apply_animation_frame(&mut self) {
         let frame = self.doc.scene.animation.frame_current as f32;
-        let keys: Vec<(u64, (Option<glam::Vec3>, Option<glam::Quat>, Option<glam::Vec3>))> = self
+        let keys: Vec<(
+            u64,
+            (Option<glam::Vec3>, Option<glam::Quat>, Option<glam::Vec3>),
+        )> = self
             .doc
             .scene
             .animation
@@ -2751,7 +3346,9 @@ impl App {
             .map(|(id, oa)| (*id, oa.eval(frame)))
             .collect();
         for (id, (loc, rot, scl)) in keys {
-            let Some(idx) = self.doc.scene.index_of(id) else { continue };
+            let Some(idx) = self.doc.scene.index_of(id) else {
+                continue;
+            };
             let o = &mut self.doc.scene.objects[idx];
             if let Some(v) = loc {
                 o.translation = v;
@@ -2792,7 +3389,8 @@ impl App {
             // Ensure objects sit on the current timeline frame.
             self.apply_animation_frame();
             if let Some(g) = self.gfx.as_mut() {
-                g.renderer.set_scene(&self.doc.scene, &highlights(&self.doc));
+                g.renderer
+                    .set_scene(&self.doc.scene, &highlights(&self.doc));
             }
             self.uploaded = self.doc.version;
             let cam = self.camera.clone();
@@ -2807,12 +3405,188 @@ impl App {
                         self.status("Render failed: incomplete pixel buffer");
                         return;
                     }
+                    self.ui.compositor_render_rgba = rgba.clone();
+                    self.ui.compositor_render_width = w;
+                    self.ui.compositor_render_height = h;
+                    self.ui.compositor_render_serial =
+                        self.ui.compositor_render_serial.wrapping_add(1).max(1);
+                    self.ui.compositor_output_key = None;
+                    self.ui.compositor_output_rgba.clear();
+                    self.ui.compositor_output_texture = None;
+                    self.ui.compositor_eval_error = false;
                     match image::save_buffer(&path, &rgba, w, h, image::ColorType::Rgba8) {
                         Ok(()) => self.status(&format!("Saved render to {}", path.display())),
                         Err(e) => self.status(&format!("Render failed: {e}")),
                     }
                 }
                 Err(e) => self.status(&format!("Render failed: {e}")),
+            }
+        }
+    }
+
+    fn render_compositor(&mut self) {
+        #[cfg(target_arch = "wasm32")]
+        {
+            self.status("Compositor rendering is not available on WebAssembly yet");
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let (w, h) = self.render_resolution();
+            self.apply_animation_frame();
+            if let Some(g) = self.gfx.as_mut() {
+                g.renderer
+                    .set_scene(&self.doc.scene, &highlights(&self.doc));
+            } else {
+                self.status("Renderer not ready");
+                return;
+            }
+            self.uploaded = self.doc.version;
+            let result = {
+                let g = self.gfx.as_mut().unwrap();
+                g.renderer
+                    .capture_with(&self.camera, &self.settings, w, h, false)
+            };
+            match result {
+                Ok(rgba)
+                    if rgba.len() == (w as usize).saturating_mul(h as usize).saturating_mul(4) =>
+                {
+                    self.ui.compositor_render_rgba = rgba;
+                    self.ui.compositor_render_width = w;
+                    self.ui.compositor_render_height = h;
+                    self.ui.compositor_render_serial =
+                        self.ui.compositor_render_serial.wrapping_add(1).max(1);
+                    self.ui.compositor_output_key = None;
+                    self.ui.compositor_output_rgba.clear();
+                    self.ui.compositor_output_texture = None;
+                    self.ui.compositor_eval_error = false;
+                    self.status("Render complete — processing compositor nodes");
+                }
+                Ok(_) => self.status("Render failed: incomplete pixel buffer"),
+                Err(e) => self.status(&format!("Render failed: {e}")),
+            }
+        }
+    }
+
+    fn save_compositor(&mut self) {
+        #[cfg(target_arch = "wasm32")]
+        {
+            self.status("Saving compositor output is not available on WebAssembly yet");
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let rgba = &self.ui.compositor_output_rgba;
+            let (width, height) = (
+                self.ui.compositor_render_width,
+                self.ui.compositor_render_height,
+            );
+            if rgba.is_empty() || width == 0 || height == 0 {
+                self.status("Render an image before saving the compositor output");
+                return;
+            }
+            let Some(mut path) = rfd::FileDialog::new()
+                .add_filter("PNG image", &["png"])
+                .set_file_name("composited.png")
+                .save_file()
+            else {
+                return;
+            };
+            if path.extension().is_none() {
+                path.set_extension("png");
+            }
+            match image::save_buffer(&path, rgba, width, height, image::ColorType::Rgba8) {
+                Ok(()) => self.status(&format!("Saved compositor output to {}", path.display())),
+                Err(e) => self.status(&format!("Compositor save failed: {e}")),
+            }
+        }
+    }
+
+    fn run_python_script(&mut self) {
+        #[cfg(target_arch = "wasm32")]
+        {
+            self.ui.python_script_output =
+                "Python scripting is not available on WebAssembly".to_owned();
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            if self.ui.python_script_rx.is_some() {
+                return;
+            }
+            let source = self.ui.python_script.clone();
+            let snapshot = scripting::ScriptSnapshot::from_document(&self.doc);
+            let document_version = self.doc.version;
+            let (tx, rx) = std::sync::mpsc::channel();
+            self.ui.python_script_rx = Some(rx);
+            self.ui.python_script_running = true;
+            self.ui.python_script_output = "Running embedded Python…".to_owned();
+            let spawn = std::thread::Builder::new()
+                .name("blendcraft-python".into())
+                .spawn(move || {
+                    let result = scripting::execute(source, snapshot);
+                    let _ = tx.send(scripting::ScriptCompletion {
+                        document_version,
+                        result,
+                    });
+                });
+            if let Err(error) = spawn {
+                self.ui.python_script_rx = None;
+                self.ui.python_script_running = false;
+                self.ui.python_script_output = format!("Could not start Python worker: {error}");
+            }
+        }
+    }
+
+    fn open_python_script(&mut self) {
+        #[cfg(target_arch = "wasm32")]
+        {
+            self.ui.python_script_output =
+                "Opening Python scripts is not available on WebAssembly".to_owned();
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(path) = rfd::FileDialog::new()
+            .add_filter("Python script", &["py"])
+            .pick_file()
+        {
+            match std::fs::read_to_string(&path) {
+                Ok(source) => {
+                    self.ui.python_script = source;
+                    self.ui.python_script_path = Some(path);
+                    self.ui.python_script_output.clear();
+                }
+                Err(error) => {
+                    self.ui.python_script_output = format!("Could not open Python script: {error}");
+                }
+            }
+        }
+    }
+
+    fn save_python_script(&mut self) {
+        #[cfg(target_arch = "wasm32")]
+        {
+            self.ui.python_script_output =
+                "Saving Python scripts is not available on WebAssembly".to_owned();
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let path = self.ui.python_script_path.clone().or_else(|| {
+                rfd::FileDialog::new()
+                    .add_filter("Python script", &["py"])
+                    .set_file_name("script.py")
+                    .save_file()
+            });
+            let Some(mut path) = path else {
+                return;
+            };
+            if path.extension().is_none() {
+                path.set_extension("py");
+            }
+            match std::fs::write(&path, self.ui.python_script.as_bytes()) {
+                Ok(()) => {
+                    self.ui.python_script_path = Some(path.clone());
+                    self.ui.python_script_output = format!("Saved {}", path.display());
+                }
+                Err(error) => {
+                    self.ui.python_script_output = format!("Could not save Python script: {error}");
+                }
             }
         }
     }
@@ -2924,12 +3698,17 @@ impl App {
             self.doc.scene.animation.frame_current = restore;
             self.apply_animation_frame();
             if let Some(g) = self.gfx.as_mut() {
-                g.renderer.update_transforms(&self.doc.scene, &highlights(&self.doc));
+                g.renderer
+                    .update_transforms(&self.doc.scene, &highlights(&self.doc));
             }
             self.uploaded = self.doc.version;
 
             let elapsed = t0.elapsed().as_secs_f32();
-            let fps_render = if elapsed > 0.0 { ok as f32 / elapsed } else { 0.0 };
+            let fps_render = if elapsed > 0.0 {
+                ok as f32 / elapsed
+            } else {
+                0.0
+            };
 
             // Finish the encoder threads and finalize the AVI index.
             let mut video_note = String::new();
@@ -3039,6 +3818,10 @@ impl App {
                 return;
             }
         }
+        if self.ui.scripting_mode && alt && !ctrl && !shift && code == KeyCode::KeyP {
+            self.apply(Action::RunPythonScript, el);
+            return;
+        }
         if let Some(a) = keymap::find_action(&self.bindings, ctrl, shift, alt, code) {
             self.apply(a, el);
         }
@@ -3048,8 +3831,11 @@ impl App {
     fn mouse_button(&mut self, state: ElementState, button: MouseButton, consumed: bool) {
         let down = state == ElementState::Pressed;
         if self.bone_xform_drag.is_some() {
-            if button == MouseButton::Left && !down { self.finish_bone_xform(false); }
-            else if button == MouseButton::Right && down { self.finish_bone_xform(true); }
+            if button == MouseButton::Left && !down {
+                self.finish_bone_xform(false);
+            } else if button == MouseButton::Right && down {
+                self.finish_bone_xform(true);
+            }
             return;
         }
         if self.bone_extrude_drag.is_some() {
@@ -3145,7 +3931,8 @@ impl App {
                                 self.measure_b = None;
                                 self.status(format!(
                                     "Distance: {:.4} m · {} measurements",
-                                    (hit - a).length(), self.measurements.len()
+                                    (hit - a).length(),
+                                    self.measurements.len()
                                 ));
                             }
                         }
@@ -3166,9 +3953,17 @@ impl App {
                         return;
                     }
                     // --- Transform tool: use move gizmo ---
-                    if self.ts.tool == Tool::Transform && !(self.doc.armature_edit || self.doc.pose_mode) {
+                    if self.ts.tool == Tool::Transform
+                        && !(self.doc.armature_edit || self.doc.pose_mode)
+                    {
                         self.ts.tool = Tool::Move;
-                        if self.gizmo.begin(self.cursor, &self.camera, self.viewport, &mut self.doc, &self.ts) {
+                        if self.gizmo.begin(
+                            self.cursor,
+                            &self.camera,
+                            self.viewport,
+                            &mut self.doc,
+                            &self.ts,
+                        ) {
                             return;
                         }
                         self.ts.tool = Tool::Transform;
@@ -3182,7 +3977,9 @@ impl App {
                     if self.doc.armature_edit && self.ts.tool == Tool::BoneExtrude {
                         if self.try_pick_bone(false) {
                             self.start_bone_extrude();
-                            if self.bone_extrude_drag.is_some() { self.update_bone_extrude(); }
+                            if self.bone_extrude_drag.is_some() {
+                                self.update_bone_extrude();
+                            }
                         } else {
                             self.status("Click a bone to extrude it");
                         }
@@ -3191,15 +3988,30 @@ impl App {
                     // In armature modes, gizmo handles take priority over bone picking.
                     if (self.doc.armature_edit || self.doc.pose_mode)
                         && self.ts.tool.is_gizmo()
-                        && self.gizmo.begin(self.cursor, &self.camera, self.viewport, &mut self.doc, &self.ts)
+                        && self.gizmo.begin(
+                            self.cursor,
+                            &self.camera,
+                            self.viewport,
+                            &mut self.doc,
+                            &self.ts,
+                        )
                     {
                         return;
                     }
                     if (self.doc.armature_edit || self.doc.pose_mode)
                         && self.doc.active_armature().is_some()
-                        && matches!(self.ts.tool, Tool::Select | Tool::Move | Tool::Rotate | Tool::Scale | Tool::Transform)
+                        && matches!(
+                            self.ts.tool,
+                            Tool::Select
+                                | Tool::Move
+                                | Tool::Rotate
+                                | Tool::Scale
+                                | Tool::Transform
+                        )
                     {
-                        if self.try_pick_bone(shift) { return; }
+                        if self.try_pick_bone(shift) {
+                            return;
+                        }
                     }
                     if self.doc.in_edit_mode() && self.doc.edit.is_some() {
                         // Ctrl+LMB: interactive edit tool (Extrude, Inset, Bevel, ...)
@@ -3223,12 +4035,20 @@ impl App {
                     }
                     if self.ts.tool.is_gizmo()
                         && !(self.doc.armature_edit || self.doc.pose_mode)
-                        && self.gizmo.begin(self.cursor, &self.camera, self.viewport, &mut self.doc, &self.ts)
+                        && self.gizmo.begin(
+                            self.cursor,
+                            &self.camera,
+                            self.viewport,
+                            &mut self.doc,
+                            &self.ts,
+                        )
                     {
                         return;
                     }
                     match self.ts.tool {
-                        Tool::BoxSelect | Tool::Lasso | Tool::Circle => self.begin_sel_drag(shift, ctrl),
+                        Tool::BoxSelect | Tool::Lasso | Tool::Circle => {
+                            self.begin_sel_drag(shift, ctrl)
+                        }
                         _ => {
                             self.left = true;
                             self.press = self.cursor;
@@ -3259,7 +4079,10 @@ impl App {
                         if let Some(stroke) = self.annotate_stroke.take() {
                             if stroke.len() >= 2 {
                                 self.annotations.push(stroke);
-                                self.status(format!("Annotation saved ({} strokes)", self.annotations.len()));
+                                self.status(format!(
+                                    "Annotation saved ({} strokes)",
+                                    self.annotations.len()
+                                ));
                             }
                         }
                     } else if !self.dragged {
@@ -3272,9 +4095,14 @@ impl App {
                     // In Object Mode, a viewport right-click selects the object under
                     // the pointer and is reserved for the shared Object context menu.
                     // Keep RMB camera navigation for non-Object work modes / modifiers.
-                    if start && !self.doc.in_edit_mode() && !self.doc.pose_mode
-                        && !self.doc.sculpt_mode && !self.doc.uv_mode && !self.doc.paint_mode
-                        && !shift {
+                    if start
+                        && !self.doc.in_edit_mode()
+                        && !self.doc.pose_mode
+                        && !self.doc.sculpt_mode
+                        && !self.doc.uv_mode
+                        && !self.doc.paint_mode
+                        && !shift
+                    {
                         self.pick(false);
                         self.right = false;
                         return;
@@ -3312,11 +4140,22 @@ impl App {
             for step in 1..=steps {
                 let t = step as f64 / steps as f64;
                 let sample = (from.0 + (x - from.0) * t, from.1 + (y - from.1) * t);
-                if let Some(uv) = self.paint_sample_at(sample) { uvs.push(uv); }
+                if let Some(uv) = self.paint_sample_at(sample) {
+                    uvs.push(uv);
+                }
             }
             if !uvs.is_empty() {
-                let color = if self.ts.tool == Tool::PaintErase { [0.78, 0.78, 0.78, 1.0] } else { self.ts.paint_color };
-                let _ = self.doc.paint_stroke_uv(&uvs, color, self.ts.paint_radius, self.ts.paint_strength);
+                let color = if self.ts.tool == Tool::PaintErase {
+                    [0.78, 0.78, 0.78, 1.0]
+                } else {
+                    self.ts.paint_color
+                };
+                let _ = self.doc.paint_stroke_uv(
+                    &uvs,
+                    color,
+                    self.ts.paint_radius,
+                    self.ts.paint_strength,
+                );
             }
             self.paint_last_cursor = Some((x, y));
             return;
@@ -3372,7 +4211,14 @@ impl App {
             return;
         }
         if self.gizmo.dragging() && self.doc.edit.is_none() {
-            self.gizmo.update(self.cursor, &self.camera, self.viewport, &mut self.doc, &self.ts, ctrl);
+            self.gizmo.update(
+                self.cursor,
+                &self.camera,
+                self.viewport,
+                &mut self.doc,
+                &self.ts,
+                ctrl,
+            );
             return;
         }
         if self.sel_drag.is_some() {
@@ -3383,7 +4229,13 @@ impl App {
             if self.doc.edit.is_some() {
                 self.edit_gizmo_hover_test();
             } else {
-                self.gizmo.hover_test(self.cursor, &self.camera, self.viewport, &self.doc, &self.ts);
+                self.gizmo.hover_test(
+                    self.cursor,
+                    &self.camera,
+                    self.viewport,
+                    &self.doc,
+                    &self.ts,
+                );
             }
         }
         if self.left {
@@ -3392,11 +4244,19 @@ impl App {
                 self.dragged = true;
             }
             if self.dragged {
-                if shift { self.camera.pan(dx, dy) } else { self.camera.orbit(dx, dy) }
+                if shift {
+                    self.camera.pan(dx, dy)
+                } else {
+                    self.camera.orbit(dx, dy)
+                }
             }
         }
         if self.middle {
-            if shift { self.camera.pan(dx, dy) } else { self.camera.orbit(dx, dy) }
+            if shift {
+                self.camera.pan(dx, dy)
+            } else {
+                self.camera.orbit(dx, dy)
+            }
         }
         if self.right {
             let d = ((x - self.right_press.0).powi(2) + (y - self.right_press.1).powi(2)).sqrt();
@@ -3454,16 +4314,29 @@ impl App {
         };
         let shape = self.sel_shape();
         let modal_text = self.modal.as_ref().map(|m| m.status());
-        let circle = (self.ts.tool == Tool::Circle && self.in_viewport(self.cursor))
-            .then(|| (Vec2::new(self.cursor.0 as f32, self.cursor.1 as f32), self.ts.circle_radius));
+        let circle = (self.ts.tool == Tool::Circle && self.in_viewport(self.cursor)).then(|| {
+            (
+                Vec2::new(self.cursor.0 as f32, self.cursor.1 as f32),
+                self.ts.circle_radius,
+            )
+        });
         let mut actions = Vec::new();
         let mut rect = egui::Rect::NOTHING;
-        let rendering_ws = self.ui.rendering_mode
-            && !self.doc.uv_mode
-            && !self.doc.paint_mode
-            && !self.doc.sculpt_mode;
+        let rendering_ws =
+            (self.ui.rendering_mode || self.ui.compositing_mode || self.ui.scripting_mode)
+                && !self.doc.uv_mode
+                && !self.doc.paint_mode
+                && !self.doc.sculpt_mode;
         let out = self.egui_ctx.run(raw, |ctx| {
-            let (a, r) = ui::draw(ctx, &mut self.doc, &mut self.settings, &mut self.ts, &mut self.ui, &self.bindings, &self.recent.paths);
+            let (a, r) = ui::draw(
+                ctx,
+                &mut self.doc,
+                &mut self.settings,
+                &mut self.ts,
+                &mut self.ui,
+                &self.bindings,
+                &self.recent.paths,
+            );
             // Rendering workspace: no 3D overlays / gizmos / tool HUD — only the Image editor UI.
             if !rendering_ws {
                 tools::draw_toolbar(ctx, r, &mut self.ts);
@@ -3499,14 +4372,20 @@ impl App {
             rect = r;
         });
         if let Some(g) = self.gfx.as_mut() {
-            g.egui_state.handle_platform_output(&g.window, out.platform_output.clone());
+            g.egui_state
+                .handle_platform_output(&g.window, out.platform_output.clone());
         }
         let ppp = out.pixels_per_point;
         // Zero viewport in Rendering mode so the GPU 3D pass draws nothing into the window.
         if rendering_ws {
             self.viewport = [0.0, 0.0, 0.0, 0.0];
         } else {
-            self.viewport = [rect.min.x * ppp, rect.min.y * ppp, rect.width() * ppp, rect.height() * ppp];
+            self.viewport = [
+                rect.min.x * ppp,
+                rect.min.y * ppp,
+                rect.width() * ppp,
+                rect.height() * ppp,
+            ];
         }
 
         // 2) apply menu actions
@@ -3516,8 +4395,17 @@ impl App {
         self.sync_camera_view();
 
         // 3) window title
-        let name = self.doc.path.as_ref().and_then(|p| p.file_name()).map_or("Untitled".to_string(), |n| n.to_string_lossy().into_owned());
-        let title = format!("{}{} - BlendCraft", name, if self.doc.dirty { "*" } else { "" });
+        let name = self
+            .doc
+            .path
+            .as_ref()
+            .and_then(|p| p.file_name())
+            .map_or("Untitled".to_string(), |n| n.to_string_lossy().into_owned());
+        let title = format!(
+            "{}{} - BlendCraft",
+            name,
+            if self.doc.dirty { "*" } else { "" }
+        );
         if title != self.title {
             if let Some(g) = &self.gfx {
                 g.window.set_title(&title);
@@ -3536,35 +4424,46 @@ impl App {
         // 5) render 3D + egui overlay
         let (w, h) = g.renderer.size();
         let tris = self.egui_ctx.tessellate(out.shapes, ppp);
-        let screen = egui_wgpu::ScreenDescriptor { size_in_pixels: [w, h], pixels_per_point: ppp };
+        let screen = egui_wgpu::ScreenDescriptor {
+            size_in_pixels: [w, h],
+            pixels_per_point: ppp,
+        };
         let textures = out.textures_delta;
         let er = &mut g.egui_renderer;
-        let res = g.renderer.render(&self.camera, &self.settings, self.viewport, &mut |device, queue, enc, view| {
-            for (id, delta) in &textures.set {
-                er.update_texture(device, queue, *id, delta);
-            }
-            let bufs = er.update_buffers(device, queue, enc, &tris, &screen);
-            {
-                let mut rp = enc
-                    .begin_render_pass(&wgpu::RenderPassDescriptor {
-                        label: Some("egui"),
-                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                            view,
-                            resolve_target: None,
-                            ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
-                        })],
-                        depth_stencil_attachment: None,
-                        timestamp_writes: None,
-                        occlusion_query_set: None,
-                    })
-                    .forget_lifetime();
-                er.render(&mut rp, &tris, &screen);
-            }
-            for id in &textures.free {
-                er.free_texture(id);
-            }
-            bufs
-        });
+        let res = g.renderer.render(
+            &self.camera,
+            &self.settings,
+            self.viewport,
+            &mut |device, queue, enc, view| {
+                for (id, delta) in &textures.set {
+                    er.update_texture(device, queue, *id, delta);
+                }
+                let bufs = er.update_buffers(device, queue, enc, &tris, &screen);
+                {
+                    let mut rp = enc
+                        .begin_render_pass(&wgpu::RenderPassDescriptor {
+                            label: Some("egui"),
+                            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                                view,
+                                resolve_target: None,
+                                ops: wgpu::Operations {
+                                    load: wgpu::LoadOp::Load,
+                                    store: wgpu::StoreOp::Store,
+                                },
+                            })],
+                            depth_stencil_attachment: None,
+                            timestamp_writes: None,
+                            occlusion_query_set: None,
+                        })
+                        .forget_lifetime();
+                    er.render(&mut rp, &tris, &screen);
+                }
+                for id in &textures.free {
+                    er.free_texture(id);
+                }
+                bufs
+            },
+        );
         if let Err(e) = res {
             log::error!("render error: {e}");
         }
@@ -3592,7 +4491,8 @@ impl ApplicationHandler for App {
         }
         let window = Arc::new(el.create_window(attrs).expect("create window"));
         let size = window.inner_size();
-        let renderer = pollster::block_on(Renderer::new(window.clone(), size.width, size.height)).expect("init GPU");
+        let renderer = pollster::block_on(Renderer::new(window.clone(), size.width, size.height))
+            .expect("init GPU");
         let egui_state = egui_winit::State::new(
             self.egui_ctx.clone(),
             egui::ViewportId::ROOT,
@@ -3601,8 +4501,14 @@ impl ApplicationHandler for App {
             None,
             Some(renderer.device().limits().max_texture_dimension_2d as usize),
         );
-        let egui_renderer = egui_wgpu::Renderer::new(renderer.device(), renderer.surface_format(), None, 1, false);
-        self.gfx = Some(Gfx { window, renderer, egui_state, egui_renderer });
+        let egui_renderer =
+            egui_wgpu::Renderer::new(renderer.device(), renderer.surface_format(), None, 1, false);
+        self.gfx = Some(Gfx {
+            window,
+            renderer,
+            egui_state,
+            egui_renderer,
+        });
         if let Some(p) = self.initial.take() {
             match ext_of(&p).as_str() {
                 "forge" => self.open_project(p),
@@ -3636,7 +4542,9 @@ impl ApplicationHandler for App {
             }
             WindowEvent::DroppedFile(p) => self.handle_path(p),
             WindowEvent::ModifiersChanged(m) => self.mods = m.state(),
-            WindowEvent::MouseInput { state, button, .. } => self.mouse_button(state, button, consumed),
+            WindowEvent::MouseInput { state, button, .. } => {
+                self.mouse_button(state, button, consumed)
+            }
             WindowEvent::CursorMoved { position, .. } => self.cursor_moved(position.x, position.y),
             WindowEvent::MouseWheel { delta, .. } => {
                 if !consumed && self.in_viewport(self.cursor) && self.modal.is_none() {
@@ -3646,48 +4554,62 @@ impl ApplicationHandler for App {
                     };
                     if self.doc.paint_mode {
                         if self.mods.shift_key() {
-                            self.ts.paint_strength = (self.ts.paint_strength + y * 0.05).clamp(0.05, 1.0);
+                            self.ts.paint_strength =
+                                (self.ts.paint_strength + y * 0.05).clamp(0.05, 1.0);
                             self.status(format!("Paint strength: {:.2}", self.ts.paint_strength));
                         } else {
-                            self.ts.paint_radius = (self.ts.paint_radius * (1.0 + 0.1 * y)).clamp(0.005, 0.25);
+                            self.ts.paint_radius =
+                                (self.ts.paint_radius * (1.0 + 0.1 * y)).clamp(0.005, 0.25);
                             self.status(format!("Paint radius: {:.3}", self.ts.paint_radius));
                         }
                     } else if self.doc.sculpt_mode {
                         if self.mods.alt_key() {
-                            self.sculpt.dyntopo_detail = (self.sculpt.dyntopo_detail - y * 0.05).clamp(0.15, 1.5);
+                            self.sculpt.dyntopo_detail =
+                                (self.sculpt.dyntopo_detail - y * 0.05).clamp(0.15, 1.5);
                             self.status(format!(
                                 "Dyntopo relative detail: {:.0}%{}",
                                 self.sculpt.dyntopo_detail * 100.0,
-                                if self.sculpt.dyntopo { "" } else { " – press D to enable" }
+                                if self.sculpt.dyntopo {
+                                    ""
+                                } else {
+                                    " – press D to enable"
+                                }
                             ));
                         } else if self.mods.shift_key() {
-                            self.sculpt.strength = (self.sculpt.strength + y * 0.05).clamp(0.05, 1.0);
+                            self.sculpt.strength =
+                                (self.sculpt.strength + y * 0.05).clamp(0.05, 1.0);
                             self.status(format!("Brush strength: {:.2}", self.sculpt.strength));
                         } else {
-                            self.sculpt.radius = (self.sculpt.radius * (1.0 + 0.1 * y)).clamp(0.05, 5.0);
+                            self.sculpt.radius =
+                                (self.sculpt.radius * (1.0 + 0.1 * y)).clamp(0.05, 5.0);
                             self.status(format!("Brush radius: {:.2}", self.sculpt.radius));
                         }
                     } else if self.ts.tool == Tool::Circle {
-                        self.ts.circle_radius = (self.ts.circle_radius * (1.0 + 0.1 * y)).clamp(6.0, 600.0);
+                        self.ts.circle_radius =
+                            (self.ts.circle_radius * (1.0 + 0.1 * y)).clamp(6.0, 600.0);
                     } else {
                         self.camera.zoom(y);
                     }
                 }
             }
-            WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed && !event.repeat => {
+            WindowEvent::KeyboardInput { event, .. }
+                if event.state == ElementState::Pressed && !event.repeat =>
+            {
                 // Undo/Redo via logical character so Ctrl+Z works on German QWERTZ (Z/Y swapped)
                 {
                     use winit::keyboard::Key;
                     let ctrl = self.ctrl();
                     let shift = self.mods.shift_key();
-                    let is_undo = ctrl && !shift && matches!(
-                        &event.logical_key,
-                        Key::Character(c) if c.eq_ignore_ascii_case("z")
-                    );
-                    let is_redo = ctrl && (
-                        (shift && matches!(&event.logical_key, Key::Character(c) if c.eq_ignore_ascii_case("z")))
-                        || matches!(&event.logical_key, Key::Character(c) if c.eq_ignore_ascii_case("y"))
-                    );
+                    let is_undo = ctrl
+                        && !shift
+                        && matches!(
+                            &event.logical_key,
+                            Key::Character(c) if c.eq_ignore_ascii_case("z")
+                        );
+                    let is_redo = ctrl
+                        && ((shift
+                            && matches!(&event.logical_key, Key::Character(c) if c.eq_ignore_ascii_case("z")))
+                            || matches!(&event.logical_key, Key::Character(c) if c.eq_ignore_ascii_case("y")));
                     if is_undo {
                         self.apply(keymap::Action::Undo, el);
                         return;
@@ -3696,7 +4618,6 @@ impl ApplicationHandler for App {
                         self.apply(keymap::Action::Redo, el);
                         return;
                     }
-                    
                 }
                 if let PhysicalKey::Code(code) = event.physical_key {
                     if self.modal.is_some() {

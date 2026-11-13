@@ -39,7 +39,13 @@ impl ObjectAnimation {
         self.keys.sort_by_key(|k| k.frame);
     }
 
-    pub fn insert_or_merge(&mut self, frame: i32, loc: Option<Vec3>, rot: Option<Quat>, scl: Option<Vec3>) {
+    pub fn insert_or_merge(
+        &mut self,
+        frame: i32,
+        loc: Option<Vec3>,
+        rot: Option<Quat>,
+        scl: Option<Vec3>,
+    ) {
         if let Some(k) = self.keys.iter_mut().find(|k| k.frame == frame) {
             if loc.is_some() {
                 k.location = loc;
@@ -75,9 +81,24 @@ impl ObjectAnimation {
             return (None, None, None);
         }
         (
-            eval_vec3(self.keys.iter().filter_map(|k| k.location.map(|v| (k.frame, v))), frame),
-            eval_quat(self.keys.iter().filter_map(|k| k.rotation.map(|v| (k.frame, v))), frame),
-            eval_vec3(self.keys.iter().filter_map(|k| k.scale.map(|v| (k.frame, v))), frame),
+            eval_vec3(
+                self.keys
+                    .iter()
+                    .filter_map(|k| k.location.map(|v| (k.frame, v))),
+                frame,
+            ),
+            eval_quat(
+                self.keys
+                    .iter()
+                    .filter_map(|k| k.rotation.map(|v| (k.frame, v))),
+                frame,
+            ),
+            eval_vec3(
+                self.keys
+                    .iter()
+                    .filter_map(|k| k.scale.map(|v| (k.frame, v))),
+                frame,
+            ),
         )
     }
 }

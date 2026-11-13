@@ -13,7 +13,10 @@ pub struct History<S> {
 
 impl<S> Default for History<S> {
     fn default() -> Self {
-        Self { undo: Vec::new(), redo: Vec::new() }
+        Self {
+            undo: Vec::new(),
+            redo: Vec::new(),
+        }
     }
 }
 
@@ -43,8 +46,12 @@ impl<S> History<S> {
             None => false,
         }
     }
-    pub fn can_undo(&self) -> bool { !self.undo.is_empty() }
-    pub fn can_redo(&self) -> bool { !self.redo.is_empty() }
+    pub fn can_undo(&self) -> bool {
+        !self.undo.is_empty()
+    }
+    pub fn can_redo(&self) -> bool {
+        !self.redo.is_empty()
+    }
 }
 
 #[cfg(test)]
@@ -52,9 +59,15 @@ mod tests {
     use super::*;
     struct Add(i32);
     impl Command<i32> for Add {
-        fn name(&self) -> &str { "add" }
-        fn apply(&mut self, s: &mut i32) { *s += self.0 }
-        fn revert(&mut self, s: &mut i32) { *s -= self.0 }
+        fn name(&self) -> &str {
+            "add"
+        }
+        fn apply(&mut self, s: &mut i32) {
+            *s += self.0
+        }
+        fn revert(&mut self, s: &mut i32) {
+            *s -= self.0
+        }
     }
     #[test]
     fn undo_redo_roundtrip() {

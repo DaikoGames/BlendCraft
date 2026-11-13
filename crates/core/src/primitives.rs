@@ -5,7 +5,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::f32::consts::{PI, TAU};
 
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum TextFont {
     #[default]
@@ -30,38 +29,105 @@ impl TextFont {
     }
 }
 
-fn default_text_content() -> String { "Text".into() }
-fn default_true() -> bool { true }
-fn default_text_depth() -> f32 { 0.15 }
+fn default_text_content() -> String {
+    "Text".into()
+}
+fn default_true() -> bool {
+    true
+}
+fn default_text_depth() -> f32 {
+    0.15
+}
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Primitive {
-    Plane { size: f32 },
-    Cube { size: f32 },
-    Circle { radius: f32, segments: u32 },
-    Grid { size: f32, x_div: u32, y_div: u32 },
-    IcoSphere { radius: f32, subdivisions: u32 },
-    Capsule { radius: f32, height: f32, segments: u32, rings: u32 },
-    Sphere { radius: f32, segments: u32, rings: u32 },
-    Cylinder { radius: f32, height: f32, segments: u32 },
-    Cone { radius: f32, height: f32, segments: u32 },
-    Torus { major_radius: f32, minor_radius: f32, major_segments: u32, minor_segments: u32 },
+    Plane {
+        size: f32,
+    },
+    Cube {
+        size: f32,
+    },
+    Circle {
+        radius: f32,
+        segments: u32,
+    },
+    Grid {
+        size: f32,
+        x_div: u32,
+        y_div: u32,
+    },
+    IcoSphere {
+        radius: f32,
+        subdivisions: u32,
+    },
+    Capsule {
+        radius: f32,
+        height: f32,
+        segments: u32,
+        rings: u32,
+    },
+    Sphere {
+        radius: f32,
+        segments: u32,
+        rings: u32,
+    },
+    Cylinder {
+        radius: f32,
+        height: f32,
+        segments: u32,
+    },
+    Cone {
+        radius: f32,
+        height: f32,
+        segments: u32,
+    },
+    Torus {
+        major_radius: f32,
+        minor_radius: f32,
+        major_segments: u32,
+        minor_segments: u32,
+    },
     /// Stylized monkey head (Suzanne-inspired)
-    Monkey { size: f32 },
+    Monkey {
+        size: f32,
+    },
     /// Square-base pyramid
-    Pyramid { size: f32, height: f32 },
+    Pyramid {
+        size: f32,
+        height: f32,
+    },
     /// N-gonal prism (default hexagonal)
-    Prism { radius: f32, height: f32, segments: u32 },
+    Prism {
+        radius: f32,
+        height: f32,
+        segments: u32,
+    },
     /// Open cylinder (no caps)
-    Tube { radius: f32, height: f32, segments: u32 },
+    Tube {
+        radius: f32,
+        height: f32,
+        segments: u32,
+    },
     /// Bezier-like curved tube
-    CurveBezier { size: f32, segments: u32 },
+    CurveBezier {
+        size: f32,
+        segments: u32,
+    },
     /// Planar curve circle (ring)
-    CurveCircle { radius: f32, segments: u32 },
+    CurveCircle {
+        radius: f32,
+        segments: u32,
+    },
     /// Straight path extruded as a thin tube
-    CurvePath { length: f32, segments: u32 },
+    CurvePath {
+        length: f32,
+        segments: u32,
+    },
     /// Soft-ball approximation (metaball look)
-    Metaball { radius: f32, subdivisions: u32 },
+    Metaball {
+        radius: f32,
+        subdivisions: u32,
+    },
     /// Editable text object (built-in fonts, optional 3D extrude)
     Text {
         /// Characters to display
@@ -125,29 +191,91 @@ impl Primitive {
         vec![
             Primitive::Plane { size: 2.0 },
             Primitive::Cube { size: 1.0 },
-            Primitive::Circle { radius: 0.5, segments: 32 },
-            Primitive::Sphere { radius: 0.5, segments: 32, rings: 16 },
-            Primitive::IcoSphere { radius: 0.5, subdivisions: 3 },
-            Primitive::Cylinder { radius: 0.5, height: 1.0, segments: 32 },
-            Primitive::Cone { radius: 0.5, height: 1.0, segments: 32 },
-            Primitive::Torus { major_radius: 0.5, minor_radius: 0.15, major_segments: 48, minor_segments: 16 },
-            Primitive::Grid { size: 2.0, x_div: 10, y_div: 10 },
-            Primitive::Capsule { radius: 0.25, height: 0.5, segments: 24, rings: 8 },
+            Primitive::Circle {
+                radius: 0.5,
+                segments: 32,
+            },
+            Primitive::Sphere {
+                radius: 0.5,
+                segments: 32,
+                rings: 16,
+            },
+            Primitive::IcoSphere {
+                radius: 0.5,
+                subdivisions: 3,
+            },
+            Primitive::Cylinder {
+                radius: 0.5,
+                height: 1.0,
+                segments: 32,
+            },
+            Primitive::Cone {
+                radius: 0.5,
+                height: 1.0,
+                segments: 32,
+            },
+            Primitive::Torus {
+                major_radius: 0.5,
+                minor_radius: 0.15,
+                major_segments: 48,
+                minor_segments: 16,
+            },
+            Primitive::Grid {
+                size: 2.0,
+                x_div: 10,
+                y_div: 10,
+            },
+            Primitive::Capsule {
+                radius: 0.25,
+                height: 0.5,
+                segments: 24,
+                rings: 8,
+            },
             Primitive::Monkey { size: 1.0 },
-            Primitive::Pyramid { size: 1.0, height: 1.0 },
-            Primitive::Prism { radius: 0.5, height: 1.0, segments: 6 },
-            Primitive::Tube { radius: 0.5, height: 1.0, segments: 32 },
-            Primitive::Metaball { radius: 0.5, subdivisions: 3 },
-            Primitive::Text { content: "Text".into(), size: 0.5, font: TextFont::Block, font_name: String::new(), extrude: true, depth: 0.15 },
+            Primitive::Pyramid {
+                size: 1.0,
+                height: 1.0,
+            },
+            Primitive::Prism {
+                radius: 0.5,
+                height: 1.0,
+                segments: 6,
+            },
+            Primitive::Tube {
+                radius: 0.5,
+                height: 1.0,
+                segments: 32,
+            },
+            Primitive::Metaball {
+                radius: 0.5,
+                subdivisions: 3,
+            },
+            Primitive::Text {
+                content: "Text".into(),
+                size: 0.5,
+                font: TextFont::Block,
+                font_name: String::new(),
+                extrude: true,
+                depth: 0.15,
+            },
         ]
     }
 
     /// Curve-like mesh objects (Add > Curve)
     pub fn curves() -> Vec<Primitive> {
         vec![
-            Primitive::CurveBezier { size: 1.0, segments: 32 },
-            Primitive::CurveCircle { radius: 0.5, segments: 48 },
-            Primitive::CurvePath { length: 2.0, segments: 16 },
+            Primitive::CurveBezier {
+                size: 1.0,
+                segments: 32,
+            },
+            Primitive::CurveCircle {
+                radius: 0.5,
+                segments: 48,
+            },
+            Primitive::CurvePath {
+                length: 2.0,
+                segments: 16,
+            },
         ]
     }
 
@@ -157,23 +285,64 @@ impl Primitive {
             Primitive::Cube { size } => cube(size),
             Primitive::Circle { radius, segments } => circle(radius, segments),
             Primitive::Grid { size, x_div, y_div } => grid(size, x_div, y_div),
-            Primitive::IcoSphere { radius, subdivisions } => icosphere(radius, subdivisions),
-            Primitive::Capsule { radius, height, segments, rings } => capsule(radius, height, segments, rings),
-            Primitive::Sphere { radius, segments, rings } => sphere(radius, segments, rings),
-            Primitive::Cylinder { radius, height, segments } => cylinder(radius, height, segments),
-            Primitive::Cone { radius, height, segments } => cone(radius, height, segments),
-            Primitive::Torus { major_radius, minor_radius, major_segments, minor_segments } => {
-                torus(major_radius, minor_radius, major_segments, minor_segments)
-            }
+            Primitive::IcoSphere {
+                radius,
+                subdivisions,
+            } => icosphere(radius, subdivisions),
+            Primitive::Capsule {
+                radius,
+                height,
+                segments,
+                rings,
+            } => capsule(radius, height, segments, rings),
+            Primitive::Sphere {
+                radius,
+                segments,
+                rings,
+            } => sphere(radius, segments, rings),
+            Primitive::Cylinder {
+                radius,
+                height,
+                segments,
+            } => cylinder(radius, height, segments),
+            Primitive::Cone {
+                radius,
+                height,
+                segments,
+            } => cone(radius, height, segments),
+            Primitive::Torus {
+                major_radius,
+                minor_radius,
+                major_segments,
+                minor_segments,
+            } => torus(major_radius, minor_radius, major_segments, minor_segments),
             Primitive::Monkey { size } => monkey(size),
             Primitive::Pyramid { size, height } => pyramid(size, height),
-            Primitive::Prism { radius, height, segments } => prism(radius, height, segments),
-            Primitive::Tube { radius, height, segments } => tube(radius, height, segments),
+            Primitive::Prism {
+                radius,
+                height,
+                segments,
+            } => prism(radius, height, segments),
+            Primitive::Tube {
+                radius,
+                height,
+                segments,
+            } => tube(radius, height, segments),
             Primitive::CurveBezier { size, segments } => curve_bezier(size, segments),
             Primitive::CurveCircle { radius, segments } => curve_circle(radius, segments),
             Primitive::CurvePath { length, segments } => curve_path(length, segments),
-            Primitive::Metaball { radius, subdivisions } => icosphere(radius, subdivisions),
-            Primitive::Text { ref content, size, font, ref font_name, extrude, depth } => text_mesh(content, size, font, font_name, extrude, depth),
+            Primitive::Metaball {
+                radius,
+                subdivisions,
+            } => icosphere(radius, subdivisions),
+            Primitive::Text {
+                ref content,
+                size,
+                font,
+                ref font_name,
+                extrude,
+                depth,
+            } => text_mesh(content, size, font, font_name, extrude, depth),
         };
         m.name = self.name().into();
         fix_winding(&mut m);
@@ -198,7 +367,11 @@ impl Primitive {
 }
 
 fn v(p: Vec3, n: Vec3, uv: [f32; 2]) -> Vertex {
-    Vertex { position: p.to_array(), normal: n.to_array(), uv }
+    Vertex {
+        position: p.to_array(),
+        normal: n.to_array(),
+        uv,
+    }
 }
 
 /// Make triangle winding (CCW = front) agree with the vertex normals.
@@ -235,13 +408,13 @@ pub fn cube(size: f32) -> MeshData {
     let h = size * 0.5;
     let p = [
         Vec3::new(-h, -h, -h), // 0
-        Vec3::new( h, -h, -h), // 1
-        Vec3::new( h,  h, -h), // 2
-        Vec3::new(-h,  h, -h), // 3
-        Vec3::new(-h, -h,  h), // 4
-        Vec3::new( h, -h,  h), // 5
-        Vec3::new( h,  h,  h), // 6
-        Vec3::new(-h,  h,  h), // 7
+        Vec3::new(h, -h, -h),  // 1
+        Vec3::new(h, h, -h),   // 2
+        Vec3::new(-h, h, -h),  // 3
+        Vec3::new(-h, -h, h),  // 4
+        Vec3::new(h, -h, h),   // 5
+        Vec3::new(h, h, h),    // 6
+        Vec3::new(-h, h, h),   // 7
     ];
     let n = Vec3::ZERO; // filled by compute_normals
     let mut m = MeshData {
@@ -292,10 +465,15 @@ fn cap(m: &mut MeshData, r: f32, y: f32, ny: f32, seg: u32) {
     let ring = m.vertices.len() as u32;
     for si in 0..=seg {
         let ph = si as f32 / seg as f32 * TAU;
-        m.vertices.push(v(Vec3::new(r * ph.cos(), y, r * ph.sin()), n, [0.5 + 0.5 * ph.cos(), 0.5 + 0.5 * ph.sin()]));
+        m.vertices.push(v(
+            Vec3::new(r * ph.cos(), y, r * ph.sin()),
+            n,
+            [0.5 + 0.5 * ph.cos(), 0.5 + 0.5 * ph.sin()],
+        ));
     }
     for si in 0..seg {
-        m.indices.extend_from_slice(&[center, ring + si, ring + si + 1]);
+        m.indices
+            .extend_from_slice(&[center, ring + si, ring + si + 1]);
     }
 }
 
@@ -306,8 +484,16 @@ fn cylinder(r: f32, h: f32, seg: u32) -> MeshData {
         let u = si as f32 / seg as f32;
         let ph = u * TAU;
         let n = Vec3::new(ph.cos(), 0.0, ph.sin());
-        m.vertices.push(v(Vec3::new(r * ph.cos(), h * 0.5, r * ph.sin()), n, [u, 0.0]));
-        m.vertices.push(v(Vec3::new(r * ph.cos(), -h * 0.5, r * ph.sin()), n, [u, 1.0]));
+        m.vertices.push(v(
+            Vec3::new(r * ph.cos(), h * 0.5, r * ph.sin()),
+            n,
+            [u, 0.0],
+        ));
+        m.vertices.push(v(
+            Vec3::new(r * ph.cos(), -h * 0.5, r * ph.sin()),
+            n,
+            [u, 1.0],
+        ));
     }
     for si in 0..seg {
         let (a, b, c, d) = (2 * si, 2 * si + 1, 2 * si + 2, 2 * si + 3);
@@ -325,11 +511,17 @@ fn cone(r: f32, h: f32, seg: u32) -> MeshData {
         let u = si as f32 / seg as f32;
         let ph = u * TAU;
         let n = Vec3::new(h * ph.cos(), r, h * ph.sin()).normalize_or_zero();
-        m.vertices.push(v(Vec3::new(0.0, h * 0.5, 0.0), n, [u, 0.0]));
-        m.vertices.push(v(Vec3::new(r * ph.cos(), -h * 0.5, r * ph.sin()), n, [u, 1.0]));
+        m.vertices
+            .push(v(Vec3::new(0.0, h * 0.5, 0.0), n, [u, 0.0]));
+        m.vertices.push(v(
+            Vec3::new(r * ph.cos(), -h * 0.5, r * ph.sin()),
+            n,
+            [u, 1.0],
+        ));
     }
     for si in 0..seg {
-        m.indices.extend_from_slice(&[2 * si, 2 * si + 1, 2 * si + 3]);
+        m.indices
+            .extend_from_slice(&[2 * si, 2 * si + 1, 2 * si + 3]);
     }
     cap(&mut m, r, -h * 0.5, -1.0, seg);
     m
@@ -366,7 +558,11 @@ fn circle(r: f32, seg: u32) -> MeshData {
     m.vertices.push(v(Vec3::ZERO, n, [0.5, 0.5]));
     for si in 0..=seg {
         let ph = si as f32 / seg as f32 * TAU;
-        m.vertices.push(v(Vec3::new(r * ph.cos(), 0.0, r * ph.sin()), n, [0.5 + 0.5 * ph.cos(), 0.5 + 0.5 * ph.sin()]));
+        m.vertices.push(v(
+            Vec3::new(r * ph.cos(), 0.0, r * ph.sin()),
+            n,
+            [0.5 + 0.5 * ph.cos(), 0.5 + 0.5 * ph.sin()],
+        ));
     }
     for si in 0..seg {
         m.indices.extend_from_slice(&[0, 1 + si, 2 + si]);
@@ -380,7 +576,11 @@ fn grid(size: f32, xd: u32, yd: u32) -> MeshData {
     for j in 0..=yd {
         for i in 0..=xd {
             let (u, w) = (i as f32 / xd as f32, j as f32 / yd as f32);
-            m.vertices.push(v(Vec3::new((u - 0.5) * size, 0.0, (w - 0.5) * size), Vec3::Y, [u, w]));
+            m.vertices.push(v(
+                Vec3::new((u - 0.5) * size, 0.0, (w - 0.5) * size),
+                Vec3::Y,
+                [u, w],
+            ));
         }
     }
     for j in 0..yd {
@@ -397,18 +597,43 @@ fn icosphere(r: f32, sub: u32) -> MeshData {
     let sub = sub.clamp(1, 6);
     let t = (1.0 + 5f32.sqrt()) / 2.0;
     let mut pts: Vec<Vec3> = [
-        (-1.0, t, 0.0), (1.0, t, 0.0), (-1.0, -t, 0.0), (1.0, -t, 0.0),
-        (0.0, -1.0, t), (0.0, 1.0, t), (0.0, -1.0, -t), (0.0, 1.0, -t),
-        (t, 0.0, -1.0), (t, 0.0, 1.0), (-t, 0.0, -1.0), (-t, 0.0, 1.0),
+        (-1.0, t, 0.0),
+        (1.0, t, 0.0),
+        (-1.0, -t, 0.0),
+        (1.0, -t, 0.0),
+        (0.0, -1.0, t),
+        (0.0, 1.0, t),
+        (0.0, -1.0, -t),
+        (0.0, 1.0, -t),
+        (t, 0.0, -1.0),
+        (t, 0.0, 1.0),
+        (-t, 0.0, -1.0),
+        (-t, 0.0, 1.0),
     ]
     .iter()
     .map(|&(x, y, z)| Vec3::new(x, y, z).normalize())
     .collect();
     let mut tris: Vec<[u32; 3]> = vec![
-        [0, 11, 5], [0, 5, 1], [0, 1, 7], [0, 7, 10], [0, 10, 11],
-        [1, 5, 9], [5, 11, 4], [11, 10, 2], [10, 7, 6], [7, 1, 8],
-        [3, 9, 4], [3, 4, 2], [3, 2, 6], [3, 6, 8], [3, 8, 9],
-        [4, 9, 5], [2, 4, 11], [6, 2, 10], [8, 6, 7], [9, 8, 1],
+        [0, 11, 5],
+        [0, 5, 1],
+        [0, 1, 7],
+        [0, 7, 10],
+        [0, 10, 11],
+        [1, 5, 9],
+        [5, 11, 4],
+        [11, 10, 2],
+        [10, 7, 6],
+        [7, 1, 8],
+        [3, 9, 4],
+        [3, 4, 2],
+        [3, 2, 6],
+        [3, 6, 8],
+        [3, 8, 9],
+        [4, 9, 5],
+        [2, 4, 11],
+        [6, 2, 10],
+        [8, 6, 7],
+        [9, 8, 1],
     ];
     for _ in 0..sub {
         let mut cache: HashMap<(u32, u32), u32> = HashMap::new();
@@ -484,11 +709,31 @@ mod tests {
     fn closed_shapes_face_outward() {
         for p in [
             Primitive::Cube { size: 1.0 },
-            Primitive::Sphere { radius: 1.0, segments: 16, rings: 8 },
-            Primitive::Cylinder { radius: 1.0, height: 2.0, segments: 16 },
-            Primitive::Cone { radius: 1.0, height: 2.0, segments: 16 },
-            Primitive::IcoSphere { radius: 1.0, subdivisions: 2 },
-            Primitive::Capsule { radius: 0.5, height: 1.0, segments: 12, rings: 4 },
+            Primitive::Sphere {
+                radius: 1.0,
+                segments: 16,
+                rings: 8,
+            },
+            Primitive::Cylinder {
+                radius: 1.0,
+                height: 2.0,
+                segments: 16,
+            },
+            Primitive::Cone {
+                radius: 1.0,
+                height: 2.0,
+                segments: 16,
+            },
+            Primitive::IcoSphere {
+                radius: 1.0,
+                subdivisions: 2,
+            },
+            Primitive::Capsule {
+                radius: 0.5,
+                height: 1.0,
+                segments: 12,
+                rings: 4,
+            },
         ] {
             let m = p.build();
             for t in m.indices.chunks_exact(3) {
@@ -498,12 +743,15 @@ mod tests {
                     continue;
                 }
                 let c = (q(t[0]) + q(t[1]) + q(t[2])) / 3.0;
-                assert!(n.dot(c) > -1e-4, "{} has an inward-facing triangle", p.name());
+                assert!(
+                    n.dot(c) > -1e-4,
+                    "{} has an inward-facing triangle",
+                    p.name()
+                );
             }
         }
     }
 }
-
 
 // ---------------------------------------------------------------------------
 // Extra Blender-style primitives
@@ -540,7 +788,12 @@ fn pyramid(size: f32, height: f32) -> MeshData {
         vertices.push(v(apex, n, [0.5, 1.0]));
         indices.extend_from_slice(&[i0, i0 + 1, i0 + 2]);
     }
-    MeshData { name: "Pyramid".into(), vertices, indices, ..Default::default() }
+    MeshData {
+        name: "Pyramid".into(),
+        vertices,
+        indices,
+        ..Default::default()
+    }
 }
 
 fn prism(radius: f32, height: f32, segments: u32) -> MeshData {
@@ -560,7 +813,12 @@ fn prism(radius: f32, height: f32, segments: u32) -> MeshData {
         let p3 = Vec3::new(c0 * radius, hy, s0 * radius);
         let n = Vec3::new((c0 + c1) * 0.5, 0.0, (s0 + s1) * 0.5).normalize_or_zero();
         let i0 = vertices.len() as u32;
-        vertices.extend([v(p0, n, [0.0, 0.0]), v(p1, n, [1.0, 0.0]), v(p2, n, [1.0, 1.0]), v(p3, n, [0.0, 1.0])]);
+        vertices.extend([
+            v(p0, n, [0.0, 0.0]),
+            v(p1, n, [1.0, 0.0]),
+            v(p2, n, [1.0, 1.0]),
+            v(p3, n, [0.0, 1.0]),
+        ]);
         indices.extend_from_slice(&[i0, i0 + 1, i0 + 2, i0, i0 + 2, i0 + 3]);
     }
     // caps
@@ -570,7 +828,11 @@ fn prism(radius: f32, height: f32, segments: u32) -> MeshData {
         for i in 0..=seg {
             let a = i as f32 / seg as f32 * TAU;
             let (s, c) = a.sin_cos();
-            vertices.push(v(Vec3::new(c * radius, y, s * radius), n, [c * 0.5 + 0.5, s * 0.5 + 0.5]));
+            vertices.push(v(
+                Vec3::new(c * radius, y, s * radius),
+                n,
+                [c * 0.5 + 0.5, s * 0.5 + 0.5],
+            ));
         }
         for i in 0..seg {
             let a = center + 1 + i;
@@ -582,7 +844,12 @@ fn prism(radius: f32, height: f32, segments: u32) -> MeshData {
             }
         }
     }
-    MeshData { name: "Prism".into(), vertices, indices, ..Default::default() }
+    MeshData {
+        name: "Prism".into(),
+        vertices,
+        indices,
+        ..Default::default()
+    }
 }
 
 fn tube(radius: f32, height: f32, segments: u32) -> MeshData {
@@ -610,20 +877,32 @@ fn tube(radius: f32, height: f32, segments: u32) -> MeshData {
         ]);
         indices.extend_from_slice(&[i0, i0 + 1, i0 + 2, i0, i0 + 2, i0 + 3]);
     }
-    MeshData { name: "Tube".into(), vertices, indices, ..Default::default() }
+    MeshData {
+        name: "Tube".into(),
+        vertices,
+        indices,
+        ..Default::default()
+    }
 }
 
 fn tube_along(points: &[Vec3], radius: f32, radial: u32) -> MeshData {
     let radial = radial.max(3);
     if points.len() < 2 {
-        return MeshData { name: "Curve".into(), ..Default::default() };
+        return MeshData {
+            name: "Curve".into(),
+            ..Default::default()
+        };
     }
     let mut vertices = Vec::new();
     let mut indices = Vec::new();
     let mut frames = Vec::new();
     // Parallel transport frames
     let mut t = (points[1] - points[0]).normalize_or_zero();
-    let mut n = if t.y.abs() < 0.9 { t.cross(Vec3::Y).normalize_or_zero() } else { t.cross(Vec3::X).normalize_or_zero() };
+    let mut n = if t.y.abs() < 0.9 {
+        t.cross(Vec3::Y).normalize_or_zero()
+    } else {
+        t.cross(Vec3::X).normalize_or_zero()
+    };
     let mut b = t.cross(n);
     for i in 0..points.len() {
         if i > 0 {
@@ -668,7 +947,12 @@ fn tube_along(points: &[Vec3], radius: f32, radial: u32) -> MeshData {
             indices.extend_from_slice(&[a, b, c, a, c, d]);
         }
     }
-    MeshData { name: "Curve".into(), vertices, indices, ..Default::default() }
+    MeshData {
+        name: "Curve".into(),
+        vertices,
+        indices,
+        ..Default::default()
+    }
 }
 
 fn curve_bezier(size: f32, segments: u32) -> MeshData {
@@ -682,7 +966,8 @@ fn curve_bezier(size: f32, segments: u32) -> MeshData {
     for i in 0..=seg {
         let t = i as f32 / seg as f32;
         let u = 1.0 - t;
-        let p = p0 * (u * u * u) + p1 * (3.0 * u * u * t) + p2 * (3.0 * u * t * t) + p3 * (t * t * t);
+        let p =
+            p0 * (u * u * u) + p1 * (3.0 * u * u * t) + p2 * (3.0 * u * t * t) + p3 * (t * t * t);
         pts.push(p);
     }
     let mut m = tube_along(&pts, size * 0.04, 8);
@@ -715,7 +1000,14 @@ fn curve_path(length: f32, segments: u32) -> MeshData {
     m
 }
 
-fn text_mesh(content: &str, size: f32, font: TextFont, font_name: &str, extrude: bool, depth: f32) -> MeshData {
+fn text_mesh(
+    content: &str,
+    size: f32,
+    font: TextFont,
+    font_name: &str,
+    extrude: bool,
+    depth: f32,
+) -> MeshData {
     if !font_name.is_empty() {
         if let Some(m) = crate::fonts::mesh_from_font(font_name, content, size, extrude, depth) {
             return m;
@@ -728,7 +1020,11 @@ fn text_mesh(content: &str, size: f32, font: TextFont, font_name: &str, extrude:
         TextFont::Narrow => (0.12, 0.55, 0.08),
         TextFont::Rounded => (0.22, 0.78, 0.14),
     };
-    let depth = if extrude { depth.max(0.01) } else { size * 0.02 };
+    let depth = if extrude {
+        depth.max(0.01)
+    } else {
+        size * 0.02
+    };
     let mut vertices = Vec::new();
     let mut indices = Vec::new();
 
@@ -784,7 +1080,7 @@ fn add_box(vertices: &mut Vec<Vertex>, indices: &mut Vec<u32>, min: Vec3, max: V
         Vec3::new(min.x, max.y, max.z),
     ];
     // Always emit front face; when solid (3D), emit full box
-    let faces: &[( [usize; 4], Vec3 )] = if solid {
+    let faces: &[([usize; 4], Vec3)] = if solid {
         &[
             ([0, 1, 2, 3], Vec3::NEG_Z),
             ([4, 7, 6, 5], Vec3::Z),
@@ -795,9 +1091,7 @@ fn add_box(vertices: &mut Vec<Vertex>, indices: &mut Vec<u32>, min: Vec3, max: V
         ]
     } else {
         // Flat text: front face only (slightly in front)
-        &[
-            ([4, 7, 6, 5], Vec3::Z),
-        ]
+        &[([4, 7, 6, 5], Vec3::Z)]
     };
     for (idx, n) in faces {
         let i0 = vertices.len() as u32;

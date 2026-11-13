@@ -51,7 +51,13 @@ pub struct CameraData {
 
 impl Default for CameraData {
     fn default() -> Self {
-        Self { ortho: false, fov_deg: 40.0, ortho_size: 6.0, near: 0.1, far: 200.0 }
+        Self {
+            ortho: false,
+            fov_deg: 40.0,
+            ortho_size: 6.0,
+            near: 0.1,
+            far: 200.0,
+        }
     }
 }
 
@@ -120,7 +126,11 @@ pub struct SurfaceData {
 
 impl Default for SurfaceData {
     fn default() -> Self {
-        Self { size: 2.0, u_segments: 8, v_segments: 8 }
+        Self {
+            size: 2.0,
+            u_segments: 8,
+            v_segments: 8,
+        }
     }
 }
 
@@ -133,7 +143,10 @@ pub struct VolumeData {
 
 impl Default for VolumeData {
     fn default() -> Self {
-        Self { size: [2.0, 2.0, 2.0], density: 1.0 }
+        Self {
+            size: [2.0, 2.0, 2.0],
+            density: 1.0,
+        }
     }
 }
 
@@ -146,7 +159,10 @@ pub struct GreasePencilData {
 
 impl Default for GreasePencilData {
     fn default() -> Self {
-        Self { thickness: 0.02, layers: 1 }
+        Self {
+            thickness: 0.02,
+            layers: 1,
+        }
     }
 }
 
@@ -174,7 +190,11 @@ pub struct LightProbeData {
 
 impl Default for LightProbeData {
     fn default() -> Self {
-        Self { kind: LightProbeType::Reflection, radius: 1.0, intensity: 1.0 }
+        Self {
+            kind: LightProbeType::Reflection,
+            radius: 1.0,
+            intensity: 1.0,
+        }
     }
 }
 
@@ -187,7 +207,11 @@ pub struct SpeakerData {
 
 impl Default for SpeakerData {
     fn default() -> Self {
-        Self { volume: 1.0, distance: 10.0, muted: false }
+        Self {
+            volume: 1.0,
+            distance: 10.0,
+            muted: false,
+        }
     }
 }
 
@@ -228,7 +252,11 @@ pub struct ForceFieldData {
 
 impl Default for ForceFieldData {
     fn default() -> Self {
-        Self { kind: ForceFieldType::Force, strength: 1.0, size: 1.0 }
+        Self {
+            kind: ForceFieldType::Force,
+            strength: 1.0,
+            size: 1.0,
+        }
     }
 }
 
@@ -299,7 +327,7 @@ pub fn helper_radius(o: &Object, world: &Mat4) -> f32 {
         ObjectKind::Armature(a) => {
             let n = a.bones.len().max(1) as f32;
             a.bones.first().map(|b| b.length()).unwrap_or(0.5) * n * 0.5
-        },
+        }
         ObjectKind::LightProbe(p) => p.radius,
         ObjectKind::Speaker(_) => 0.5,
         ObjectKind::ForceField(f) => f.size,
@@ -312,14 +340,24 @@ fn ring(out: &mut Vec<Seg>, center: Vec3, u: Vec3, v: Vec3, r: f32, n: usize) {
     for k in 0..n {
         let a0 = k as f32 / n as f32 * TAU;
         let a1 = (k + 1) as f32 / n as f32 * TAU;
-        out.push((center + r * (a0.cos() * u + a0.sin() * v), center + r * (a1.cos() * u + a1.sin() * v)));
+        out.push((
+            center + r * (a0.cos() * u + a0.sin() * v),
+            center + r * (a1.cos() * u + a1.sin() * v),
+        ));
     }
 }
 
 fn arrow(out: &mut Vec<Seg>, axis: Vec3, len: f32) {
     let tip = axis * len;
     out.push((Vec3::ZERO, tip));
-    let (p1, p2) = if axis.abs().dot(Vec3::Y) > 0.9 { (Vec3::X, Vec3::Z) } else { (axis.cross(Vec3::Y).normalize(), axis.cross(axis.cross(Vec3::Y)).normalize()) };
+    let (p1, p2) = if axis.abs().dot(Vec3::Y) > 0.9 {
+        (Vec3::X, Vec3::Z)
+    } else {
+        (
+            axis.cross(Vec3::Y).normalize(),
+            axis.cross(axis.cross(Vec3::Y)).normalize(),
+        )
+    };
     let back = tip - axis * len * 0.2;
     for p in [p1, -p1, p2, -p2] {
         out.push((tip, back + p * len * 0.08));
@@ -343,7 +381,13 @@ fn empty_lines(shape: EmptyShape, s: f32) -> Vec<Seg> {
         EmptyShape::Circle => ring(&mut v, Vec3::ZERO, Vec3::X, Vec3::Y, s, 48),
         EmptyShape::Cube => {
             for i in 0..8u32 {
-                let p = |k: u32| Vec3::new(if k & 1 == 0 { -s } else { s }, if k & 2 == 0 { -s } else { s }, if k & 4 == 0 { -s } else { s });
+                let p = |k: u32| {
+                    Vec3::new(
+                        if k & 1 == 0 { -s } else { s },
+                        if k & 2 == 0 { -s } else { s },
+                        if k & 4 == 0 { -s } else { s },
+                    )
+                };
                 for b in [1u32, 2, 4] {
                     if i & b == 0 {
                         v.push((p(i), p(i | b)));
@@ -373,7 +417,14 @@ fn camera_lines(c: &CameraData) -> Vec<Seg> {
     if c.ortho {
         let hh = (c.ortho_size * 0.5).min(3.0);
         let hw = hh * 16.0 / 9.0;
-        let corners = |z: f32| [Vec3::new(-hw, -hh, z), Vec3::new(hw, -hh, z), Vec3::new(hw, hh, z), Vec3::new(-hw, hh, z)];
+        let corners = |z: f32| {
+            [
+                Vec3::new(-hw, -hh, z),
+                Vec3::new(hw, -hh, z),
+                Vec3::new(hw, hh, z),
+                Vec3::new(-hw, hh, z),
+            ]
+        };
         for z in [0.0, -d] {
             let q = corners(z);
             for k in 0..4 {
@@ -386,7 +437,12 @@ fn camera_lines(c: &CameraData) -> Vec<Seg> {
     } else {
         let hh = (c.fov_deg.to_radians() * 0.5).tan() * d;
         let hw = hh * 16.0 / 9.0;
-        let q = [Vec3::new(-hw, -hh, -d), Vec3::new(hw, -hh, -d), Vec3::new(hw, hh, -d), Vec3::new(-hw, hh, -d)];
+        let q = [
+            Vec3::new(-hw, -hh, -d),
+            Vec3::new(hw, -hh, -d),
+            Vec3::new(hw, hh, -d),
+            Vec3::new(-hw, hh, -d),
+        ];
         for k in 0..4 {
             v.push((Vec3::ZERO, q[k]));
             v.push((q[k], q[(k + 1) % 4]));
@@ -418,7 +474,9 @@ fn light_lines(l: &LightData) -> Vec<Seg> {
         }
         LightType::Spot => {
             let d = 1.2;
-            let outer = (l.spot_angle_deg * 0.5).to_radians().clamp(0.02, FRAC_PI_2 - 0.05);
+            let outer = (l.spot_angle_deg * 0.5)
+                .to_radians()
+                .clamp(0.02, FRAC_PI_2 - 0.05);
             let r = (d * outer.tan()).min(d * 3.0);
             let c = Vec3::new(0.0, 0.0, -d);
             ring(&mut v, c, Vec3::X, Vec3::Y, r, 40);
@@ -443,8 +501,14 @@ fn light_lines(l: &LightData) -> Vec<Seg> {
             // Direction indicator
             v.push((Vec3::ZERO, Vec3::new(0.0, 0.0, -0.6)));
             // Cross
-            v.push((Vec3::new(-hx * 0.3, 0.0, 0.0), Vec3::new(hx * 0.3, 0.0, 0.0)));
-            v.push((Vec3::new(0.0, -hy * 0.3, 0.0), Vec3::new(0.0, hy * 0.3, 0.0)));
+            v.push((
+                Vec3::new(-hx * 0.3, 0.0, 0.0),
+                Vec3::new(hx * 0.3, 0.0, 0.0),
+            ));
+            v.push((
+                Vec3::new(0.0, -hy * 0.3, 0.0),
+                Vec3::new(0.0, hy * 0.3, 0.0),
+            ));
         }
     }
     v
@@ -473,11 +537,33 @@ fn volume_lines(vol: &VolumeData) -> Vec<Seg> {
     let hy = vol.size[1] * 0.5;
     let hz = vol.size[2] * 0.5;
     let corners = [
-        Vec3::new(-hx, -hy, -hz), Vec3::new(hx, -hy, -hz), Vec3::new(hx, hy, -hz), Vec3::new(-hx, hy, -hz),
-        Vec3::new(-hx, -hy, hz), Vec3::new(hx, -hy, hz), Vec3::new(hx, hy, hz), Vec3::new(-hx, hy, hz),
+        Vec3::new(-hx, -hy, -hz),
+        Vec3::new(hx, -hy, -hz),
+        Vec3::new(hx, hy, -hz),
+        Vec3::new(-hx, hy, -hz),
+        Vec3::new(-hx, -hy, hz),
+        Vec3::new(hx, -hy, hz),
+        Vec3::new(hx, hy, hz),
+        Vec3::new(-hx, hy, hz),
     ];
-    let edges = [(0,1),(1,2),(2,3),(3,0),(4,5),(5,6),(6,7),(7,4),(0,4),(1,5),(2,6),(3,7)];
-    edges.iter().map(|&(a,b)| (corners[a], corners[b])).collect()
+    let edges = [
+        (0, 1),
+        (1, 2),
+        (2, 3),
+        (3, 0),
+        (4, 5),
+        (5, 6),
+        (6, 7),
+        (7, 4),
+        (0, 4),
+        (1, 5),
+        (2, 6),
+        (3, 7),
+    ];
+    edges
+        .iter()
+        .map(|&(a, b)| (corners[a], corners[b]))
+        .collect()
 }
 
 fn grease_pencil_lines(g: &GreasePencilData) -> Vec<Seg> {
@@ -485,7 +571,10 @@ fn grease_pencil_lines(g: &GreasePencilData) -> Vec<Seg> {
     // Frame + a simple stroke path
     let s = 0.8;
     let frame = [
-        Vec3::new(-s, -s, 0.0), Vec3::new(s, -s, 0.0), Vec3::new(s, s, 0.0), Vec3::new(-s, s, 0.0),
+        Vec3::new(-s, -s, 0.0),
+        Vec3::new(s, -s, 0.0),
+        Vec3::new(s, s, 0.0),
+        Vec3::new(-s, s, 0.0),
     ];
     for i in 0..4 {
         v.push((frame[i], frame[(i + 1) % 4]));
@@ -522,17 +611,36 @@ fn light_probe_lines(p: &LightProbeData) -> Vec<Seg> {
             // grid box
             let s = r;
             let corners = [
-                Vec3::new(-s,-s,-s), Vec3::new(s,-s,-s), Vec3::new(s,s,-s), Vec3::new(-s,s,-s),
-                Vec3::new(-s,-s,s), Vec3::new(s,-s,s), Vec3::new(s,s,s), Vec3::new(-s,s,s),
+                Vec3::new(-s, -s, -s),
+                Vec3::new(s, -s, -s),
+                Vec3::new(s, s, -s),
+                Vec3::new(-s, s, -s),
+                Vec3::new(-s, -s, s),
+                Vec3::new(s, -s, s),
+                Vec3::new(s, s, s),
+                Vec3::new(-s, s, s),
             ];
-            for (a,b) in [(0,1),(1,2),(2,3),(3,0),(4,5),(5,6),(6,7),(7,4),(0,4),(1,5),(2,6),(3,7)] {
+            for (a, b) in [
+                (0, 1),
+                (1, 2),
+                (2, 3),
+                (3, 0),
+                (4, 5),
+                (5, 6),
+                (6, 7),
+                (7, 4),
+                (0, 4),
+                (1, 5),
+                (2, 6),
+                (3, 7),
+            ] {
                 v.push((corners[a], corners[b]));
             }
             // inner grid
-            v.push((Vec3::new(-s,0.0,-s), Vec3::new(s,0.0,-s)));
-            v.push((Vec3::new(-s,0.0,s), Vec3::new(s,0.0,s)));
-            v.push((Vec3::new(0.0,-s,-s), Vec3::new(0.0,s,-s)));
-            v.push((Vec3::new(0.0,-s,s), Vec3::new(0.0,s,s)));
+            v.push((Vec3::new(-s, 0.0, -s), Vec3::new(s, 0.0, -s)));
+            v.push((Vec3::new(-s, 0.0, s), Vec3::new(s, 0.0, s)));
+            v.push((Vec3::new(0.0, -s, -s), Vec3::new(0.0, s, -s)));
+            v.push((Vec3::new(0.0, -s, s), Vec3::new(0.0, s, s)));
         }
     }
     v
@@ -544,7 +652,14 @@ fn speaker_lines(s: &SpeakerData) -> Vec<Seg> {
     let body_r = 0.15;
     let cone_r = 0.35;
     let depth = 0.25;
-    ring(&mut v, Vec3::new(0.0, 0.0, -depth), Vec3::X, Vec3::Y, body_r, 16);
+    ring(
+        &mut v,
+        Vec3::new(0.0, 0.0, -depth),
+        Vec3::X,
+        Vec3::Y,
+        body_r,
+        16,
+    );
     ring(&mut v, Vec3::ZERO, Vec3::X, Vec3::Y, cone_r, 24);
     for k in 0..8 {
         let a = k as f32 / 8.0 * TAU;
@@ -556,7 +671,14 @@ fn speaker_lines(s: &SpeakerData) -> Vec<Seg> {
     let reach = s.distance.min(5.0) * 0.15;
     for i in 1..=3 {
         let rr = cone_r + reach * (i as f32 / 3.0);
-        ring(&mut v, Vec3::new(0.0, 0.0, 0.05 * i as f32), Vec3::X, Vec3::Y, rr, 20);
+        ring(
+            &mut v,
+            Vec3::new(0.0, 0.0, 0.05 * i as f32),
+            Vec3::X,
+            Vec3::Y,
+            rr,
+            20,
+        );
     }
     v
 }
@@ -573,8 +695,14 @@ fn force_field_lines(f: &ForceFieldData) -> Vec<Seg> {
             for i in 0..5 {
                 let y = -s * 0.5 + s * (i as f32 / 4.0);
                 v.push((Vec3::new(-s * 0.3, y, 0.0), Vec3::new(s * 0.5, y, 0.0)));
-                v.push((Vec3::new(s * 0.35, y + 0.08, 0.0), Vec3::new(s * 0.5, y, 0.0)));
-                v.push((Vec3::new(s * 0.35, y - 0.08, 0.0), Vec3::new(s * 0.5, y, 0.0)));
+                v.push((
+                    Vec3::new(s * 0.35, y + 0.08, 0.0),
+                    Vec3::new(s * 0.5, y, 0.0),
+                ));
+                v.push((
+                    Vec3::new(s * 0.35, y - 0.08, 0.0),
+                    Vec3::new(s * 0.5, y, 0.0),
+                ));
             }
         }
         ForceFieldType::Vortex => {
@@ -586,7 +714,14 @@ fn force_field_lines(f: &ForceFieldData) -> Vec<Seg> {
         }
         ForceFieldType::Magnetic => {
             // horseshoe-ish
-            ring(&mut v, Vec3::new(0.0, 0.0, 0.0), Vec3::X, Vec3::Y, s * 0.5, 20);
+            ring(
+                &mut v,
+                Vec3::new(0.0, 0.0, 0.0),
+                Vec3::X,
+                Vec3::Y,
+                s * 0.5,
+                20,
+            );
             v.push((Vec3::new(-s * 0.5, 0.0, 0.0), Vec3::new(-s * 0.5, -s, 0.0)));
             v.push((Vec3::new(s * 0.5, 0.0, 0.0), Vec3::new(s * 0.5, -s, 0.0)));
         }
@@ -622,5 +757,8 @@ pub fn helper_lines(o: &Object, world: &Mat4) -> Vec<(Vec3, Vec3)> {
         let (_, r, t) = world.to_scale_rotation_translation();
         Mat4::from_rotation_translation(r, t)
     };
-    local.into_iter().map(|(a, b)| (m.transform_point3(a), m.transform_point3(b))).collect()
+    local
+        .into_iter()
+        .map(|(a, b)| (m.transform_point3(a), m.transform_point3(b)))
+        .collect()
 }

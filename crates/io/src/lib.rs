@@ -1,21 +1,24 @@
 //! File import/export. glTF 2.0 / GLB (geometry, node transforms, PBR materials, textures)
 //! and HDR environment maps.
 use anyhow::{Context, Result};
-use forge_core::{AlphaMode, EnvironmentMap, Material, MeshData, Object, Scene, TextureData, Vertex};
+use forge_core::{
+    AlphaMode, EnvironmentMap, Material, MeshData, Object, Scene, TextureData, Vertex,
+};
 use glam::Mat4;
 use std::path::Path;
 use std::sync::Arc;
 
 mod export;
-mod obj;
 mod fbx;
+mod obj;
 pub use export::{export_glb, export_obj};
+pub use fbx::{export_fbx, load_fbx, load_fbx_bytes};
 pub use obj::load_obj;
-pub use fbx::{load_fbx, load_fbx_bytes, export_fbx};
 
 #[cfg(not(target_arch = "wasm32"))]
 pub fn load_gltf(path: &Path) -> Result<Scene> {
-    let (doc, buffers, images) = gltf::import(path).with_context(|| format!("reading {}", path.display()))?;
+    let (doc, buffers, images) =
+        gltf::import(path).with_context(|| format!("reading {}", path.display()))?;
     let mut scene = Scene::default();
     scene.materials = doc.materials().map(|m| convert_material(&m)).collect();
     scene.textures = Arc::new(
@@ -24,7 +27,10 @@ pub fn load_gltf(path: &Path) -> Result<Scene> {
             .map(|(img, data)| convert_image(img.name().unwrap_or("Image"), data))
             .collect::<Vec<_>>(),
     );
-    let gscene = doc.default_scene().or_else(|| doc.scenes().next()).context("file has no scene")?;
+    let gscene = doc
+        .default_scene()
+        .or_else(|| doc.scenes().next())
+        .context("file has no scene")?;
     for node in gscene.nodes() {
         visit(&node, Mat4::IDENTITY, &buffers, &mut scene);
     }
@@ -34,26 +40,48 @@ pub fn load_gltf(path: &Path) -> Result<Scene> {
 /// Decode a PNG/JPEG into an RGBA texture (used for "Image as Plane").
 #[cfg(not(target_arch = "wasm32"))]
 pub fn load_image(path: &Path) -> Result<TextureData> {
-    let img = image::open(path).with_context(|| format!("reading {}", path.display()))?.to_rgba8();
+    let img = image::open(path)
+        .with_context(|| format!("reading {}", path.display()))?
+        .to_rgba8();
     let (width, height) = img.dimensions();
-    let name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("Image").to_string();
-    Ok(TextureData { name, width, height, rgba8: img.into_raw() })
+    let name = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("Image")
+        .to_string();
+    Ok(TextureData {
+        name,
+        width,
+        height,
+        rgba8: img.into_raw(),
+    })
 }
 
 /// Load an equirectangular environment map (.hdr preferred; png/jpg are treated as sRGB).
 #[cfg(not(target_arch = "wasm32"))]
 pub fn load_environment(path: &Path) -> Result<EnvironmentMap> {
     let img = image::open(path).with_context(|| format!("reading {}", path.display()))?;
-    let is_hdr = matches!(img, image::DynamicImage::ImageRgb32F(_) | image::DynamicImage::ImageRgba32F(_));
+    let is_hdr = matches!(
+        img,
+        image::DynamicImage::ImageRgb32F(_) | image::DynamicImage::ImageRgba32F(_)
+    );
     let rgb = img.to_rgb32f();
     let (width, height) = rgb.dimensions();
     let mut data = rgb.into_raw();
     if !is_hdr {
         for v in data.iter_mut() {
-            *v = if *v <= 0.04045 { *v / 12.92 } else { ((*v + 0.055) / 1.055).powf(2.4) };
+            *v = if *v <= 0.04045 {
+                *v / 12.92
+            } else {
+                ((*v + 0.055) / 1.055).powf(2.4)
+            };
         }
     }
-    Ok(EnvironmentMap { width, height, rgb: data })
+    Ok(EnvironmentMap {
+        width,
+        height,
+        rgb: data,
+    })
 }
 
 fn convert_material(m: &gltf::Material) -> Material {
@@ -136,7 +164,12 @@ fn convert_image(name: &str, d: &gltf::image::Data) -> TextureData {
             }
         }
     }
-    TextureData { name: name.to_string(), width: d.width, height: d.height, rgba8: out }
+    TextureData {
+        name: name.to_string(),
+        width: d.width,
+        height: d.height,
+        rgba8: out,
+    }
 }
 
 fn visit(node: &gltf::Node, parent: Mat4, buffers: &[gltf::buffer::Data], scene: &mut Scene) {
@@ -147,10 +180,13 @@ fn visit(node: &gltf::Node, parent: Mat4, buffers: &[gltf::buffer::Data], scene:
                 continue;
             }
             let reader = prim.reader(|b| Some(&buffers[b.index()].0[..]));
-            let Some(pos) = reader.read_positions() else { continue };
+            let Some(pos) = reader.read_positions() else {
+                continue;
+            };
             let positions: Vec<[f32; 3]> = pos.collect();
             let normals: Option<Vec<[f32; 3]>> = reader.read_normals().map(|n| n.collect());
-            let uvs: Option<Vec<[f32; 2]>> = reader.read_tex_coords(0).map(|t| t.into_f32().collect());
+            let uvs: Option<Vec<[f32; 2]>> =
+                reader.read_tex_coords(0).map(|t| t.into_f32().collect());
             let indices: Vec<u32> = match reader.read_indices() {
                 Some(idx) => idx.into_u32().collect(),
                 None => (0..positions.len() as u32).collect(),
@@ -164,11 +200,20 @@ fn visit(node: &gltf::Node, parent: Mat4, buffers: &[gltf::buffer::Data], scene:
                     uv: uvs.as_ref().map_or([0.0; 2], |u| u[k]),
                 })
                 .collect();
-            let mut md = MeshData { name: mesh.name().unwrap_or("Mesh").to_string(), vertices, indices, ..Default::default() };
+            let mut md = MeshData {
+                name: mesh.name().unwrap_or("Mesh").to_string(),
+                vertices,
+                indices,
+                ..Default::default()
+            };
             if normals.is_none() {
                 md.compute_normals();
             }
-            let name = if mesh.primitives().count() > 1 { format!("{}.{}", md.name, i) } else { md.name.clone() };
+            let name = if mesh.primitives().count() > 1 {
+                format!("{}.{}", md.name, i)
+            } else {
+                md.name.clone()
+            };
             let mut obj = Object::from_matrix(name, world, Arc::new(md));
             obj.material = prim.material().index();
             scene.objects.push(obj);

@@ -4,18 +4,46 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum ConstraintKind {
-    CopyLocation { target: Option<u64>, axes: [bool; 3] },
-    CopyRotation { target: Option<u64> },
-    CopyScale { target: Option<u64> },
-    CopyTransforms { target: Option<u64> },
+    CopyLocation {
+        target: Option<u64>,
+        axes: [bool; 3],
+    },
+    CopyRotation {
+        target: Option<u64>,
+    },
+    CopyScale {
+        target: Option<u64>,
+    },
+    CopyTransforms {
+        target: Option<u64>,
+    },
     /// Rotate so the local -Z axis points at the target (Y up). Great for cameras and lights.
-    TrackTo { target: Option<u64> },
-    LimitLocation { min: [f32; 3], max: [f32; 3], enable: [bool; 3] },
-    LimitRotation { min_deg: [f32; 3], max_deg: [f32; 3], enable: [bool; 3] },
-    LimitScale { min: [f32; 3], max: [f32; 3], enable: [bool; 3] },
-    LimitDistance { target: Option<u64>, distance: f32 },
+    TrackTo {
+        target: Option<u64>,
+    },
+    LimitLocation {
+        min: [f32; 3],
+        max: [f32; 3],
+        enable: [bool; 3],
+    },
+    LimitRotation {
+        min_deg: [f32; 3],
+        max_deg: [f32; 3],
+        enable: [bool; 3],
+    },
+    LimitScale {
+        min: [f32; 3],
+        max: [f32; 3],
+        enable: [bool; 3],
+    },
+    LimitDistance {
+        target: Option<u64>,
+        distance: f32,
+    },
     /// Keep the object above a world height (Y).
-    Floor { height: f32 },
+    Floor {
+        height: f32,
+    },
 }
 
 impl ConstraintKind {
@@ -61,15 +89,33 @@ impl ConstraintKind {
     /// One default instance of each constraint (for the Add Constraint menu).
     pub fn all_defaults() -> Vec<ConstraintKind> {
         vec![
-            ConstraintKind::CopyLocation { target: None, axes: [true; 3] },
+            ConstraintKind::CopyLocation {
+                target: None,
+                axes: [true; 3],
+            },
             ConstraintKind::CopyRotation { target: None },
             ConstraintKind::CopyScale { target: None },
             ConstraintKind::CopyTransforms { target: None },
             ConstraintKind::TrackTo { target: None },
-            ConstraintKind::LimitLocation { min: [-10.0; 3], max: [10.0; 3], enable: [false; 3] },
-            ConstraintKind::LimitRotation { min_deg: [-180.0; 3], max_deg: [180.0; 3], enable: [false; 3] },
-            ConstraintKind::LimitScale { min: [0.1; 3], max: [10.0; 3], enable: [false; 3] },
-            ConstraintKind::LimitDistance { target: None, distance: 5.0 },
+            ConstraintKind::LimitLocation {
+                min: [-10.0; 3],
+                max: [10.0; 3],
+                enable: [false; 3],
+            },
+            ConstraintKind::LimitRotation {
+                min_deg: [-180.0; 3],
+                max_deg: [180.0; 3],
+                enable: [false; 3],
+            },
+            ConstraintKind::LimitScale {
+                min: [0.1; 3],
+                max: [10.0; 3],
+                enable: [false; 3],
+            },
+            ConstraintKind::LimitDistance {
+                target: None,
+                distance: 5.0,
+            },
             ConstraintKind::Floor { height: 0.0 },
         ]
     }
@@ -84,7 +130,11 @@ pub struct Constraint {
 
 impl Constraint {
     pub fn new(kind: ConstraintKind) -> Self {
-        Self { enabled: true, influence: 1.0, kind }
+        Self {
+            enabled: true,
+            influence: 1.0,
+            kind,
+        }
     }
 
     /// `target` is the world matrix of the target object (None if unset / missing).
@@ -124,7 +174,11 @@ impl Constraint {
                 if dir.length() < 1e-6 {
                     return world;
                 }
-                let up = if dir.normalize().cross(Vec3::Y).length() < 1e-3 { Vec3::Z } else { Vec3::Y };
+                let up = if dir.normalize().cross(Vec3::Y).length() < 1e-3 {
+                    Vec3::Z
+                } else {
+                    Vec3::Y
+                };
                 let rot = Quat::from_mat4(&Mat4::look_at_rh(t, tt, up).inverse());
                 compose(s, rot, t)
             }
@@ -137,7 +191,11 @@ impl Constraint {
                 }
                 compose(s, r, nt)
             }
-            ConstraintKind::LimitRotation { min_deg, max_deg, enable } => {
+            ConstraintKind::LimitRotation {
+                min_deg,
+                max_deg,
+                enable,
+            } => {
                 let (x, y, z) = r.to_euler(EulerRot::XYZ);
                 let mut e = [x, y, z];
                 for k in 0..3 {
@@ -196,8 +254,18 @@ mod tests {
 
     #[test]
     fn copy_location_follows_target() {
-        let c = Constraint::new(ConstraintKind::CopyLocation { target: Some(1), axes: [true, false, true] });
-        let m = c.apply(Mat4::from_translation(Vec3::new(0.0, 5.0, 0.0)), Some(Mat4::from_translation(Vec3::new(2.0, 9.0, 3.0))));
-        assert!((m.w_axis.x - 2.0).abs() < 1e-5 && (m.w_axis.y - 5.0).abs() < 1e-5 && (m.w_axis.z - 3.0).abs() < 1e-5);
+        let c = Constraint::new(ConstraintKind::CopyLocation {
+            target: Some(1),
+            axes: [true, false, true],
+        });
+        let m = c.apply(
+            Mat4::from_translation(Vec3::new(0.0, 5.0, 0.0)),
+            Some(Mat4::from_translation(Vec3::new(2.0, 9.0, 3.0))),
+        );
+        assert!(
+            (m.w_axis.x - 2.0).abs() < 1e-5
+                && (m.w_axis.y - 5.0).abs() < 1e-5
+                && (m.w_axis.z - 3.0).abs() < 1e-5
+        );
     }
 }

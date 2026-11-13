@@ -304,7 +304,8 @@ impl EditSession {
             // For verts-only: duplicate and translate is a simple "extrude verts"
             if self.selection.domain == EditDomain::Vertex && !self.selection.verts.is_empty() {
                 self.extrude_verts(amount);
-            } else if self.selection.domain == EditDomain::Edge && !self.selection.edges.is_empty() {
+            } else if self.selection.domain == EditDomain::Edge && !self.selection.edges.is_empty()
+            {
                 self.extrude_edges(amount);
             }
             return;
@@ -521,7 +522,6 @@ impl EditSession {
         self.mesh.compute_normals();
     }
 
-
     /// Merge vertices that share the same position (within epsilon).
     /// Fixes cubes built with per-face split verts so corners are single points.
     pub fn weld_coincident(&mut self, eps: f32) {
@@ -536,7 +536,8 @@ impl EditSession {
                 (p[2] * s).round() as i32,
             )
         };
-        let mut map: std::collections::HashMap<(i32, i32, i32), u32> = std::collections::HashMap::new();
+        let mut map: std::collections::HashMap<(i32, i32, i32), u32> =
+            std::collections::HashMap::new();
         let mut new_verts: Vec<crate::mesh::Vertex> = Vec::new();
         let mut remap = vec![0u32; self.mesh.vertices.len()];
         for (i, v) in self.mesh.vertices.iter().enumerate() {
@@ -594,7 +595,6 @@ impl EditSession {
             }
         }
     }
-
 
     // ------------------------------------------------------------------ new Edit Mode tools
 
@@ -814,13 +814,16 @@ impl EditSession {
             if let Some(v) = self.mesh.vertices.get_mut(vi as usize) {
                 let p = Vec3::from(v.position) - center;
                 match axis {
-                    0 => { // shear X by Y
+                    0 => {
+                        // shear X by Y
                         v.position[0] += p.y * amount;
                     }
-                    1 => { // shear Y by X
+                    1 => {
+                        // shear Y by X
                         v.position[1] += p.x * amount;
                     }
-                    _ => { // shear X by Z
+                    _ => {
+                        // shear X by Z
                         v.position[0] += p.z * amount;
                     }
                 }
@@ -884,21 +887,22 @@ impl EditSession {
 
     /// Loop cut (simplified): subdivide selected edges at midpoint and split adjacent faces.
     pub fn loop_cut(&mut self) {
-        let edges: Vec<EdgeKey> = if self.selection.domain == EditDomain::Edge && !self.selection.edges.is_empty() {
-            self.selection.edges.iter().copied().collect()
-        } else {
-            // If faces selected, cut all their edges
-            let mut e = BTreeSet::new();
-            for &f in &self.selection.faces {
-                let i = (f as usize) * 3;
-                if i + 2 < self.mesh.indices.len() {
-                    e.insert(edge_key(self.mesh.indices[i], self.mesh.indices[i + 1]));
-                    e.insert(edge_key(self.mesh.indices[i + 1], self.mesh.indices[i + 2]));
-                    e.insert(edge_key(self.mesh.indices[i + 2], self.mesh.indices[i]));
+        let edges: Vec<EdgeKey> =
+            if self.selection.domain == EditDomain::Edge && !self.selection.edges.is_empty() {
+                self.selection.edges.iter().copied().collect()
+            } else {
+                // If faces selected, cut all their edges
+                let mut e = BTreeSet::new();
+                for &f in &self.selection.faces {
+                    let i = (f as usize) * 3;
+                    if i + 2 < self.mesh.indices.len() {
+                        e.insert(edge_key(self.mesh.indices[i], self.mesh.indices[i + 1]));
+                        e.insert(edge_key(self.mesh.indices[i + 1], self.mesh.indices[i + 2]));
+                        e.insert(edge_key(self.mesh.indices[i + 2], self.mesh.indices[i]));
+                    }
                 }
-            }
-            e.into_iter().collect()
-        };
+                e.into_iter().collect()
+            };
         if edges.is_empty() {
             return;
         }
@@ -1013,7 +1017,6 @@ impl EditSession {
         self.mesh.compute_normals();
     }
 
-    
     /// Knife / bisect: cut the mesh with a plane defined by point + normal.
     /// Splits edges that cross the plane and triangulates resulting faces.
     pub fn knife_bisect(&mut self, plane_point: Vec3, plane_normal: Vec3) {
@@ -1245,12 +1248,10 @@ impl EditSession {
             }
             EditDomain::Edge => {
                 for (a, b) in self.build_edges() {
-                    let wa = world.transform_point3(Vec3::from(
-                        self.mesh.vertices[a as usize].position,
-                    ));
-                    let wb = world.transform_point3(Vec3::from(
-                        self.mesh.vertices[b as usize].position,
-                    ));
+                    let wa =
+                        world.transform_point3(Vec3::from(self.mesh.vertices[a as usize].position));
+                    let wb =
+                        world.transform_point3(Vec3::from(self.mesh.vertices[b as usize].position));
                     if let (Some((x0, y0)), Some((x1, y1))) = (project(wa), project(wb)) {
                         let mx = (x0 + x1) * 0.5;
                         let my = (y0 + y1) * 0.5;

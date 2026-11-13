@@ -1613,6 +1613,18 @@ pub struct ShaderNode {
     /// Name property (Attribute, UV Map, AOV, Script expression).
     #[serde(default)]
     pub name_prop: String,
+    /// Persistent shader-editor node size in graph units; zero selects the node's default size.
+    #[serde(default)]
+    pub ui_size: [f32; 2],
+    /// Full Color Ramp data. Empty means the legacy four-stop fields in `color` and `props`.
+    #[serde(default)]
+    pub ramp_stops: Vec<ColorRampStop>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ColorRampStop {
+    pub color: [f32; 4],
+    pub position: f32,
 }
 
 impl Default for ShaderNode {
@@ -1628,6 +1640,8 @@ impl Default for ShaderNode {
             input_defaults: Vec::new(),
             mode: 0,
             name_prop: String::new(),
+            ui_size: [0.0; 2],
+            ramp_stops: Vec::new(),
         }
     }
 }
@@ -1667,6 +1681,13 @@ impl ShaderNode {
         }
         if kind == ShaderNodeKind::Brick {
             node.props[..4].copy_from_slice(&[0.5, 2.0, 1.0, 2.0]);
+        }
+        if kind == ShaderNodeKind::ColorRamp {
+            node.value = 2.0;
+            node.color = [0.0, 0.0, 0.0, 1.0];
+            node.props[..4].copy_from_slice(&[1.0, 1.0, 1.0, 1.0]);
+            node.props[12] = 0.0;
+            node.props[13] = 1.0;
         }
         if kind == ShaderNodeKind::Magic {
             node.props[8] = 2.0;
@@ -2066,10 +2087,7 @@ fn white_noise_texture(p: [f32; 3], w: f32, dimension: u8) -> (f32, [f32; 4]) {
         white_hash(seed, dimensions)
     };
     let value = sample(0);
-    (
-        value,
-        [sample(1), sample(2), sample(3), 1.0],
-    )
+    (value, [sample(1), sample(2), sample(3), 1.0])
 }
 
 fn sample_tex(tex: &TextureData, u: f32, v: f32) -> [f32; 4] {
@@ -2135,8 +2153,8 @@ fn rotate_euler_xyz(v: [f32; 3], rotation: [f32; 3]) -> [f32; 3] {
     [y[0] * cz - y[1] * sz, y[0] * sz + y[1] * cz, y[2]]
 }
 
-/// Max stops stored on a ColorRamp node (fits in props + color).
-pub const COLOR_RAMP_MAX_STOPS: usize = 4;
+/// Blender's Color Ramp node supports up to 32 stops.
+pub const COLOR_RAMP_MAX_STOPS: usize = 32;
 
 /// Unpack ColorRamp stops from a ShaderNode.
 /// Layout (Blender-like):
@@ -2145,35 +2163,47 @@ pub const COLOR_RAMP_MAX_STOPS: usize = 4;
 ///   props[4..7]    = stop 2 RGBA
 ///   props[8..11]   = stop 3 RGBA
 ///   props[12..15]  = positions 0..3
-///   value          = stop count (2..=4), default 2
+///   value          = legacy stop count (1..=4), default 2
 ///   mode low 4 bits = interpolation: 0 Linear, 1 Ease, 2 Constant, 3 Cardinal, 4 B-Spline
-///   mode bits 4..5  = color mode: 0 RGB, 1 HSV, 2 HSL (RGB used for eval for now)
+///   mode bits 4..5  = color mode: 0 RGB, 1 HSV, 2 HSL
+///   mode bits 6..7  = hue interpolation: 0 Near, 1 Far, 2 Clockwise, 3 Counter-clockwise
 pub fn ramp_stop_count(node: &ShaderNode) -> usize {
-    let n = node.value.round() as i32;
-    if n >= 2 && n <= COLOR_RAMP_MAX_STOPS as i32 {
-        n as usize
+    if !node.ramp_stops.is_empty() {
+        node.ramp_stops.len().min(COLOR_RAMP_MAX_STOPS)
     } else {
-        2
+        let n = node.value.round() as i32;
+        if (1..=4).contains(&n) {
+            n as usize
+        } else {
+            2
+        }
     }
 }
 
 pub fn ramp_get_stops(node: &ShaderNode) -> (Vec<[f32; 4]>, Vec<f32>, u8, u8) {
     let n = ramp_stop_count(node);
+    if !node.ramp_stops.is_empty() {
+        let (colors, positions) = sort_ramp_stops(
+            node.ramp_stops[..n].iter().map(|stop| stop.color).collect(),
+            node.ramp_stops[..n]
+                .iter()
+                .map(|stop| stop.position.clamp(0.0, 1.0))
+                .collect(),
+        );
+        return (
+            colors,
+            positions,
+            node.mode & 0x0f,
+            ((node.mode >> 4) & 0x03).min(2),
+        );
+    }
+
     let mut cols = Vec::with_capacity(n);
     let mut poss = Vec::with_capacity(n);
     cols.push(node.color);
     poss.push(node.props[12].clamp(0.0, 1.0));
     if n >= 2 {
-        cols.push([
-            node.props[0],
-            node.props[1],
-            node.props[2],
-            if node.props[3].abs() < 1e-8 {
-                1.0
-            } else {
-                node.props[3]
-            },
-        ]);
+        cols.push([node.props[0], node.props[1], node.props[2], node.props[3]]);
         // default white at 1 if uninitialized
         if node.props[0].abs() < 1e-8
             && node.props[1].abs() < 1e-8
@@ -2190,29 +2220,11 @@ pub fn ramp_get_stops(node: &ShaderNode) -> (Vec<[f32; 4]>, Vec<f32>, u8, u8) {
         }
     }
     if n >= 3 {
-        cols.push([
-            node.props[4],
-            node.props[5],
-            node.props[6],
-            if node.props[7].abs() < 1e-8 {
-                1.0
-            } else {
-                node.props[7]
-            },
-        ]);
+        cols.push([node.props[4], node.props[5], node.props[6], node.props[7]]);
         poss.push(node.props[14].clamp(0.0, 1.0));
     }
     if n >= 4 {
-        cols.push([
-            node.props[8],
-            node.props[9],
-            node.props[10],
-            if node.props[11].abs() < 1e-8 {
-                1.0
-            } else {
-                node.props[11]
-            },
-        ]);
+        cols.push([node.props[8], node.props[9], node.props[10], node.props[11]]);
         poss.push(node.props[15].clamp(0.0, 1.0));
     }
     // Ensure monotonic-ish defaults for extra stops
@@ -2221,9 +2233,57 @@ pub fn ramp_get_stops(node: &ShaderNode) -> (Vec<[f32; 4]>, Vec<f32>, u8, u8) {
             poss[i] = (i as f32) / ((n - 1).max(1) as f32);
         }
     }
+    let (cols, poss) = sort_ramp_stops(cols, poss);
     let interp = node.mode & 0x0f;
-    let color_mode = (node.mode >> 4) & 0x03;
+    let color_mode = ((node.mode >> 4) & 0x03).min(2);
     (cols, poss, interp, color_mode)
+}
+
+fn sort_ramp_stops(colors: Vec<[f32; 4]>, positions: Vec<f32>) -> (Vec<[f32; 4]>, Vec<f32>) {
+    let mut order: Vec<_> = (0..colors.len()).collect();
+    order.sort_by(|&left, &right| {
+        positions[left]
+            .partial_cmp(&positions[right])
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    (
+        order.iter().map(|&index| colors[index]).collect(),
+        order.iter().map(|&index| positions[index]).collect(),
+    )
+}
+
+pub fn ramp_set_stops(node: &mut ShaderNode, stops: &[ColorRampStop]) {
+    let mut stops: Vec<_> = stops
+        .iter()
+        .take(COLOR_RAMP_MAX_STOPS)
+        .map(|stop| ColorRampStop {
+            color: stop.color,
+            position: stop.position.clamp(0.0, 1.0),
+        })
+        .collect();
+    if stops.is_empty() {
+        return;
+    }
+    stops.sort_by(|left, right| {
+        left.position
+            .partial_cmp(&right.position)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    node.value = stops.len() as f32;
+    node.color = stops[0].color;
+    node.props = [0.0; 16];
+    for (index, stop) in stops.iter().take(4).enumerate() {
+        node.props[12 + index] = stop.position;
+        if index > 0 {
+            let base = (index - 1) * 4;
+            node.props[base..base + 4].copy_from_slice(&stop.color);
+        }
+    }
+    node.ramp_stops = stops;
+}
+
+pub fn ramp_hue_interpolation(node: &ShaderNode) -> u8 {
+    node.mode >> 6
 }
 
 fn mix4(a: [f32; 4], b: [f32; 4], f: f32) -> [f32; 4] {
@@ -2279,16 +2339,157 @@ fn mix_color_mode(a: [f32; 4], b: [f32; 4], factor: f32, mode: u8) -> [f32; 4] {
     out
 }
 
-/// Evaluate Blender-like Color Ramp at factor t in [0,1].
-pub fn color_ramp_eval_stops(t: f32, cols: &[[f32; 4]], poss: &[f32], interp: u8) -> [f32; 4] {
-    let t = t.clamp(0.0, 1.0);
+fn rgb_to_hsv(color: [f32; 3]) -> [f32; 3] {
+    let [r, g, b] = color;
+    let max = r.max(g).max(b);
+    let min = r.min(g).min(b);
+    let delta = max - min;
+    let hue = if delta <= 1e-8 {
+        0.0
+    } else if max == r {
+        ((g - b) / delta).rem_euclid(6.0) / 6.0
+    } else if max == g {
+        ((b - r) / delta + 2.0) / 6.0
+    } else {
+        ((r - g) / delta + 4.0) / 6.0
+    };
+    [hue, if max <= 1e-8 { 0.0 } else { delta / max }, max]
+}
+
+fn hsv_to_rgb([h, s, v]: [f32; 3]) -> [f32; 3] {
+    let h = h.rem_euclid(1.0) * 6.0;
+    let chroma = v * s;
+    let x = chroma * (1.0 - ((h.rem_euclid(2.0)) - 1.0).abs());
+    let (r, g, b) = match h as i32 {
+        0 => (chroma, x, 0.0),
+        1 => (x, chroma, 0.0),
+        2 => (0.0, chroma, x),
+        3 => (0.0, x, chroma),
+        4 => (x, 0.0, chroma),
+        _ => (chroma, 0.0, x),
+    };
+    let m = v - chroma;
+    [r + m, g + m, b + m]
+}
+
+fn rgb_to_hsl(color: [f32; 3]) -> [f32; 3] {
+    let [r, g, b] = color;
+    let max = r.max(g).max(b);
+    let min = r.min(g).min(b);
+    let lightness = (max + min) * 0.5;
+    let delta = max - min;
+    if delta <= 1e-8 {
+        return [0.0, 0.0, lightness];
+    }
+    let saturation = delta / (1.0 - (2.0 * lightness - 1.0).abs());
+    let hue = if max == r {
+        ((g - b) / delta).rem_euclid(6.0) / 6.0
+    } else if max == g {
+        ((b - r) / delta + 2.0) / 6.0
+    } else {
+        ((r - g) / delta + 4.0) / 6.0
+    };
+    [hue, saturation, lightness]
+}
+
+fn hsl_to_rgb([h, s, l]: [f32; 3]) -> [f32; 3] {
+    let h = h.rem_euclid(1.0) * 6.0;
+    let chroma = (1.0 - (2.0 * l - 1.0).abs()) * s;
+    let x = chroma * (1.0 - ((h.rem_euclid(2.0)) - 1.0).abs());
+    let (r, g, b) = match h as i32 {
+        0 => (chroma, x, 0.0),
+        1 => (x, chroma, 0.0),
+        2 => (0.0, chroma, x),
+        3 => (0.0, x, chroma),
+        4 => (x, 0.0, chroma),
+        _ => (chroma, 0.0, x),
+    };
+    let m = l - chroma * 0.5;
+    [r + m, g + m, b + m]
+}
+
+fn interpolate_hue(a: f32, b: f32, factor: f32, hue_mode: u8) -> f32 {
+    let a = a.rem_euclid(1.0);
+    let b = b.rem_euclid(1.0);
+    let mut delta = b - a;
+    match hue_mode {
+        1 => {
+            if delta >= 0.0 && delta < 0.5 {
+                delta -= 1.0;
+            } else if delta < 0.0 && delta > -0.5 {
+                delta += 1.0;
+            } else if delta == 0.0 {
+                delta = -1.0;
+            }
+        }
+        2 if delta > 0.0 => delta -= 1.0,
+        3 if delta < 0.0 => delta += 1.0,
+        _ if hue_mode == 0 => {
+            if delta > 0.5 {
+                delta -= 1.0;
+            } else if delta < -0.5 {
+                delta += 1.0;
+            }
+        }
+        _ => {}
+    }
+    (a + delta * factor).rem_euclid(1.0)
+}
+
+fn interpolate_ramp_color(
+    left: [f32; 4],
+    right: [f32; 4],
+    factor: f32,
+    color_mode: u8,
+    hue_mode: u8,
+) -> [f32; 4] {
+    let factor = factor.clamp(0.0, 1.0);
+    if color_mode == 0 {
+        return mix4(left, right, factor);
+    }
+    let from = if color_mode == 1 {
+        rgb_to_hsv([left[0], left[1], left[2]])
+    } else {
+        rgb_to_hsl([left[0], left[1], left[2]])
+    };
+    let to = if color_mode == 1 {
+        rgb_to_hsv([right[0], right[1], right[2]])
+    } else {
+        rgb_to_hsl([right[0], right[1], right[2]])
+    };
+    let space = [
+        interpolate_hue(from[0], to[0], factor, hue_mode),
+        from[1] + (to[1] - from[1]) * factor,
+        from[2] + (to[2] - from[2]) * factor,
+    ];
+    let rgb = if color_mode == 1 {
+        hsv_to_rgb(space)
+    } else {
+        hsl_to_rgb(space)
+    };
+    [
+        rgb[0],
+        rgb[1],
+        rgb[2],
+        left[3] + (right[3] - left[3]) * factor,
+    ]
+}
+
+/// Evaluate a Blender Color Ramp at the supplied factor.
+pub fn color_ramp_eval_stops(
+    t: f32,
+    cols: &[[f32; 4]],
+    poss: &[f32],
+    interp: u8,
+    color_mode: u8,
+    hue_mode: u8,
+) -> [f32; 4] {
     if cols.is_empty() {
         return [0.0, 0.0, 0.0, 1.0];
     }
     if cols.len() == 1 {
         return cols[0];
     }
-    // Sort by position
     let mut order: Vec<usize> = (0..cols.len()).collect();
     order.sort_by(|&i, &j| {
         poss[i]
@@ -2297,39 +2498,89 @@ pub fn color_ramp_eval_stops(t: f32, cols: &[[f32; 4]], poss: &[f32], interp: u8
     });
     let first = order[0];
     let last = *order.last().unwrap();
-    if t <= poss[first] {
+    if t <= poss[first] && interp < 2 {
         return cols[first];
     }
-    if t >= poss[last] {
+    if t >= poss[last] && interp < 2 {
         return cols[last];
     }
-    // Find segment
+
     for w in order.windows(2) {
         let i = w[0];
         let j = w[1];
-        let a = poss[i];
-        let b = poss[j];
-        if t >= a && t <= b {
-            let denom = (b - a).max(1e-6);
-            let mut f = (t - a) / denom;
-            f = match interp {
-                1 => f * f * (3.0 - 2.0 * f), // Ease (smoothstep)
-                2 => 0.0,                     // Constant: hold left color of this segment
-                3 | 4 => {
-                    // Cardinal / B-Spline: softer cubic-ish
-                    f * f * (3.0 - 2.0 * f)
-                }
-                _ => f, // Linear
+        let start = poss[i];
+        let end = poss[j];
+        if t < end {
+            if interp == 4 {
+                return cols[i];
+            }
+            let factor = if (end - start).abs() <= 1e-8 {
+                1.0
+            } else {
+                ((t - start) / (end - start)).clamp(0.0, 1.0)
             };
-            return mix4(cols[i], cols[j], f);
+            if color_mode != 0 {
+                return interpolate_ramp_color(cols[i], cols[j], factor, color_mode, hue_mode);
+            }
+            match interp {
+                1 => return mix4(cols[i], cols[j], factor * factor * (3.0 - 2.0 * factor)),
+                2 | 3 => {
+                    let previous = cols[order
+                        .iter()
+                        .position(|&index| index == i)
+                        .unwrap()
+                        .saturating_sub(1)];
+                    let next_index = order.iter().position(|&index| index == j).unwrap() + 1;
+                    let next = cols[*order.get(next_index).unwrap_or(&j)];
+                    let t = factor;
+                    let t2 = t * t;
+                    let t3 = t2 * t;
+                    let weights = if interp == 3 {
+                        let tension = 0.71;
+                        [
+                            -tension * t3 + 2.0 * tension * t2 - tension * t,
+                            (2.0 - tension) * t3 + (tension - 3.0) * t2 + 1.0,
+                            (tension - 2.0) * t3 + (3.0 - 2.0 * tension) * t2 + tension * t,
+                            tension * t3 - tension * t2,
+                        ]
+                    } else {
+                        [
+                            (1.0 - t).powi(3) / 6.0,
+                            (3.0 * t3 - 6.0 * t2 + 4.0) / 6.0,
+                            (-3.0 * t3 + 3.0 * t2 + 3.0 * t + 1.0) / 6.0,
+                            t3 / 6.0,
+                        ]
+                    };
+                    let mut color = [0.0; 4];
+                    for channel in 0..4 {
+                        color[channel] = weights[0] * previous[channel]
+                            + weights[1] * cols[i][channel]
+                            + weights[2] * cols[j][channel]
+                            + weights[3] * next[channel];
+                    }
+                    return color.map(|value| value.clamp(0.0, 1.0));
+                }
+                _ => return mix4(cols[i], cols[j], factor),
+            }
         }
+    }
+    if interp >= 2 && t < poss[first] {
+        return cols[first];
     }
     cols[last]
 }
 
 pub fn color_ramp_from_node(node: &ShaderNode, fac: f32) -> [f32; 4] {
-    let (cols, poss, interp, _cm) = ramp_get_stops(node);
-    color_ramp_eval_stops(fac, &cols, &poss, interp)
+    let (cols, poss, interp, color_mode) = ramp_get_stops(node);
+    let interp = if color_mode == 0 { interp } else { 0 };
+    color_ramp_eval_stops(
+        fac,
+        &cols,
+        &poss,
+        interp,
+        color_mode,
+        ramp_hue_interpolation(node),
+    )
 }
 
 #[derive(Clone, Copy)]
@@ -2718,13 +2969,8 @@ fn evaluate_graph_center(
                     for x in 0..size {
                         let u = x as f32 / size as f32;
                         let v = y as f32 / size as f32;
-                        let (d, cell_col, position, radius) = voronoi_sample(
-                            u * scale,
-                            v * scale,
-                            randomness,
-                            smoothness,
-                            node.mode,
-                        );
+                        let (d, cell_col, position, radius) =
+                            voronoi_sample(u * scale, v * scale, randomness, smoothness, node.mode);
                         let i = ((y * size + x) * 4) as usize;
                         let b = (d.clamp(0.0, 1.0) * 255.0) as u8;
                         let c0 = (cell_col[0] * 255.0) as u8;
@@ -4731,11 +4977,7 @@ fn brick_noise(row: i32, brick: i32) -> f32 {
     n = n.wrapping_add(1013) & 0x7FFF_FFFF;
     n = (n >> 13) ^ n;
     let nn = n
-        .wrapping_mul(
-            n.wrapping_mul(n)
-                .wrapping_mul(60493)
-                .wrapping_add(19990303),
-        )
+        .wrapping_mul(n.wrapping_mul(n).wrapping_mul(60493).wrapping_add(19990303))
         .wrapping_add(1376312589)
         & 0x7FFF_FFFF;
     0.5 * (nn as f32 / 1_073_741_824.0)
@@ -4846,17 +5088,7 @@ fn wave_value(
         (masked[0] * masked[0] + masked[1] * masked[1] + masked[2] * masked[2]).sqrt() * 20.0
     } + phase;
     if distortion != 0.0 {
-        let noise = noise_texture(
-            p,
-            0.0,
-            2,
-            detail_scale,
-            detail,
-            detail_roughness,
-            2.0,
-            0.0,
-        )
-        .1;
+        let noise = noise_texture(p, 0.0, 2, detail_scale, detail, detail_roughness, 2.0, 0.0).1;
         value += distortion * (noise * 2.0 - 1.0);
     }
     match profile {
@@ -5003,12 +5235,17 @@ fn voronoi_sample(
                 }
             } else {
                 let h = (0.5 + 0.5 * (distance - smooth) / smoothness).clamp(0.0, 1.0);
-                smooth = distance * (1.0 - h) + smooth * h
-                    - smoothness * h * (1.0 - h);
+                smooth = distance * (1.0 - h) + smooth * h - smoothness * h * (1.0 - h);
                 for component in 0..3 {
                     smooth_color[component] =
                         color[component] * (1.0 - h) + smooth_color[component] * h;
-                    let feature_position = if component == 0 { px } else if component == 1 { py } else { 0.0 };
+                    let feature_position = if component == 0 {
+                        px
+                    } else if component == 1 {
+                        py
+                    } else {
+                        0.0
+                    };
                     smooth_position[component] =
                         feature_position * (1.0 - h) + smooth_position[component] * h;
                 }
@@ -5023,7 +5260,10 @@ fn voronoi_sample(
     }
     let radius = (nearest.2[0] - second.2[0]).hypot(nearest.2[1] - second.2[1]) * 0.5;
     let edge_distance = ((second.0 * second.0 - nearest.0 * nearest.0)
-        / (2.0 * (nearest.2[0] - second.2[0]).hypot(nearest.2[1] - second.2[1]).max(1e-8)))
+        / (2.0
+            * (nearest.2[0] - second.2[0])
+                .hypot(nearest.2[1] - second.2[1])
+                .max(1e-8)))
     .max(0.0);
     let (value, color, position) = match mode {
         1 => (second.0, second.1, second.2),
@@ -5036,12 +5276,7 @@ fn voronoi_sample(
         _ => value,
     }
     .clamp(0.0, 1.0);
-    (
-        value,
-        [color[0], color[1], color[2], 1.0],
-        position,
-        radius,
-    )
+    (value, [color[0], color[1], color[2], 1.0], position, radius)
 }
 
 fn proc_sample(
@@ -5133,9 +5368,17 @@ fn proc_sample(
                 } else {
                     props[0]
                 },
-                if props[1] > 0.0 { props[1].round() as i32 } else { 2 },
+                if props[1] > 0.0 {
+                    props[1].round() as i32
+                } else {
+                    2
+                },
                 if props[2] > 0.0 { props[2] } else { 1.0 },
-                if props[3] > 0.0 { props[3].round() as i32 } else { 2 },
+                if props[3] > 0.0 {
+                    props[3].round() as i32
+                } else {
+                    2
+                },
             );
             (color, factor)
         }
@@ -5178,13 +5421,7 @@ fn proc_sample(
     }
 }
 
-fn voronoi_ex(
-    x: f32,
-    y: f32,
-    randomness: f32,
-    smoothness: f32,
-    mode: u8,
-) -> (f32, [f32; 3]) {
+fn voronoi_ex(x: f32, y: f32, randomness: f32, smoothness: f32, mode: u8) -> (f32, [f32; 3]) {
     let (distance, color, _, _) = voronoi_sample(x, y, randomness, smoothness, mode);
     (distance, [color[0], color[1], color[2]])
 }
@@ -5790,8 +6027,7 @@ mod tests {
         let point = [0.13, 0.27, 0.41];
         let undistorted = wave_value(point, 5.0, 0.0, 2.0, 1.0, 0.5, 0.0, 0, 0, 0, 0);
         let mapped_point = point.map(|component| (component * 5.0 + 0.000001) * 0.999999);
-        let expected = 0.5
-            + 0.5 * ((mapped_point[0] * 20.0) - std::f32::consts::FRAC_PI_2).sin();
+        let expected = 0.5 + 0.5 * ((mapped_point[0] * 20.0) - std::f32::consts::FRAC_PI_2).sin();
         assert!((undistorted - expected).abs() < 1e-6);
         let distorted = wave_value(point, 5.0, 4.0, 4.0, 2.0, 0.8, 0.0, 0, 0, 0, 0);
         assert_ne!(undistorted, distorted);
@@ -5822,6 +6058,54 @@ mod tests {
     }
 
     #[test]
+    fn color_ramp_modes_match_blender_stop_order_and_color_spaces() {
+        let colors = [
+            [0.0, 0.0, 0.0, 1.0],
+            [0.4, 0.2, 0.8, 0.5],
+            [1.0, 1.0, 1.0, 0.0],
+        ];
+        let positions = [0.0, 0.5, 1.0];
+        assert_eq!(
+            color_ramp_eval_stops(0.5, &colors, &positions, 4, 0, 0),
+            colors[1],
+            "constant interpolation switches at the stop position"
+        );
+        assert_eq!(
+            color_ramp_eval_stops(0.25, &colors, &positions, 4, 0, 0),
+            colors[0]
+        );
+        let cardinal = color_ramp_eval_stops(0.25, &colors, &positions, 3, 0, 0);
+        let bspline = color_ramp_eval_stops(0.25, &colors, &positions, 2, 0, 0);
+        assert_ne!(cardinal, bspline);
+
+        let red = [1.0, 0.0, 0.0, 1.0];
+        let blue = [0.0, 0.0, 1.0, 1.0];
+        let near = interpolate_ramp_color(red, blue, 0.5, 1, 0);
+        let far = interpolate_ramp_color(red, blue, 0.5, 1, 1);
+        assert_ne!(near, far);
+        assert!((near[0] - 1.0).abs() < 1e-6 && (near[2] - 1.0).abs() < 1e-6);
+        assert!((interpolate_hue(0.0, 0.25, 0.5, 2) - 0.625).abs() < 1e-6);
+        assert!((interpolate_hue(0.0, 0.25, 0.5, 3) - 0.125).abs() < 1e-6);
+    }
+
+    #[test]
+    fn color_ramp_supports_blender_stop_count_and_alpha() {
+        let mut node = ShaderNode::with_kind(1, ShaderNodeKind::ColorRamp, [0.0, 0.0]);
+        let stops: Vec<_> = (0..8)
+            .map(|index| ColorRampStop {
+                color: [index as f32 / 7.0, 0.0, 0.0, index as f32 / 7.0],
+                position: index as f32 / 7.0,
+            })
+            .collect();
+        ramp_set_stops(&mut node, &stops);
+        let (colors, positions, _, _) = ramp_get_stops(&node);
+        assert_eq!(colors.len(), 8);
+        assert_eq!(positions.len(), 8);
+        assert_eq!(colors[3][3], 3.0 / 7.0);
+        assert_eq!(color_ramp_from_node(&node, positions[3]), colors[3]);
+    }
+
+    #[test]
     fn brick_offset_and_squash_properties_change_the_pattern() {
         let colors = ([1.0, 0.0, 0.0, 1.0], [0.0, 0.0, 1.0, 1.0]);
         let sample = |point, offset, squash| {
@@ -5842,7 +6126,13 @@ mod tests {
                 2,
             )
         };
-        assert_ne!(sample([0.02, 0.1, 0.0], 0.0, 1.0).1, sample([0.02, 0.1, 0.0], 0.5, 1.0).1);
-        assert_ne!(sample([0.3, 0.1, 0.0], 0.0, 1.0).1, sample([0.3, 0.1, 0.0], 0.0, 0.5).1);
+        assert_ne!(
+            sample([0.02, 0.1, 0.0], 0.0, 1.0).1,
+            sample([0.02, 0.1, 0.0], 0.5, 1.0).1
+        );
+        assert_ne!(
+            sample([0.3, 0.1, 0.0], 0.0, 1.0).1,
+            sample([0.3, 0.1, 0.0], 0.0, 0.5).1
+        );
     }
 }
