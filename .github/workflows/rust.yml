@@ -26,6 +26,9 @@ jobs:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
 
       - name: Install Linux build dependencies
         run: |
@@ -50,7 +53,7 @@ jobs:
             libxi-dev libxkbcommon-dev libwayland-dev libgl1-mesa-dev libasound2-dev \
             libudev-dev
 
-      - run: cargo test -p forge-core -p forge-video
+      - run: cargo test -p forge-core -p forge-video -p forge-app
 
   # ---------------------------------------------------------------------------
   # WebAssembly: library crates only (the full GUI app has no web entry yet)
@@ -80,27 +83,27 @@ jobs:
       matrix:
         include:
           # ---- Linux (native runners) ----
-          - { name: linux-x64,          os: ubuntu-24.04,     target: x86_64-unknown-linux-gnu,      cross: false, zig: false, ext: "",     experimental: false }
-          - { name: linux-arm64,        os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu,     cross: false, zig: false, ext: "",     experimental: true  }
+          - { name: linux-x64,          os: ubuntu-24.04,     target: x86_64-unknown-linux-gnu,      cross: false, zig: false, python_scripting: true,  ext: "",     experimental: false }
+          - { name: linux-arm64,        os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu,     cross: false, zig: false, python_scripting: true,  ext: "",     experimental: true  }
 
           # ---- Linux (cargo-zigbuild, no Docker, no EOL Ubuntu images) ----
-          - { name: linux-x86,          os: ubuntu-24.04,     target: i686-unknown-linux-gnu,        cross: false, zig: true,  ext: "",     experimental: true  }
-          - { name: linux-armv7,        os: ubuntu-24.04,     target: armv7-unknown-linux-gnueabihf, cross: false, zig: true,  ext: "",     experimental: true  }
-          - { name: linux-riscv64,      os: ubuntu-24.04,     target: riscv64gc-unknown-linux-gnu,   cross: false, zig: true,  ext: "",     experimental: true  }
+          - { name: linux-x86,          os: ubuntu-24.04,     target: i686-unknown-linux-gnu,        cross: false, zig: true,  python_scripting: false, ext: "",     experimental: true  }
+          - { name: linux-armv7,        os: ubuntu-24.04,     target: armv7-unknown-linux-gnueabihf, cross: false, zig: true,  python_scripting: false, ext: "",     experimental: true  }
+          - { name: linux-riscv64,      os: ubuntu-24.04,     target: riscv64gc-unknown-linux-gnu,   cross: false, zig: true,  python_scripting: false, ext: "",     experimental: true  }
           # NOTE: static musl binaries cannot dlopen the system GPU/windowing libraries,
           # so this one compiles but is unlikely to open a window at runtime.
-          - { name: linux-riscv64-musl, os: ubuntu-24.04,     target: riscv64gc-unknown-linux-musl,  cross: false, zig: true,  ext: "",     experimental: true  }
+          - { name: linux-riscv64-musl, os: ubuntu-24.04,     target: riscv64gc-unknown-linux-musl,  cross: false, zig: true,  python_scripting: false, ext: "",     experimental: true  }
 
           # ---- Windows ----
-          - { name: windows-x64,        os: windows-latest,   target: x86_64-pc-windows-msvc,        cross: false, zig: false, ext: ".exe", experimental: false }
-          - { name: windows-x86,        os: windows-latest,   target: i686-pc-windows-msvc,          cross: false, zig: false, ext: ".exe", experimental: true  }
-          - { name: windows-arm64,      os: windows-latest,   target: aarch64-pc-windows-msvc,       cross: false, zig: false, ext: ".exe", experimental: true  }
+          - { name: windows-x64,        os: windows-latest,   target: x86_64-pc-windows-msvc,        cross: false, zig: false, python_scripting: true,  ext: ".exe", experimental: false }
+          - { name: windows-x86,        os: windows-latest,   target: i686-pc-windows-msvc,          cross: false, zig: false, python_scripting: false, ext: ".exe", experimental: true  }
+          - { name: windows-arm64,      os: windows-latest,   target: aarch64-pc-windows-msvc,       cross: false, zig: false, python_scripting: false, ext: ".exe", experimental: true  }
 
           # ---- macOS ----
           # macos-13 / macos-14 are retired. macos-15-intel = Intel,
           # macos-latest = Apple Silicon (largest runner pool, avoids queue backlog).
-          - { name: macos-x64,          os: macos-15-intel,   target: x86_64-apple-darwin,           cross: false, zig: false, ext: "",     experimental: false }
-          - { name: macos-arm64,        os: macos-latest,     target: aarch64-apple-darwin,          cross: false, zig: false, ext: "",     experimental: false }
+          - { name: macos-x64,          os: macos-15-intel,   target: x86_64-apple-darwin,           cross: false, zig: false, python_scripting: true,  ext: "",     experimental: false }
+          - { name: macos-arm64,        os: macos-latest,     target: aarch64-apple-darwin,          cross: false, zig: false, python_scripting: true,  ext: "",     experimental: false }
 
     steps:
       - uses: actions/checkout@v5
@@ -112,6 +115,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
+
+      - name: Install Python for embedded scripting
+        if: matrix.python_scripting
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
 
       - name: Detect binary name
         shell: bash
@@ -159,16 +168,29 @@ jobs:
         run: python3 -m pip install --break-system-packages cargo-zigbuild ziglang
 
       - name: Build (cargo)
-        if: ${{ !matrix.cross && !matrix.zig }}
+        if: ${{ !matrix.cross && !matrix.zig && matrix.python_scripting }}
         run: cargo build --release -p ${{ env.APP_PACKAGE }} --target ${{ matrix.target }}
+
+      - name: Build (cargo, without Python scripting)
+        if: ${{ !matrix.cross && !matrix.zig && !matrix.python_scripting }}
+        run: cargo build --release -p ${{ env.APP_PACKAGE }} --no-default-features --target ${{ matrix.target }}
 
       - name: Build (cross)
         if: matrix.cross
-        run: cross build --release -p ${{ env.APP_PACKAGE }} --target ${{ matrix.target }}
+        run: cross build --release -p ${{ env.APP_PACKAGE }} --no-default-features --target ${{ matrix.target }}
 
       - name: Build (zigbuild)
         if: matrix.zig
-        run: cargo zigbuild --release -p ${{ env.APP_PACKAGE }} --target ${{ matrix.target }}
+        run: cargo zigbuild --release -p ${{ env.APP_PACKAGE }} --no-default-features --target ${{ matrix.target }}
+
+      - name: Package portable CPython runtime
+        if: matrix.python_scripting
+        shell: bash
+        run: |
+          python scripts/package_python_runtime.py \
+            --binary "target/${{ matrix.target }}/release/${{ env.BIN }}${{ matrix.ext }}" \
+            --bundle-dir "bundle-${{ matrix.name }}" \
+            --archive "BlendCraft-${{ matrix.name }}-portable.zip"
 
       # AppImage for Linux x86_64, arm64 and x86 (i686) — icon = crates/app/logo.png
       - name: Package AppImage
@@ -188,6 +210,9 @@ jobs:
           mkdir -p "$APPDIR/usr/bin" "$APPDIR/usr/share/icons/hicolor/256x256/apps"
 
           cp "target/${TARGET}/release/${BIN}" "$APPDIR/usr/bin/${BIN}"
+          if [ -d "bundle-${{ matrix.name }}/python" ]; then
+            cp -a "bundle-${{ matrix.name }}/python" "$APPDIR/usr/bin/python"
+          fi
           chmod +x "$APPDIR/usr/bin/${BIN}"
 
           # Icon from repo (resize to 256 — Flatpak/AppImage expect <= 512)
@@ -253,6 +278,14 @@ jobs:
           path: target/${{ matrix.target }}/release/${{ env.BIN }}${{ matrix.ext }}
           if-no-files-found: error
 
+      - name: Upload artifact (portable Python bundle)
+        if: matrix.python_scripting
+        uses: actions/upload-artifact@v5
+        with:
+          name: blendcraft-${{ matrix.name }}-portable
+          path: BlendCraft-${{ matrix.name }}-portable.zip
+          if-no-files-found: error
+
       - name: Upload artifact (AppImage)
         if: >
           runner.os == 'Linux' && (
@@ -278,8 +311,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { name: freebsd-x64, target: x86_64-unknown-freebsd, experimental: false }
-          - { name: freebsd-x86, target: i686-unknown-freebsd,   experimental: true  }
+          - { name: freebsd-x64, target: x86_64-unknown-freebsd, python_scripting: true,  experimental: false }
+          - { name: freebsd-x86, target: i686-unknown-freebsd,   python_scripting: false, experimental: true  }
     steps:
       - uses: actions/checkout@v5
 
@@ -299,11 +332,12 @@ jobs:
           TARGET: ${{ matrix.target }}
           BIN: ${{ env.BIN }}
           APP_PACKAGE: ${{ env.APP_PACKAGE }}
+          PYTHON_SCRIPTING: ${{ matrix.python_scripting }}
         with:
-          envs: "TARGET BIN APP_PACKAGE"
+          envs: "TARGET BIN APP_PACKAGE PYTHON_SCRIPTING"
           usesh: true
           prepare: |
-            pkg install -y curl pkgconf
+            pkg install -y curl pkgconf python3
           run: |
             set -e
             curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal
@@ -312,10 +346,20 @@ jobs:
             if [ "$TARGET" != "x86_64-unknown-freebsd" ]; then
               rustup target add "$TARGET"
             fi
-            cargo build --release -p "$APP_PACKAGE" --target "$TARGET"
+            if [ "$PYTHON_SCRIPTING" = "true" ]; then
+              cargo build --release -p "$APP_PACKAGE" --target "$TARGET"
+            else
+              cargo build --release -p "$APP_PACKAGE" --no-default-features --target "$TARGET"
+            fi
 
             mkdir -p dist
             cp "target/$TARGET/release/$BIN" dist/
+            if [ "$PYTHON_SCRIPTING" = "true" ]; then
+              python3 scripts/package_python_runtime.py \
+                --binary "dist/$BIN" \
+                --bundle-dir "dist/portable" \
+                --archive "dist/BlendCraft-freebsd-x64-portable.zip"
+            fi
             rm -rf target
 
       - name: Upload artifact
@@ -323,6 +367,14 @@ jobs:
         with:
           name: blendcraft-${{ matrix.name }}
           path: dist/${{ env.BIN }}
+          if-no-files-found: error
+
+      - name: Upload portable Python bundle
+        if: matrix.python_scripting
+        uses: actions/upload-artifact@v5
+        with:
+          name: blendcraft-${{ matrix.name }}-portable
+          path: dist/BlendCraft-${{ matrix.name }}-portable.zip
           if-no-files-found: error
 
   # ---------------------------------------------------------------------------
@@ -401,7 +453,7 @@ jobs:
           CARGO_TARGET_AARCH64_UNKNOWN_FREEBSD_LINKER: /home/runner/freebsd-cc
           CC_aarch64_unknown_freebsd: /home/runner/freebsd-cc
           AR_aarch64_unknown_freebsd: ar
-        run: cargo build --release -p "$APP_PACKAGE" --target "$TARGET" -Zbuild-std=std,panic_abort
+        run: cargo build --release -p "$APP_PACKAGE" --no-default-features --target "$TARGET" -Zbuild-std=std,panic_abort
 
       - name: Upload artifact
         uses: actions/upload-artifact@v5
@@ -424,8 +476,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { name: x64,   os: ubuntu-24.04,     arch: x86_64,  artifact: blendcraft-linux-x64 }
-          - { name: arm64, os: ubuntu-24.04-arm, arch: aarch64, artifact: blendcraft-linux-arm64 }
+          - { name: x64,   os: ubuntu-24.04,     arch: x86_64,  artifact: blendcraft-linux-x64,   portable_zip: BlendCraft-linux-x64-portable.zip }
+          - { name: arm64, os: ubuntu-24.04-arm, arch: aarch64, artifact: blendcraft-linux-arm64, portable_zip: BlendCraft-linux-arm64-portable.zip }
     env:
       APP_ID: io.github.DaikoGames.BlendCraft
     steps:
@@ -436,6 +488,11 @@ jobs:
         with:
           name: ${{ matrix.artifact }}
           path: flatpak-in
+
+      - uses: actions/download-artifact@v5
+        with:
+          name: ${{ matrix.artifact }}-portable
+          path: flatpak-runtime
 
       - name: Install flatpak tooling
         run: |
@@ -473,9 +530,11 @@ jobs:
           set -e
           BIN=$(ls flatpak-in | head -n1)
           chmod +x "flatpak-in/$BIN"
+          unzip -q "flatpak-runtime/${{ matrix.portable_zip }}" -d flatpak-runtime/unpacked
           VERSION="${GITHUB_REF_NAME#v}"
           case "$GITHUB_REF" in refs/tags/v*) ;; *) VERSION="0.1.0" ;; esac
           mkdir -p fp && cp "flatpak-in/$BIN" "fp/$BIN"
+          cp -a flatpak-runtime/unpacked/python fp/python
           cd fp
 
           printf '%s\n' \
@@ -533,6 +592,7 @@ jobs:
               buildsystem: simple
               build-commands:
                 - install -Dm755 $BIN /app/bin/$BIN
+                - cp -a python /app/bin/python
                 - install -Dm644 $APP_ID.desktop /app/share/applications/$APP_ID.desktop
                 - install -Dm644 $APP_ID.metainfo.xml /app/share/metainfo/$APP_ID.metainfo.xml
                 - mkdir -p /app/share/icons
@@ -540,6 +600,8 @@ jobs:
               sources:
                 - type: file
                   path: $BIN
+                - type: dir
+                  path: python
                 - type: file
                   path: $APP_ID.desktop
                 - type: file
@@ -592,6 +654,7 @@ jobs:
                 *.flatpak)  mv "$f" out/ ;;
                 *.AppImage) mv "$f" "out/$n.AppImage" ;;
                 *.exe)      mv "$f" "out/$n.exe" ;;
+                *.zip)      mv "$f" "out/$n.zip" ;;
                 *)          mv "$f" "out/$n" ;;
               esac
             done
