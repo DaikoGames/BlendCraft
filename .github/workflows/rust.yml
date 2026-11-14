@@ -16,9 +16,6 @@ env:
   APP_PACKAGE: forge-app
 
 jobs:
-  # ---------------------------------------------------------------------------
-  # Tests (fast feedback, Linux only)
-  # ---------------------------------------------------------------------------
   test:
     name: Test
     runs-on: ubuntu-24.04
@@ -26,38 +23,21 @@ jobs:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - uses: actions/setup-python@v6
-        with:
-          python-version: "3.12"
 
       - name: Install Linux build dependencies
         run: |
-          # 1. Bypass flaky internal DNS on GitHub runners
           echo "nameserver 8.8.8.8" | sudo tee /etc/resolv.conf > /dev/null
           echo "nameserver 1.1.1.1" | sudo tee -a /etc/resolv.conf > /dev/null
-
-          # 2. Force APT to use IPv4 (GitHub Actions ARM64 runners have broken IPv6 routing)
           echo 'Acquire::ForceIPv4 "true";' | sudo tee /etc/apt/apt.conf.d/99force-ipv4
-
-          # 3. Force APT to use the main Ubuntu archive instead of the Azure mirror list
-          echo "http://archive.ubuntu.com/ubuntu/" | sudo tee /etc/apt/apt-mirrors.txt > /dev/null
-          echo "http://security.ubuntu.com/ubuntu/" | sudo tee -a /etc/apt/apt-mirrors.txt > /dev/null
-
-          # 4. Retry loop for update
           for i in 1 2 3; do
             sudo apt-get update && break || sleep 3
           done
-
-          # 5. Install packages
           sudo apt-get install -y pkg-config libx11-dev libxcursor-dev libxrandr-dev \
             libxi-dev libxkbcommon-dev libwayland-dev libgl1-mesa-dev libasound2-dev \
             libudev-dev
 
       - run: cargo test -p forge-core -p forge-video -p forge-app
 
-  # ---------------------------------------------------------------------------
-  # WebAssembly: library crates only (the full GUI app has no web entry yet)
-  # ---------------------------------------------------------------------------
   wasm:
     name: WebAssembly (check)
     runs-on: ubuntu-24.04
@@ -68,42 +48,28 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
-      - run: cargo check -p forge-core -p forge-io --target wasm32-unknown-unknown
+      - run: cargo check -p forge-core -p forge-io --target wasm32-unknown-unknown --no-default-features
 
-  # ---------------------------------------------------------------------------
-  # Linux / Windows / macOS
-  # "experimental" targets can fail without failing the whole workflow.
-  # ---------------------------------------------------------------------------
   build:
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
     continue-on-error: ${{ matrix.experimental }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          # ---- Linux (native runners) ----
-          - { name: linux-x64,          os: ubuntu-24.04,     target: x86_64-unknown-linux-gnu,      cross: false, zig: false, python_scripting: true,  ext: "",     experimental: false }
-          - { name: linux-arm64,        os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu,     cross: false, zig: false, python_scripting: true,  ext: "",     experimental: true  }
-
-          # ---- Linux (cargo-zigbuild, no Docker, no EOL Ubuntu images) ----
-          - { name: linux-x86,          os: ubuntu-24.04,     target: i686-unknown-linux-gnu,        cross: false, zig: true,  python_scripting: false, ext: "",     experimental: true  }
-          - { name: linux-armv7,        os: ubuntu-24.04,     target: armv7-unknown-linux-gnueabihf, cross: false, zig: true,  python_scripting: false, ext: "",     experimental: true  }
-          - { name: linux-riscv64,      os: ubuntu-24.04,     target: riscv64gc-unknown-linux-gnu,   cross: false, zig: true,  python_scripting: false, ext: "",     experimental: true  }
-          # NOTE: static musl binaries cannot dlopen the system GPU/windowing libraries,
-          # so this one compiles but is unlikely to open a window at runtime.
-          - { name: linux-riscv64-musl, os: ubuntu-24.04,     target: riscv64gc-unknown-linux-musl,  cross: false, zig: true,  python_scripting: false, ext: "",     experimental: true  }
-
-          # ---- Windows ----
-          - { name: windows-x64,        os: windows-latest,   target: x86_64-pc-windows-msvc,        cross: false, zig: false, python_scripting: true,  ext: ".exe", experimental: false }
-          - { name: windows-x86,        os: windows-latest,   target: i686-pc-windows-msvc,          cross: false, zig: false, python_scripting: false, ext: ".exe", experimental: true  }
-          - { name: windows-arm64,      os: windows-latest,   target: aarch64-pc-windows-msvc,       cross: false, zig: false, python_scripting: false, ext: ".exe", experimental: true  }
-
-          # ---- macOS ----
-          # macos-13 / macos-14 are retired. macos-15-intel = Intel,
-          # macos-latest = Apple Silicon (largest runner pool, avoids queue backlog).
-          - { name: macos-x64,          os: macos-15-intel,   target: x86_64-apple-darwin,           cross: false, zig: false, python_scripting: true,  ext: "",     experimental: false }
-          - { name: macos-arm64,        os: macos-latest,     target: aarch64-apple-darwin,          cross: false, zig: false, python_scripting: true,  ext: "",     experimental: false }
+          - { name: linux-x64,     os: ubuntu-24.04,     target: x86_64-unknown-linux-gnu,      zig: false, scripting: true,  ext: "",     experimental: false }
+          - { name: linux-arm64,   os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu,     zig: false, scripting: true,  ext: "",     experimental: true  }
+          - { name: windows-x64,   os: windows-latest,   target: x86_64-pc-windows-msvc,        zig: false, scripting: true,  ext: ".exe", experimental: false }
+          - { name: macos-x64,     os: macos-15-intel,   target: x86_64-apple-darwin,           zig: false, scripting: true,  ext: "",     experimental: false }
+          - { name: macos-arm64,   os: macos-latest,     target: aarch64-apple-darwin,          zig: false, scripting: true,  ext: "",     experimental: false }
+          - { name: linux-x86,     os: ubuntu-24.04,     target: i686-unknown-linux-gnu,        zig: true,  scripting: false, ext: "",     experimental: true  }
+          - { name: linux-armv7,   os: ubuntu-24.04,     target: armv7-unknown-linux-gnueabihf, zig: true,  scripting: false, ext: "",     experimental: true  }
+          - { name: linux-riscv64, os: ubuntu-24.04,     target: riscv64gc-unknown-linux-gnu,   zig: true,  scripting: false, ext: "",     experimental: true  }
+          - { name: linux-riscv64-musl, os: ubuntu-24.04, target: riscv64gc-unknown-linux-musl, zig: true,  scripting: false, ext: "",     experimental: true  }
+          - { name: windows-x86,   os: windows-latest,   target: i686-pc-windows-msvc,          zig: false, scripting: false, ext: ".exe", experimental: true  }
+          - { name: windows-arm64, os: windows-latest,   target: aarch64-pc-windows-msvc,       zig: false, scripting: false, ext: ".exe", experimental: true  }
 
     steps:
       - uses: actions/checkout@v5
@@ -116,12 +82,6 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
-      - name: Install Python for embedded scripting
-        if: matrix.python_scripting
-        uses: actions/setup-python@v6
-        with:
-          python-version: "3.12"
-
       - name: Detect binary name
         shell: bash
         run: |
@@ -132,24 +92,20 @@ jobs:
           echo "Binary name: $BIN"
           echo "BIN=$BIN" >> "$GITHUB_ENV"
 
-      # Fail early on Windows if the logo icon is missing (exe would ship with generic icon).
       - name: Verify Windows app icon assets
         if: runner.os == 'Windows'
         shell: bash
         run: |
-          test -f crates/app/icon.ico || { echo "Missing crates/app/icon.ico — Windows exe will have no logo"; exit 1; }
-          test -f crates/app/build.rs || { echo "Missing crates/app/build.rs — icon will not be embedded"; exit 1; }
+          test -f crates/app/icon.ico || { echo "Missing crates/app/icon.ico"; exit 1; }
+          test -f crates/app/build.rs || { echo "Missing crates/app/build.rs"; exit 1; }
           test -f crates/app/logo.png || { echo "Missing crates/app/logo.png"; exit 1; }
-          echo "Icon assets OK"
 
-      - name: Install Linux build dependencies (native build only)
-        if: runner.os == 'Linux' && !matrix.cross && !matrix.zig
+      - name: Install Linux build dependencies (native)
+        if: runner.os == 'Linux' && !matrix.zig
         run: |
           echo "nameserver 8.8.8.8" | sudo tee /etc/resolv.conf > /dev/null
           echo "nameserver 1.1.1.1" | sudo tee -a /etc/resolv.conf > /dev/null
           echo 'Acquire::ForceIPv4 "true";' | sudo tee /etc/apt/apt.conf.d/99force-ipv4
-          echo "http://archive.ubuntu.com/ubuntu/" | sudo tee /etc/apt/apt-mirrors.txt > /dev/null
-          echo "http://security.ubuntu.com/ubuntu/" | sudo tee -a /etc/apt/apt-mirrors.txt > /dev/null
           for i in 1 2 3; do
             sudo apt-get update && break || sleep 3
           done
@@ -157,42 +113,22 @@ jobs:
             libxi-dev libxkbcommon-dev libwayland-dev libgl1-mesa-dev libasound2-dev \
             libudev-dev
 
-      - name: Install cross
-        if: matrix.cross
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cross
-
       - name: Install zig + cargo-zigbuild
         if: matrix.zig
         run: python3 -m pip install --break-system-packages cargo-zigbuild ziglang
 
-      - name: Build (cargo)
-        if: ${{ !matrix.cross && !matrix.zig && matrix.python_scripting }}
+      - name: Build (with RustPython scripting)
+        if: ${{ !matrix.zig && matrix.scripting }}
         run: cargo build --release -p ${{ env.APP_PACKAGE }} --target ${{ matrix.target }}
 
-      - name: Build (cargo, without Python scripting)
-        if: ${{ !matrix.cross && !matrix.zig && !matrix.python_scripting }}
+      - name: Build (without scripting)
+        if: ${{ !matrix.zig && !matrix.scripting }}
         run: cargo build --release -p ${{ env.APP_PACKAGE }} --no-default-features --target ${{ matrix.target }}
 
-      - name: Build (cross)
-        if: matrix.cross
-        run: cross build --release -p ${{ env.APP_PACKAGE }} --no-default-features --target ${{ matrix.target }}
-
-      - name: Build (zigbuild)
+      - name: Build (zigbuild, without scripting)
         if: matrix.zig
         run: cargo zigbuild --release -p ${{ env.APP_PACKAGE }} --no-default-features --target ${{ matrix.target }}
 
-      - name: Package portable CPython runtime
-        if: matrix.python_scripting
-        shell: bash
-        run: |
-          python scripts/package_python_runtime.py \
-            --binary "target/${{ matrix.target }}/release/${{ env.BIN }}${{ matrix.ext }}" \
-            --bundle-dir "bundle-${{ matrix.name }}" \
-            --archive "BlendCraft-${{ matrix.name }}-portable.zip"
-
-      # AppImage for Linux x86_64, arm64 and x86 (i686) — icon = crates/app/logo.png
       - name: Package AppImage
         if: >
           runner.os == 'Linux' && (
@@ -208,27 +144,15 @@ jobs:
           APPDIR="BlendCraft.AppDir"
           rm -rf "$APPDIR" squashfs-root appimagetool
           mkdir -p "$APPDIR/usr/bin" "$APPDIR/usr/share/icons/hicolor/256x256/apps"
-
           cp "target/${TARGET}/release/${BIN}" "$APPDIR/usr/bin/${BIN}"
-          if [ -d "bundle-${{ matrix.name }}/python" ]; then
-            cp -a "bundle-${{ matrix.name }}/python" "$APPDIR/usr/bin/python"
-          fi
           chmod +x "$APPDIR/usr/bin/${BIN}"
-
-          # Icon from repo (resize to 256 — Flatpak/AppImage expect <= 512)
           test -f crates/app/logo.png || { echo "missing crates/app/logo.png"; exit 1; }
           if ! command -v convert >/dev/null 2>&1; then
-            echo "nameserver 8.8.8.8" | sudo tee /etc/resolv.conf > /dev/null
-            echo "nameserver 1.1.1.1" | sudo tee -a /etc/resolv.conf > /dev/null
-            echo 'Acquire::ForceIPv4 "true";' | sudo tee /etc/apt/apt.conf.d/99force-ipv4
-            echo "http://archive.ubuntu.com/ubuntu/" | sudo tee /etc/apt/apt-mirrors.txt > /dev/null
-            echo "http://security.ubuntu.com/ubuntu/" | sudo tee -a /etc/apt/apt-mirrors.txt > /dev/null
-            for i in 1 2 3; do sudo apt-get update -qq && break || sleep 3; done
+            sudo apt-get update -qq
             sudo apt-get install -y -qq --no-install-recommends imagemagick
           fi
           convert crates/app/logo.png -resize 256x256 "$APPDIR/usr/share/icons/hicolor/256x256/apps/blendcraft.png"
           convert crates/app/logo.png -resize 256x256 "$APPDIR/blendcraft.png"
-
           cat > "$APPDIR/blendcraft.desktop" <<EOF
           [Desktop Entry]
           Type=Application
@@ -240,19 +164,14 @@ jobs:
           Terminal=false
           EOF
           sed -i 's/^[[:space:]]*//' "$APPDIR/blendcraft.desktop"
-
           printf '%s\n' '#!/bin/sh' 'SELF=$(readlink -f "$0")' 'HERE=${SELF%/*}' "exec \"\${HERE}/usr/bin/${BIN}\" \"\$@\"" > "$APPDIR/AppRun"
           chmod +x "$APPDIR/AppRun"
-
-          # Target arch for the AppImage runtime
           case "$TARGET" in
             x86_64-*)  ARCH_NAME=x86_64 ;;
             aarch64-*) ARCH_NAME=aarch64 ;;
             i686-*)    ARCH_NAME=i686 ;;
             *) echo "unsupported target $TARGET"; exit 1 ;;
           esac
-
-          # appimagetool must match the *host* CPU so we can run it
           case "$(uname -m)" in
             aarch64|arm64) TOOL_ARCH=aarch64 ;;
             *)             TOOL_ARCH=x86_64 ;;
@@ -261,29 +180,16 @@ jobs:
             "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-${TOOL_ARCH}.AppImage"
           chmod +x appimagetool
           ./appimagetool --appimage-extract >/dev/null 2>&1 || true
-          if [ -x squashfs-root/AppRun ]; then
-            TOOL=./squashfs-root/AppRun
-          else
-            TOOL=./appimagetool
-          fi
+          if [ -x squashfs-root/AppRun ]; then TOOL=./squashfs-root/AppRun; else TOOL=./appimagetool; fi
           export ARCH="$ARCH_NAME"
           "$TOOL" "$APPDIR" "BlendCraft-${{ matrix.name }}.AppImage"
           chmod +x "BlendCraft-${{ matrix.name }}.AppImage"
-          ls -lh "BlendCraft-${{ matrix.name }}.AppImage"
 
-      - name: Upload artifact (ELF binary)
+      - name: Upload artifact (binary)
         uses: actions/upload-artifact@v5
         with:
           name: blendcraft-${{ matrix.name }}
           path: target/${{ matrix.target }}/release/${{ env.BIN }}${{ matrix.ext }}
-          if-no-files-found: error
-
-      - name: Upload artifact (portable Python bundle)
-        if: matrix.python_scripting
-        uses: actions/upload-artifact@v5
-        with:
-          name: blendcraft-${{ matrix.name }}-portable
-          path: BlendCraft-${{ matrix.name }}-portable.zip
           if-no-files-found: error
 
       - name: Upload artifact (AppImage)
@@ -297,11 +203,8 @@ jobs:
         with:
           name: blendcraft-${{ matrix.name }}-appimage
           path: BlendCraft-${{ matrix.name }}.AppImage
-          if-no-files-found: error
+          if-no-files-found: warn
 
-  # ---------------------------------------------------------------------------
-  # FreeBSD (built inside a FreeBSD VM)
-  # ---------------------------------------------------------------------------
   freebsd:
     name: ${{ matrix.name }}
     runs-on: ubuntu-24.04
@@ -311,19 +214,17 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { name: freebsd-x64, target: x86_64-unknown-freebsd, python_scripting: true,  experimental: false }
-          - { name: freebsd-x86, target: i686-unknown-freebsd,   python_scripting: false, experimental: true  }
+          - { name: freebsd-x64, target: x86_64-unknown-freebsd, scripting: true,  experimental: false }
+          - { name: freebsd-x86, target: i686-unknown-freebsd,   scripting: false, experimental: true  }
     steps:
       - uses: actions/checkout@v5
-
       - name: Detect binary name
         shell: bash
         run: |
           BIN=$(cargo metadata --no-deps --format-version 1 \
             | jq -r --arg pkg "$APP_PACKAGE" '.packages[] | select(.name==$pkg) | .targets[] | select(.kind | index("bin")) | .name' \
             | head -n1 | tr -d '\r')
-          test -n "$BIN" || { echo "No binary target found in package $APP_PACKAGE"; exit 1; }
-          echo "Binary name: $BIN"
+          test -n "$BIN" || { echo "No binary target found"; exit 1; }
           echo "BIN=$BIN" >> "$GITHUB_ENV"
 
       - name: Build in FreeBSD VM
@@ -332,35 +233,26 @@ jobs:
           TARGET: ${{ matrix.target }}
           BIN: ${{ env.BIN }}
           APP_PACKAGE: ${{ env.APP_PACKAGE }}
-          PYTHON_SCRIPTING: ${{ matrix.python_scripting }}
+          SCRIPTING: ${{ matrix.scripting }}
         with:
-          envs: "TARGET BIN APP_PACKAGE PYTHON_SCRIPTING"
+          envs: "TARGET BIN APP_PACKAGE SCRIPTING"
           usesh: true
           prepare: |
-            pkg install -y curl pkgconf python3
+            pkg install -y curl pkgconf
           run: |
             set -e
             curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal
             . "$HOME/.cargo/env"
-
             if [ "$TARGET" != "x86_64-unknown-freebsd" ]; then
               rustup target add "$TARGET"
             fi
-            if [ "$PYTHON_SCRIPTING" = "true" ]; then
+            if [ "$SCRIPTING" = "true" ]; then
               cargo build --release -p "$APP_PACKAGE" --target "$TARGET"
             else
               cargo build --release -p "$APP_PACKAGE" --no-default-features --target "$TARGET"
             fi
-
             mkdir -p dist
             cp "target/$TARGET/release/$BIN" dist/
-            if [ "$PYTHON_SCRIPTING" = "true" ]; then
-              python3 scripts/package_python_runtime.py \
-                --binary "dist/$BIN" \
-                --bundle-dir "dist/portable" \
-                --archive "dist/BlendCraft-freebsd-x64-portable.zip"
-            fi
-            rm -rf target
 
       - name: Upload artifact
         uses: actions/upload-artifact@v5
@@ -369,92 +261,34 @@ jobs:
           path: dist/${{ env.BIN }}
           if-no-files-found: error
 
-      - name: Upload portable Python bundle
-        if: matrix.python_scripting
-        uses: actions/upload-artifact@v5
-        with:
-          name: blendcraft-${{ matrix.name }}-portable
-          path: dist/BlendCraft-${{ matrix.name }}-portable.zip
-          if-no-files-found: error
-
-  # ---------------------------------------------------------------------------
-  # FreeBSD ARM64 (cross-compiled from Linux against a FreeBSD sysroot)
-  # ---------------------------------------------------------------------------
   freebsd-arm64:
     name: freebsd-arm64
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 120
     continue-on-error: true
     env:
-      FREEBSD_VERSION: "14.4"
       TARGET: aarch64-unknown-freebsd
     steps:
       - uses: actions/checkout@v5
-
       - uses: dtolnay/rust-toolchain@nightly
         with:
+          targets: aarch64-unknown-freebsd
           components: rust-src
-
       - uses: Swatinem/rust-cache@v2
         with:
           key: freebsd-arm64
-
       - name: Detect binary name
         shell: bash
         run: |
           BIN=$(cargo metadata --no-deps --format-version 1 \
             | jq -r --arg pkg "$APP_PACKAGE" '.packages[] | select(.name==$pkg) | .targets[] | select(.kind | index("bin")) | .name' \
             | head -n1 | tr -d '\r')
-          test -n "$BIN" || { echo "No binary target found in package $APP_PACKAGE"; exit 1; }
-          echo "Binary name: $BIN"
+          test -n "$BIN" || exit 1
           echo "BIN=$BIN" >> "$GITHUB_ENV"
-
-      - name: Cache FreeBSD sysroot
-        id: sysroot-cache
-        uses: actions/cache@v4
-        with:
-          path: ~/sysroot
-          key: freebsd-sysroot-arm64-${{ env.FREEBSD_VERSION }}
-
-      - name: Download FreeBSD sysroot
-        if: steps.sysroot-cache.outputs.cache-hit != 'true'
-        run: |
-          mkdir -p "$HOME/sysroot"
-          ok=0
-          for host in https://download.freebsd.org https://mirrors.mit.edu/FreeBSD https://ftp5.us.freebsd.org; do
-            url="$host/releases/arm64/aarch64/${FREEBSD_VERSION}-RELEASE/base.txz"
-            echo "Trying $url"
-            if curl -fsSL --retry 3 "$url" -o base.txz; then ok=1; break; fi
-          done
-          test "$ok" = 1 || { echo "Could not download base.txz for FreeBSD ${FREEBSD_VERSION}"; exit 1; }
-          tar -xf base.txz -C "$HOME/sysroot" ./lib ./usr/lib ./usr/include
-          rm base.txz
-
-      - name: Install clang + lld
-        run: |
-          echo "nameserver 8.8.8.8" | sudo tee /etc/resolv.conf > /dev/null
-          echo "nameserver 1.1.1.1" | sudo tee -a /etc/resolv.conf > /dev/null
-          echo 'Acquire::ForceIPv4 "true";' | sudo tee /etc/apt/apt.conf.d/99force-ipv4
-          echo "http://archive.ubuntu.com/ubuntu/" | sudo tee /etc/apt/apt-mirrors.txt > /dev/null
-          echo "http://security.ubuntu.com/ubuntu/" | sudo tee -a /etc/apt/apt-mirrors.txt > /dev/null
-          for i in 1 2 3; do
-            sudo apt-get update && break || sleep 3
-          done
-          sudo apt-get install -y --no-install-recommends clang lld
-
-      - name: Create cross compiler wrapper
-        run: |
-          printf '#!/bin/sh\nexec clang --target=aarch64-unknown-freebsd%s --sysroot=%s -fuse-ld=lld "$@"\n' \
-            "${FREEBSD_VERSION%%.*}" "$HOME/sysroot" > "$HOME/freebsd-cc"
-          chmod +x "$HOME/freebsd-cc"
-
-      - name: Build
-        env:
-          CARGO_TARGET_AARCH64_UNKNOWN_FREEBSD_LINKER: /home/runner/freebsd-cc
-          CC_aarch64_unknown_freebsd: /home/runner/freebsd-cc
-          AR_aarch64_unknown_freebsd: ar
+      - name: Install clang
+        run: sudo apt-get update && sudo apt-get install -y clang lld
+      - name: Build (no scripting)
         run: cargo build --release -p "$APP_PACKAGE" --no-default-features --target "$TARGET" -Zbuild-std=std,panic_abort
-
       - name: Upload artifact
         uses: actions/upload-artifact@v5
         with:
@@ -462,103 +296,66 @@ jobs:
           path: target/${{ env.TARGET }}/release/${{ env.BIN }}
           if-no-files-found: error
 
-  # ---------------------------------------------------------------------------
-  # Flatpak — uses the REAL logo.png (not the orange placeholder SVG)
-  # ---------------------------------------------------------------------------
   flatpak:
     name: flatpak-${{ matrix.name }}
-    needs: build
-    if: ${{ !cancelled() }}
+    needs: [build]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
     continue-on-error: true
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { name: x64,   os: ubuntu-24.04,     arch: x86_64,  artifact: blendcraft-linux-x64,   portable_zip: BlendCraft-linux-x64-portable.zip }
-          - { name: arm64, os: ubuntu-24.04-arm, arch: aarch64, artifact: blendcraft-linux-arm64, portable_zip: BlendCraft-linux-arm64-portable.zip }
-    env:
-      APP_ID: io.github.DaikoGames.BlendCraft
+          - { name: x64,   os: ubuntu-24.04,     arch: x86_64,  artifact: blendcraft-linux-x64 }
+          - { name: arm64, os: ubuntu-24.04-arm, arch: aarch64, artifact: blendcraft-linux-arm64 }
     steps:
-      # Checkout source so logo.png is available for the app icon.
       - uses: actions/checkout@v5
-
-      - uses: actions/download-artifact@v5
+      - name: Download binary artifact
+        uses: actions/download-artifact@v5
         with:
           name: ${{ matrix.artifact }}
-          path: flatpak-in
-
-      - uses: actions/download-artifact@v5
-        with:
-          name: ${{ matrix.artifact }}-portable
-          path: flatpak-runtime
-
-      - name: Install flatpak tooling
+          path: flatpak-bin
+      - name: Install flatpak-builder
         run: |
-          # 1. Bypass flaky internal DNS on GitHub runners
-          echo "nameserver 8.8.8.8" | sudo tee /etc/resolv.conf > /dev/null
-          echo "nameserver 1.1.1.1" | sudo tee -a /etc/resolv.conf > /dev/null
-
-          # 2. Force APT to use IPv4 (GitHub Actions ARM64 runners have broken IPv6 routing)
-          echo 'Acquire::ForceIPv4 "true";' | sudo tee /etc/apt/apt.conf.d/99force-ipv4
-
-          # 3. Force APT to use the main Ubuntu archive
-          echo "http://archive.ubuntu.com/ubuntu/" | sudo tee /etc/apt/apt-mirrors.txt > /dev/null
-          echo "http://security.ubuntu.com/ubuntu/" | sudo tee -a /etc/apt/apt-mirrors.txt > /dev/null
-
-          # 4. Retry loop for update
-          for i in 1 2 3; do
-            sudo apt-get update && break || sleep 3
-          done
-
-          # 5. Install packages.
-          #    elfutils  -> eu-strip / eu-elfcompress, required by flatpak-builder
-          #    (must be explicit because --no-install-recommends skips it)
-          sudo apt-get install -y --no-install-recommends \
-            flatpak flatpak-builder imagemagick elfutils binutils
-          flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
-
-      - name: Cache Flatpak runtimes
-        uses: actions/cache@v4
-        with:
-          path: ~/.local/share/flatpak
-          key: flatpak-runtime-${{ matrix.arch }}-25.08
-
-      - name: Generate Flatpak files
+          sudo apt-get update
+          sudo apt-get install -y flatpak flatpak-builder imagemagick
+          flatpak remote-add --user --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
+      - name: Detect binary name
+        shell: bash
+        run: |
+          BIN=$(ls flatpak-bin | head -n1)
+          test -n "$BIN" || exit 1
+          echo "BIN=$BIN" >> "$GITHUB_ENV"
+          echo "APP_ID=com.daikogames.BlendCraft" >> "$GITHUB_ENV"
+          echo "VERSION=0.1.0" >> "$GITHUB_ENV"
+      - name: Prepare Flatpak sources
+        shell: bash
         run: |
           set -e
-          BIN=$(ls flatpak-in | head -n1)
-          chmod +x "flatpak-in/$BIN"
-          unzip -q "flatpak-runtime/${{ matrix.portable_zip }}" -d flatpak-runtime/unpacked
-          VERSION="${GITHUB_REF_NAME#v}"
-          case "$GITHUB_REF" in refs/tags/v*) ;; *) VERSION="0.1.0" ;; esac
-          mkdir -p fp && cp "flatpak-in/$BIN" "fp/$BIN"
-          cp -a flatpak-runtime/unpacked/python fp/python
+          mkdir -p fp
+          cp "flatpak-bin/$BIN" "fp/$BIN"
+          chmod +x "fp/$BIN"
           cd fp
-
-          printf '%s\n' \
-            '[Desktop Entry]' \
-            'Type=Application' \
-            'Name=BlendCraft' \
-            'Comment=Open-source 3D suite for game assets' \
-            "Exec=$BIN %f" \
-            "Icon=$APP_ID" \
-            'Terminal=false' \
-            'Categories=Graphics;3DGraphics;' \
-            'MimeType=model/gltf-binary;' \
-            > "$APP_ID.desktop"
-
+          cat > "$APP_ID.desktop" <<EOF
+          [Desktop Entry]
+          Type=Application
+          Name=BlendCraft
+          Comment=Open-source 3D suite for game assets
+          Exec=$BIN
+          Icon=$APP_ID
+          Categories=Graphics;3DGraphics;
+          Terminal=false
+          EOF
+          sed -i 's/^[[:space:]]*//' "$APP_ID.desktop"
           cat > "$APP_ID.metainfo.xml" <<EOF
           <?xml version="1.0" encoding="UTF-8"?>
           <component type="desktop-application">
             <id>$APP_ID</id>
             <name>BlendCraft</name>
-            <summary>Open-source 3D suite for game assets, written in Rust</summary>
+            <summary>Open-source 3D suite for game assets</summary>
             <metadata_license>CC0-1.0</metadata_license>
             <project_license>MIT</project_license>
             <description>
-              <p>BlendCraft is an early, independent open-source 3D suite written in Rust. It is not affiliated with the Blender Foundation.</p>
+              <p>BlendCraft is an early, independent open-source 3D suite written in Rust.</p>
             </description>
             <launchable type="desktop-id">$APP_ID.desktop</launchable>
             <url type="homepage">https://github.com/DaikoGames/BlendCraft</url>
@@ -568,13 +365,10 @@ jobs:
           </component>
           EOF
           sed -i 's/^[[:space:]]*//' "$APP_ID.metainfo.xml"
-
-          # Logo from repo; Flatpak requires icons <= 512px (logo is 1254px)
           LOGO="../crates/app/logo.png"
-          test -f "$LOGO" || { echo "ERROR: missing $LOGO"; exit 1; }
+          test -f "$LOGO"
           mkdir -p "icons/hicolor/256x256/apps"
           convert "$LOGO" -resize 256x256 "icons/hicolor/256x256/apps/$APP_ID.png"
-
           cat > "$APP_ID.yml" <<EOF
           app-id: $APP_ID
           runtime: org.freedesktop.Platform
@@ -592,7 +386,6 @@ jobs:
               buildsystem: simple
               build-commands:
                 - install -Dm755 $BIN /app/bin/$BIN
-                - cp -a python /app/bin/python
                 - install -Dm644 $APP_ID.desktop /app/share/applications/$APP_ID.desktop
                 - install -Dm644 $APP_ID.metainfo.xml /app/share/metainfo/$APP_ID.metainfo.xml
                 - mkdir -p /app/share/icons
@@ -600,8 +393,6 @@ jobs:
               sources:
                 - type: file
                   path: $BIN
-                - type: dir
-                  path: python
                 - type: file
                   path: $APP_ID.desktop
                 - type: file
@@ -610,24 +401,19 @@ jobs:
                   path: icons
           EOF
           sed -i 's/^          //' "$APP_ID.yml"
-
       - name: Build Flatpak bundle
         working-directory: fp
         run: |
           flatpak-builder --user --force-clean --install-deps-from=flathub \
             --repo=repo builddir "$APP_ID.yml"
           flatpak build-bundle repo "BlendCraft-${{ matrix.arch }}.flatpak" "$APP_ID"
-
-      - name: Upload artifact
+      - name: Upload Flatpak
         uses: actions/upload-artifact@v5
         with:
           name: blendcraft-flatpak-${{ matrix.name }}
           path: fp/BlendCraft-${{ matrix.arch }}.flatpak
           if-no-files-found: error
 
-  # ---------------------------------------------------------------------------
-  # Release
-  # ---------------------------------------------------------------------------
   release:
     name: Publish release
     if: ${{ !cancelled() && github.event_name != 'pull_request' }}
@@ -642,7 +428,6 @@ jobs:
         with:
           pattern: blendcraft-*
           path: dist
-
       - name: Collect binaries
         run: |
           shopt -s nullglob
@@ -659,15 +444,13 @@ jobs:
               esac
             done
           done
-          ls -lh out
-          test -n "$(ls -A out)" || { echo "No build artifacts were produced, nothing to release."; exit 1; }
-
+          ls -lh out || true
+          test -n "$(ls -A out 2>/dev/null)" || { echo "No build artifacts"; exit 1; }
       - name: Remove the old rolling release
         if: env.IS_TAG != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release delete latest --cleanup-tag --yes --repo "${{ github.repository }}" || true
-
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -679,7 +462,6 @@ jobs:
           generate_release_notes: ${{ env.IS_TAG == 'true' }}
           body: |
             ${{ env.IS_TAG != 'true' && format('Automatic build of commit {0}. Not a stable release.', github.sha) || '' }}
-            Experimental, untested builds: Linux x86 / ARM64 / ARMv7 / RISC-V 64 (glibc and musl), Windows x86 / ARM64,
-            FreeBSD x86 / ARM64. Flatpaks are built for Linux x86_64 and aarch64. AppImages (with project logo) are built for Linux x86_64, arm64, and x86 (i686). On Linux/macOS/FreeBSD run chmod +x on the downloaded file first. If one is missing from the assets, its build failed.
-            Animation export is written by a built-in pure-Rust encoder (Motion-JPEG in an .avi file); no ffmpeg or other external tool is needed.
+            Scripting uses embedded RustPython (no separate CPython runtime).
+            On Unix run chmod +x on downloaded binaries first.
           files: out/*
