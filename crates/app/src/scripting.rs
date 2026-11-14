@@ -17,10 +17,59 @@ pub struct ScriptObject {
     pub primitive_params: Vec<f32>,
     #[serde(default)]
     pub material: Option<usize>,
+    /// Material slot indices (Blender-style). Slot 0 mirrors `material` when applied.
+    #[serde(default)]
+    pub material_slots: Vec<Option<usize>>,
+    #[serde(default)]
+    pub active_material_index: usize,
     pub location: [f32; 3],
     pub rotation_euler: [f32; 3],
     pub scale: [f32; 3],
     pub selected: bool,
+    #[serde(default = "default_true")]
+    pub visible: bool,
+    #[serde(default)]
+    pub parent: Option<usize>,
+    /// Index into snapshot collections list.
+    #[serde(default)]
+    pub collection: Option<usize>,
+    #[serde(default)]
+    pub light_type: Option<String>,
+    #[serde(default)]
+    pub light_energy: Option<f32>,
+    #[serde(default)]
+    pub light_color: Option<[f32; 3]>,
+    #[serde(default)]
+    pub light_range: Option<f32>,
+    #[serde(default)]
+    pub light_spot_size: Option<f32>,
+    #[serde(default)]
+    pub light_spot_blend: Option<f32>,
+    #[serde(default)]
+    pub camera_fov: Option<f32>,
+    #[serde(default)]
+    pub camera_ortho: Option<bool>,
+    #[serde(default)]
+    pub camera_ortho_size: Option<f32>,
+    #[serde(default)]
+    pub camera_near: Option<f32>,
+    #[serde(default)]
+    pub camera_far: Option<f32>,
+    #[serde(default)]
+    pub empty_shape: Option<String>,
+    #[serde(default)]
+    pub empty_size: Option<f32>,
+    /// Read-only mesh vertex positions (not written back as topology edits).
+    #[serde(default)]
+    pub vertices: Vec<[f32; 3]>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_frame() -> i32 {
+    1
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -32,11 +81,38 @@ pub struct ScriptMaterial {
     pub emissive: [f32; 3],
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
+pub struct ScriptCollection {
+    pub id: Option<u64>,
+    pub name: String,
+    #[serde(default = "default_true")]
+    pub visible: bool,
+    /// Object indices that belong to this collection.
+    #[serde(default)]
+    pub objects: Vec<usize>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct ScriptKeyframe {
+    /// Index into the objects list.
+    pub object: usize,
+    pub frame: i32,
+    /// "location" | "rotation_euler" | "scale"
+    pub data_path: String,
+    pub value: Vec<f32>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct ScriptSnapshot {
     pub objects: Vec<ScriptObject>,
     #[serde(default)]
     pub materials: Vec<ScriptMaterial>,
+    #[serde(default)]
+    pub collections: Vec<ScriptCollection>,
+    #[serde(default)]
+    pub keyframes: Vec<ScriptKeyframe>,
+    #[serde(default)]
+    pub frame_current: i32,
     pub active: Option<usize>,
 }
 
@@ -44,6 +120,9 @@ pub struct ScriptSnapshot {
 pub struct ScriptResult {
     pub objects: Vec<ScriptObject>,
     pub materials: Vec<ScriptMaterial>,
+    pub collections: Vec<ScriptCollection>,
+    pub keyframes: Vec<ScriptKeyframe>,
+    pub frame_current: i32,
     pub active: Option<usize>,
     pub output: String,
 }
@@ -65,7 +144,7 @@ impl ScriptSnapshot {
         let active = doc
             .active
             .and_then(|id| doc.scene.objects.iter().position(|object| object.id == id));
-        let objects = doc
+        let mut objects: Vec<ScriptObject> = doc
             .scene
             .objects
             .iter()
@@ -76,26 +155,102 @@ impl ScriptSnapshot {
                     .as_ref()
                     .map(primitive_script_data)
                     .unwrap_or_else(|| ("NONE".to_owned(), Vec::new()));
-                ScriptObject {
-                    id: Some(object.id),
-                    name: object.name.clone(),
-                    object_type: match object.kind {
+                let object_type = match &object.kind {
                         forge_core::ObjectKind::Mesh => "MESH",
                         forge_core::ObjectKind::Camera(_) => "CAMERA",
                         forge_core::ObjectKind::Light(_) => "LIGHT",
+                        forge_core::ObjectKind::Empty { .. } => "EMPTY",
                         _ => "OTHER",
                     }
-                    .to_owned(),
+                    .to_owned();
+                let (light_type, light_energy, light_color, light_range, light_spot_size, light_spot_blend) =
+                    match &object.kind {
+                    forge_core::ObjectKind::Light(l) => (
+                        Some(match l.kind {
+                            forge_core::LightType::Point => "POINT",
+                            forge_core::LightType::Sun => "SUN",
+                            forge_core::LightType::Spot => "SPOT",
+                            forge_core::LightType::Area => "AREA",
+                        }.to_owned()),
+                        Some(l.intensity),
+                        Some(l.color),
+                        Some(l.range),
+                        Some(l.spot_angle_deg),
+                        Some(l.spot_blend),
+                    ),
+                    _ => (None, None, None, None, None, None),
+                };
+                let (camera_fov, camera_ortho, camera_ortho_size, camera_near, camera_far) =
+                    match &object.kind {
+                    forge_core::ObjectKind::Camera(c) => (
+                        Some(c.fov_deg),
+                        Some(c.ortho),
+                        Some(c.ortho_size),
+                        Some(c.near),
+                        Some(c.far),
+                    ),
+                    _ => (None, None, None, None, None),
+                };
+                let (empty_shape, empty_size) = match &object.kind {
+                    forge_core::ObjectKind::Empty { shape, size } => (
+                        Some(shape.name().to_owned()),
+                        Some(*size),
+                    ),
+                    _ => (None, None),
+                };
+                let vertices: Vec<[f32; 3]> = object
+                    .mesh
+                    .vertices
+                    .iter()
+                    .map(|v| v.position)
+                    .collect();
+                let material_slots = vec![object.material];
+                ScriptObject {
+                    id: Some(object.id),
+                    name: object.name.clone(),
+                    object_type,
                     primitive,
                     primitive_params,
                     material: object.material,
+                    material_slots,
+                    active_material_index: 0,
                     location: object.translation.to_array(),
                     rotation_euler: [x, y, z],
                     scale: object.scale.to_array(),
                     selected: doc.selection.contains(&object.id),
+                    visible: object.visible,
+                    parent: None,
+                    collection: None,
+                    light_type,
+                    light_energy,
+                    light_color,
+                    light_range,
+                    light_spot_size,
+                    light_spot_blend,
+                    camera_fov,
+                    camera_ortho,
+                    camera_ortho_size,
+                    camera_near,
+                    camera_far,
+                    empty_shape,
+                    empty_size,
+                    vertices,
                 }
             })
             .collect();
+        // Resolve parent ids → indices in the snapshot list
+        let id_to_index: std::collections::HashMap<u64, usize> = objects
+            .iter()
+            .enumerate()
+            .filter_map(|(i, o)| o.id.map(|id| (id, i)))
+            .collect();
+        for (i, object) in doc.scene.objects.iter().enumerate() {
+            if let Some(pid) = object.parent {
+                if let Some(&pidx) = id_to_index.get(&pid) {
+                    objects[i].parent = Some(pidx);
+                }
+            }
+        }
         let materials = doc
             .scene
             .materials
@@ -108,9 +263,74 @@ impl ScriptSnapshot {
                 emissive: material.emissive,
             })
             .collect();
+        // Collections
+        let mut collections: Vec<ScriptCollection> = doc
+            .scene
+            .collections
+            .iter()
+            .map(|c| ScriptCollection {
+                id: Some(c.id),
+                name: c.name.clone(),
+                visible: c.visible,
+                objects: Vec::new(),
+            })
+            .collect();
+        let col_id_to_index: std::collections::HashMap<u64, usize> = doc
+            .scene
+            .collections
+            .iter()
+            .enumerate()
+            .map(|(i, c)| (c.id, i))
+            .collect();
+        for (i, object) in doc.scene.objects.iter().enumerate() {
+            if let Some(cid) = object.collection {
+                if let Some(&cidx) = col_id_to_index.get(&cid) {
+                    objects[i].collection = Some(cidx);
+                    collections[cidx].objects.push(i);
+                }
+            }
+        }
+
+        // Keyframes from document animation
+        let mut keyframes = Vec::new();
+        for (i, object) in doc.scene.objects.iter().enumerate() {
+            if let Some(anim) = doc.scene.animation.objects.get(&object.id) {
+                for key in &anim.keys {
+                    if let Some(loc) = key.location {
+                        keyframes.push(ScriptKeyframe {
+                            object: i,
+                            frame: key.frame,
+                            data_path: "location".into(),
+                            value: loc.to_array().to_vec(),
+                        });
+                    }
+                    if let Some(rot) = key.rotation {
+                        let (rx, ry, rz) = rot.to_euler(EulerRot::XYZ);
+                        keyframes.push(ScriptKeyframe {
+                            object: i,
+                            frame: key.frame,
+                            data_path: "rotation_euler".into(),
+                            value: vec![rx, ry, rz],
+                        });
+                    }
+                    if let Some(scl) = key.scale {
+                        keyframes.push(ScriptKeyframe {
+                            object: i,
+                            frame: key.frame,
+                            data_path: "scale".into(),
+                            value: scl.to_array().to_vec(),
+                        });
+                    }
+                }
+            }
+        }
+
         Self {
             objects,
             materials,
+            collections,
+            keyframes,
+            frame_current: doc.scene.animation.frame_current,
             active,
         }
     }
@@ -199,8 +419,28 @@ mod embedded {
                 Some(m) => m.to_string(),
                 None => "None".to_owned(),
             };
+            let parent = match o.parent {
+                Some(p) => p.to_string(),
+                None => "None".to_owned(),
+            };
+            let light_type = match &o.light_type {
+                Some(s) => py_str(s),
+                None => "None".to_owned(),
+            };
+            let light_energy = match o.light_energy {
+                Some(e) => py_f32(e),
+                None => "None".to_owned(),
+            };
+            let light_color = match o.light_color {
+                Some(c) => format!("[{},{},{}]", py_f32(c[0]), py_f32(c[1]), py_f32(c[2])),
+                None => "None".to_owned(),
+            };
+            let camera_fov = match o.camera_fov {
+                Some(f) => py_f32(f),
+                None => "None".to_owned(),
+            };
             objects.push_str(&format!(
-                "{{'id':{id},'name':{name},'type':{ty},'primitive':{prim},'primitive_params':[{params}],'material':{mat},'location':[{lx},{ly},{lz}],'rotation_euler':[{rx},{ry},{rz}],'scale':[{sx},{sy},{sz}],'selected':{sel}}}",
+                "{{'id':{id},'name':{name},'type':{ty},'primitive':{prim},'primitive_params':[{params}],'material':{mat},'location':[{lx},{ly},{lz}],'rotation_euler':[{rx},{ry},{rz}],'scale':[{sx},{sy},{sz}],'selected':{sel},'visible':{vis},'parent':{parent},'light_type':{light_type},'light_energy':{light_energy},'light_color':{light_color},'camera_fov':{camera_fov}}}",
                 name = py_str(&o.name),
                 ty = py_str(&o.object_type),
                 prim = py_str(&o.primitive),
@@ -220,6 +460,7 @@ mod embedded {
                 sy = py_f32(o.scale[1]),
                 sz = py_f32(o.scale[2]),
                 sel = if o.selected { "True" } else { "False" },
+                vis = if o.visible { "True" } else { "False" },
             ));
         }
         objects.push(']');
@@ -335,6 +576,9 @@ def _dumps(o):
 _RESULT = _dumps({{
     "objects": _BC["objects"],
     "materials": _BC["materials"],
+    "collections": _BC.get("collections") or [],
+    "keyframes": _BC.get("keyframes") or [],
+    "frame_current": int(_BC.get("frame_current") or 1),
     "active": _BC.get("active"),
     "stdout": _stdout.getvalue(),
     "stderr": _stderr.getvalue(),
@@ -409,6 +653,12 @@ _RESULT = _dumps({{
                 objects: Vec<ScriptObject>,
                 #[serde(default)]
                 materials: Vec<ScriptMaterial>,
+                #[serde(default)]
+                collections: Vec<crate::scripting::ScriptCollection>,
+                #[serde(default)]
+                keyframes: Vec<crate::scripting::ScriptKeyframe>,
+                #[serde(default = "crate::scripting::default_frame")]
+                frame_current: i32,
                 active: Option<usize>,
                 #[serde(default)]
                 stdout: String,
@@ -440,6 +690,9 @@ _RESULT = _dumps({{
             Ok(ScriptResult {
                 objects: wire.objects,
                 materials: wire.materials,
+                collections: wire.collections,
+                keyframes: wire.keyframes,
+                frame_current: wire.frame_current,
                 active: wire.active,
                 output,
             })

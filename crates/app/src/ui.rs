@@ -1410,7 +1410,7 @@ fn draw_shading_editor(
             let selected = current
                 .map(|m| doc.scene.materials[m].name.clone())
                 .unwrap_or_else(|| "No Material".into());
-            egui::ComboBox::from_id_source("shading_material_slot")
+            egui::ComboBox::from_id_salt("shading_material_slot")
                 .selected_text(selected)
                 .width(180.0)
                 .show_ui(ui, |ui| {
@@ -2003,7 +2003,7 @@ fn draw_shading_editor(
                                         bar_rect,
                                         1.0,
                                         egui::Stroke::new(
-                                            1.0,
+                                            1.0_f32,
                                             egui::Color32::from_gray(100),
                                         ),
                                     );
@@ -2072,7 +2072,7 @@ fn draw_shading_editor(
                                             triangle,
                                             marker_color,
                                             egui::Stroke::new(
-                                                if active == index { 2.0 } else { 1.0 },
+                                                if active == index { 2.0 } else { 1.0_f32 },
                                                 if active == index {
                                                     egui::Color32::WHITE
                                                 } else {
@@ -2431,7 +2431,7 @@ fn draw_shading_editor(
                                                     .add(
                                                         egui::DragValue::new(&mut v)
                                                             .speed(speed)
-                                                            .clamp_range(range)
+                                                            .range(range)
                                                             .min_decimals(2)
                                                             .max_decimals(3),
                                                     )
@@ -2683,7 +2683,7 @@ fn draw_shading_editor(
                 false,
                 egui::Color32::TRANSPARENT,
                 egui::Stroke::new(
-                    if is_hovered { 5.0 } else { 3.0 },
+                    if is_hovered { 5.0 } else { 3.0_f32 },
                     if is_hovered {
                         egui::Color32::from_rgb(0xff, 0x6a, 0x55)
                     } else {
@@ -2736,7 +2736,7 @@ fn draw_shading_editor(
                     points,
                     false,
                     egui::Color32::TRANSPARENT,
-                    egui::Stroke::new(2.5, egui::Color32::LIGHT_BLUE),
+                    egui::Stroke::new(2.5_f32, egui::Color32::LIGHT_BLUE),
                 ));
             }
         }
@@ -3031,7 +3031,7 @@ fn draw_texture_paint_editor(
             )
         };
         let edge = egui::Stroke::new(
-            1.0,
+            1.0_f32,
             egui::Color32::from_rgba_unmultiplied(235, 190, 80, 190),
         );
         for tri in mesh.indices.chunks_exact(3) {
@@ -4174,7 +4174,7 @@ fn draw_animation_workspace(
                 egui::pos2(x, keys_rect.top()),
                 egui::pos2(x, keys_rect.bottom()),
             ],
-            egui::Stroke::new(1.0, egui::Color32::from_gray(if major { 55 } else { 40 })),
+            egui::Stroke::new(1.0_f32, egui::Color32::from_gray(if major { 55 } else { 40 })),
         );
         if major {
             painter.text(
@@ -4227,7 +4227,7 @@ fn draw_animation_workspace(
                 egui::pos2(body_rect.left() + channel_w, y0),
                 egui::pos2(body_rect.left() + channel_w, y1),
             ],
-            egui::Stroke::new(1.0, egui::Color32::from_gray(50)),
+            egui::Stroke::new(1.0_f32, egui::Color32::from_gray(50)),
         );
         // Keys
         if let Some(oa) = doc.scene.animation.objects.get(id) {
@@ -4264,7 +4264,7 @@ fn draw_animation_workspace(
             egui::pos2(px, body_rect.top()),
             egui::pos2(px, body_rect.bottom()),
         ],
-        egui::Stroke::new(2.0, egui::Color32::from_rgb(0xff, 0x66, 0x44)),
+        egui::Stroke::new(2.0_f32, egui::Color32::from_rgb(0xff, 0x66, 0x44)),
     );
 
     // Scrub on keys area
@@ -4720,6 +4720,9 @@ fn apply_script_result(doc: &mut Document, result: &ScriptResult) -> Result<bool
     let initial = ScriptSnapshot::from_document(doc);
     if initial.objects == result.objects
         && initial.materials == result.materials
+        && initial.collections == result.collections
+        && initial.keyframes == result.keyframes
+        && initial.frame_current == result.frame_current
         && initial.active == result.active
     {
         return Ok(false);
@@ -4737,11 +4740,24 @@ fn apply_script_result(doc: &mut Document, result: &ScriptResult) -> Result<bool
         );
     }
     for object in &result.objects {
-        if object.id.is_none() && primitive_from_script(object).is_none() {
+        let is_light_or_camera = object.object_type == "LIGHT" || object.object_type == "CAMERA" || object.object_type == "EMPTY";
+        if object.id.is_none() && !is_light_or_camera && primitive_from_script(object).is_none() {
             return Err(format!(
                 "BlendCraft scripting does not support creating {} objects yet.",
-                object.primitive
+                if object.primitive.is_empty() {
+                    object.object_type.as_str()
+                } else {
+                    object.primitive.as_str()
+                }
             ));
+        }
+        if let Some(p) = object.parent {
+            if p >= result.objects.len() {
+                return Err(format!(
+                    "Script parent index {p} for object {} is out of range.",
+                    object.name
+                ));
+            }
         }
         if object
             .material
@@ -4818,6 +4834,87 @@ fn apply_script_result(doc: &mut Document, result: &ScriptResult) -> Result<bool
     for scripted in &result.objects {
         let id = if let Some(id) = scripted.id {
             id
+        } else if scripted.object_type == "LIGHT" {
+            let lt = match scripted.light_type.as_deref().unwrap_or("POINT") {
+                "SUN" => forge_core::LightType::Sun,
+                "SPOT" => forge_core::LightType::Spot,
+                "AREA" => forge_core::LightType::Area,
+                _ => forge_core::LightType::Point,
+            };
+            let mut ld = forge_core::LightData::new(lt);
+            if let Some(e) = scripted.light_energy {
+                ld.intensity = e;
+            }
+            if let Some(c) = scripted.light_color {
+                ld.color = c;
+            }
+            let mut object =
+                forge_core::scene::Object::new(scripted.name.clone(), forge_core::MeshData::default());
+            let id = doc.scene.alloc_id();
+            object.id = id;
+            object.kind = forge_core::ObjectKind::Light(ld);
+            object.collection = doc.active_collection.filter(|collection| {
+                doc.scene
+                    .collections
+                    .iter()
+                    .any(|item| item.id == *collection)
+            });
+            doc.scene.objects.push(object);
+            id
+        } else if scripted.object_type == "CAMERA" {
+            let mut cd = forge_core::CameraData::default();
+            if let Some(f) = scripted.camera_fov {
+                cd.fov_deg = f;
+            }
+            if let Some(o) = scripted.camera_ortho {
+                cd.ortho = o;
+            }
+            if let Some(s) = scripted.camera_ortho_size {
+                cd.ortho_size = s;
+            }
+            if let Some(n) = scripted.camera_near {
+                cd.near = n;
+            }
+            if let Some(f) = scripted.camera_far {
+                cd.far = f;
+            }
+            let mut object =
+                forge_core::scene::Object::new(scripted.name.clone(), forge_core::MeshData::default());
+            let id = doc.scene.alloc_id();
+            object.id = id;
+            object.kind = forge_core::ObjectKind::Camera(cd);
+            object.collection = doc.active_collection.filter(|collection| {
+                doc.scene
+                    .collections
+                    .iter()
+                    .any(|item| item.id == *collection)
+            });
+            doc.scene.objects.push(object);
+            id
+        } else if scripted.object_type == "EMPTY" {
+            let shape = match scripted.empty_shape.as_deref().unwrap_or("Plain Axes") {
+                "Arrows" => forge_core::EmptyShape::Arrows,
+                "Single Arrow" => forge_core::EmptyShape::SingleArrow,
+                "Circle" => forge_core::EmptyShape::Circle,
+                "Cube" => forge_core::EmptyShape::Cube,
+                "Sphere" => forge_core::EmptyShape::Sphere,
+                "Cone" => forge_core::EmptyShape::Cone,
+                _ => forge_core::EmptyShape::PlainAxes,
+            };
+            let size = scripted.empty_size.unwrap_or(1.0);
+            let mut object =
+                forge_core::scene::Object::new(scripted.name.clone(), forge_core::MeshData::default());
+            let id = doc.scene.alloc_id();
+            object.id = id;
+            object.kind = forge_core::ObjectKind::Empty { shape, size };
+            object.collection = doc.active_collection.filter(|collection| {
+                doc.scene
+                    .collections
+                    .iter()
+                    .any(|item| item.id == *collection)
+            });
+            doc.scene.objects.push(object);
+            id
         } else {
             let primitive = primitive_from_script(scripted)
                 .expect("script primitives were validated before scene mutation");
@@ -4846,8 +4943,163 @@ fn apply_script_result(doc: &mut Document, result: &ScriptResult) -> Result<bool
         object.rotation = crate::scripting::rotation_quaternion(scripted.rotation_euler);
         object.scale = Vec3::from_array(scripted.scale);
         object.material = scripted.material;
+        object.visible = scripted.visible;
+        // Update light/camera data on existing objects too
+        match scripted.object_type.as_str() {
+            "LIGHT" => {
+                let lt = match scripted.light_type.as_deref().unwrap_or("POINT") {
+                    "SUN" => forge_core::LightType::Sun,
+                    "SPOT" => forge_core::LightType::Spot,
+                    "AREA" => forge_core::LightType::Area,
+                    _ => forge_core::LightType::Point,
+                };
+                let mut ld = match &object.kind {
+                    forge_core::ObjectKind::Light(l) => *l,
+                    _ => forge_core::LightData::new(lt),
+                };
+                ld.kind = lt;
+                if let Some(e) = scripted.light_energy {
+                    ld.intensity = e;
+                }
+                if let Some(c) = scripted.light_color {
+                    ld.color = c;
+                }
+                if let Some(r) = scripted.light_range {
+                    ld.range = r;
+                }
+                if let Some(s) = scripted.light_spot_size {
+                    ld.spot_angle_deg = s;
+                }
+                if let Some(b) = scripted.light_spot_blend {
+                    ld.spot_blend = b;
+                }
+                object.kind = forge_core::ObjectKind::Light(ld);
+            }
+            "CAMERA" => {
+                let mut cd = match &object.kind {
+                    forge_core::ObjectKind::Camera(c) => *c,
+                    _ => forge_core::CameraData::default(),
+                };
+                if let Some(f) = scripted.camera_fov {
+                    cd.fov_deg = f;
+                }
+                if let Some(o) = scripted.camera_ortho {
+                    cd.ortho = o;
+                }
+                if let Some(s) = scripted.camera_ortho_size {
+                    cd.ortho_size = s;
+                }
+                if let Some(n) = scripted.camera_near {
+                    cd.near = n;
+                }
+                if let Some(f) = scripted.camera_far {
+                    cd.far = f;
+                }
+                object.kind = forge_core::ObjectKind::Camera(cd);
+            }
+            "EMPTY" => {
+                let shape = match scripted.empty_shape.as_deref().unwrap_or("Plain Axes") {
+                    "Arrows" => forge_core::EmptyShape::Arrows,
+                    "Single Arrow" => forge_core::EmptyShape::SingleArrow,
+                    "Circle" => forge_core::EmptyShape::Circle,
+                    "Cube" => forge_core::EmptyShape::Cube,
+                    "Sphere" => forge_core::EmptyShape::Sphere,
+                    "Cone" => forge_core::EmptyShape::Cone,
+                    _ => forge_core::EmptyShape::PlainAxes,
+                };
+                let size = scripted.empty_size.unwrap_or(1.0);
+                object.kind = forge_core::ObjectKind::Empty { shape, size };
+            }
+            _ => {}
+        }
+        // Material slots: slot 0 drives object.material
+        if let Some(Some(mi)) = scripted.material_slots.get(scripted.active_material_index) {
+            object.material = Some(*mi);
+        } else if let Some(Some(mi)) = scripted.material_slots.first() {
+            object.material = Some(*mi);
+        }
         result_ids.push(id);
     }
+    // Second pass: parenting (indices → ids)
+    for (scripted, id) in result.objects.iter().zip(result_ids.iter().copied()) {
+        if let Some(pidx) = scripted.parent {
+            if let Some(&pid) = result_ids.get(pidx) {
+                if pid != id {
+                    if let Some(object) = doc.scene.objects.iter_mut().find(|o| o.id == id) {
+                        object.parent = Some(pid);
+                    }
+                }
+            }
+        } else if let Some(object) = doc.scene.objects.iter_mut().find(|o| o.id == id) {
+            object.parent = None;
+        }
+    }
+
+    // Collections
+    let mut col_ids = Vec::with_capacity(result.collections.len());
+    for scripted in &result.collections {
+        let id = if let Some(id) = scripted.id {
+            if let Some(c) = doc.scene.collections.iter_mut().find(|c| c.id == id) {
+                c.name.clone_from(&scripted.name);
+                c.visible = scripted.visible;
+            }
+            id
+        } else {
+            let id = doc.scene.alloc_id();
+            doc.scene.collections.push(forge_core::Collection {
+                id,
+                name: scripted.name.clone(),
+                visible: scripted.visible,
+            });
+            id
+        };
+        col_ids.push(id);
+    }
+    // Link objects to collections
+    for (scripted, id) in result.objects.iter().zip(result_ids.iter().copied()) {
+        if let Some(object) = doc.scene.objects.iter_mut().find(|o| o.id == id) {
+            object.collection = scripted
+                .collection
+                .and_then(|i| col_ids.get(i).copied());
+        }
+    }
+
+    // Keyframes
+    doc.scene.animation.frame_current = result.frame_current;
+    for kf in &result.keyframes {
+        let Some(&oid) = result_ids.get(kf.object) else {
+            continue;
+        };
+        let anim = doc.scene.animation.objects.entry(oid).or_default();
+        match kf.data_path.as_str() {
+            "location" if kf.value.len() >= 3 => {
+                anim.insert_or_merge(
+                    kf.frame,
+                    Some(Vec3::new(kf.value[0], kf.value[1], kf.value[2])),
+                    None,
+                    None,
+                );
+            }
+            "rotation_euler" if kf.value.len() >= 3 => {
+                let q = crate::scripting::rotation_quaternion([
+                    kf.value[0],
+                    kf.value[1],
+                    kf.value[2],
+                ]);
+                anim.insert_or_merge(kf.frame, None, Some(q), None);
+            }
+            "scale" if kf.value.len() >= 3 => {
+                anim.insert_or_merge(
+                    kf.frame,
+                    None,
+                    None,
+                    Some(Vec3::new(kf.value[0], kf.value[1], kf.value[2])),
+                );
+            }
+            _ => {}
+        }
+    }
+
     doc.selection.clear();
     for (scripted, id) in result.objects.iter().zip(result_ids.iter().copied()) {
         if scripted.selected {
@@ -4882,7 +5134,7 @@ fn primitive_from_script(object: &crate::scripting::ScriptObject) -> Option<Prim
             segments: parameter(1, 32.0) as u32,
             rings: parameter(2, 16.0) as u32,
         },
-        "Ico Sphere" => P::IcoSphere {
+        "Ico Sphere" | "IcoSphere" => P::IcoSphere {
             radius: parameter(0, 1.0),
             subdivisions: parameter(1, 2.0) as u32,
         },
@@ -4904,6 +5156,30 @@ fn primitive_from_script(object: &crate::scripting::ScriptObject) -> Option<Prim
         },
         "Monkey" => P::Monkey {
             size: parameter(0, 2.0),
+        },
+        "Circle" => P::Circle {
+            radius: parameter(0, 1.0),
+            segments: parameter(1, 32.0) as u32,
+        },
+        "Grid" => P::Grid {
+            size: parameter(0, 2.0),
+            x_div: parameter(1, 10.0) as u32,
+            y_div: parameter(2, 10.0) as u32,
+        },
+        "Capsule" => P::Capsule {
+            radius: parameter(0, 0.5),
+            height: parameter(1, 2.0),
+            segments: parameter(2, 16.0) as u32,
+            rings: parameter(3, 8.0) as u32,
+        },
+        "Pyramid" => P::Pyramid {
+            size: parameter(0, 2.0),
+            height: parameter(1, 2.0),
+        },
+        "Tube" => P::Tube {
+            radius: parameter(0, 1.0),
+            height: parameter(1, 2.0),
+            segments: parameter(2, 32.0) as u32,
         },
         _ => return None,
     })
@@ -4934,8 +5210,30 @@ mod scripting_apply_tests {
                 rotation_euler: [0.0; 3],
                 scale: [1.0; 3],
                 selected: true,
+                visible: true,
+                parent: None,
+                light_type: None,
+                light_energy: None,
+                light_color: None,
+                camera_fov: None,
+                camera_ortho: None,
+                camera_ortho_size: None,
+                camera_near: None,
+                camera_far: None,
+                empty_shape: None,
+                empty_size: None,
+                material_slots: Vec::new(),
+                active_material_index: 0,
+                collection: None,
+                light_range: None,
+                light_spot_size: None,
+                light_spot_blend: None,
+                vertices: Vec::new(),
             }],
             materials: Vec::new(),
+            collections: Vec::new(),
+            keyframes: Vec::new(),
+            frame_current: 1,
             active: Some(0),
             output: String::new(),
         };
@@ -4967,8 +5265,30 @@ mod scripting_apply_tests {
                 rotation_euler: [0.0; 3],
                 scale: [1.0; 3],
                 selected: false,
+                visible: true,
+                parent: None,
+                light_type: None,
+                light_energy: None,
+                light_color: None,
+                camera_fov: None,
+                camera_ortho: None,
+                camera_ortho_size: None,
+                camera_near: None,
+                camera_far: None,
+                empty_shape: None,
+                empty_size: None,
+                material_slots: Vec::new(),
+                active_material_index: 0,
+                collection: None,
+                light_range: None,
+                light_spot_size: None,
+                light_spot_blend: None,
+                vertices: Vec::new(),
             }],
             materials: Vec::new(),
+            collections: Vec::new(),
+            keyframes: Vec::new(),
+            frame_current: 1,
             active: None,
             output: String::new(),
         };
@@ -4995,8 +5315,30 @@ mod scripting_apply_tests {
                 rotation_euler: [0.0; 3],
                 scale: [1.0; 3],
                 selected: true,
+                visible: true,
+                parent: None,
+                light_type: None,
+                light_energy: None,
+                light_color: None,
+                camera_fov: None,
+                camera_ortho: None,
+                camera_ortho_size: None,
+                camera_near: None,
+                camera_far: None,
+                empty_shape: None,
+                empty_size: None,
+                material_slots: Vec::new(),
+                active_material_index: 0,
+                collection: None,
+                light_range: None,
+                light_spot_size: None,
+                light_spot_blend: None,
+                vertices: Vec::new(),
             }],
             materials: Vec::new(),
+            collections: Vec::new(),
+            keyframes: Vec::new(),
+            frame_current: 1,
             active: Some(0),
             output: String::new(),
         };
@@ -5035,6 +5377,25 @@ mod scripting_apply_tests {
                 rotation_euler: [0.0; 3],
                 scale: [1.0; 3],
                 selected: true,
+                visible: true,
+                parent: None,
+                light_type: None,
+                light_energy: None,
+                light_color: None,
+                camera_fov: None,
+                camera_ortho: None,
+                camera_ortho_size: None,
+                camera_near: None,
+                camera_far: None,
+                empty_shape: None,
+                empty_size: None,
+                material_slots: Vec::new(),
+                active_material_index: 0,
+                collection: None,
+                light_range: None,
+                light_spot_size: None,
+                light_spot_blend: None,
+                vertices: Vec::new(),
             }],
             materials: vec![ScriptMaterial {
                 name: "Script Material".to_owned(),
@@ -5043,6 +5404,9 @@ mod scripting_apply_tests {
                 roughness: 0.2,
                 emissive: [0.1, 0.0, 0.0],
             }],
+            collections: Vec::new(),
+            keyframes: Vec::new(),
+            frame_current: 1,
             active: Some(0),
             output: String::new(),
         };
@@ -5082,12 +5446,34 @@ mod scripting_apply_tests {
                         primitive: "Cube".to_owned(),
                         primitive_params: vec![2.0],
                         material: None,
+                        material_slots: Vec::new(),
+                        active_material_index: 0,
                         location: [0.0; 3],
                         rotation_euler: [0.0; 3],
                         scale: [1.0; 3],
                         selected: true,
+                        visible: true,
+                        parent: None,
+                        collection: None,
+                        light_type: None,
+                        light_energy: None,
+                        light_color: None,
+                        light_range: None,
+                        light_spot_size: None,
+                        light_spot_blend: None,
+                        camera_fov: None,
+                        camera_ortho: None,
+                        camera_ortho_size: None,
+                        camera_near: None,
+                        camera_far: None,
+                        empty_shape: None,
+                        empty_size: None,
+                        vertices: Vec::new(),
                     }],
                     materials: Vec::new(),
+                    collections: Vec::new(),
+                    keyframes: Vec::new(),
+                    frame_current: 1,
                     active: Some(0),
                     output: String::new(),
                 }),
@@ -5165,7 +5551,7 @@ fn draw_render_result_view(ui: &mut egui::Ui, st: &mut UiState, actions: &mut Ve
     painter.rect_stroke(
         frame,
         2.0,
-        egui::Stroke::new(1.5, egui::Color32::from_gray(70)),
+        egui::Stroke::new(1.5_f32, egui::Color32::from_gray(70)),
     );
     painter.text(
         frame.center(),
@@ -5252,7 +5638,7 @@ fn draw_compositor_preview(
         painter.rect_stroke(
             image_rect,
             0.0,
-            egui::Stroke::new(1.0, egui::Color32::from_gray(65)),
+            egui::Stroke::new(1.0_f32, egui::Color32::from_gray(65)),
         );
     } else {
         painter.text(
@@ -5466,7 +5852,7 @@ fn draw_compositing_editor(
             false,
             egui::Color32::TRANSPARENT,
             egui::Stroke::new(
-                if hovered { 3.5 } else { 2.5 },
+                if hovered { 3.5 } else { 2.5_f32 },
                 if hovered {
                     egui::Color32::LIGHT_BLUE
                 } else {
@@ -5486,7 +5872,7 @@ fn draw_compositing_editor(
                 points,
                 false,
                 egui::Color32::TRANSPARENT,
-                egui::Stroke::new(2.0, egui::Color32::LIGHT_BLUE),
+                egui::Stroke::new(2.0_f32, egui::Color32::LIGHT_BLUE),
             ));
         }
     }
@@ -5591,7 +5977,7 @@ fn draw_compositing_editor(
                 st.compositor_link_from = Some(id);
             }
         }
-        ui.allocate_ui_at_rect(body_rect.shrink(8.0), |ui| {
+        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(body_rect.shrink(8.0)), |ui| {
             ui.set_clip_rect(canvas);
             if zoom < 0.65 {
                 ui.weak("Zoom in to edit node values");
@@ -5740,7 +6126,7 @@ fn commit_compositor_graph(doc: &mut Document, before: CompositorGraph) {
 fn draw_timeline(
     ui: &mut egui::Ui,
     doc: &mut Document,
-    st: &mut UiState,
+    _st: &mut UiState,
     actions: &mut Vec<Action>,
 ) {
     let anim = &mut doc.scene.animation;
@@ -5870,7 +6256,7 @@ fn draw_timeline(
                 egui::pos2(x, rect.bottom()),
                 egui::pos2(x, rect.bottom() - if major { 10.0 } else { 5.0 }),
             ],
-            egui::Stroke::new(1.0, egui::Color32::from_gray(if major { 120 } else { 70 })),
+            egui::Stroke::new(1.0_f32, egui::Color32::from_gray(if major { 120 } else { 70 })),
         );
         if major {
             painter.text(
@@ -5920,7 +6306,7 @@ fn draw_timeline(
     let px = x_of(anim.frame_current as f32);
     painter.line_segment(
         [egui::pos2(px, rect.top()), egui::pos2(px, rect.bottom())],
-        egui::Stroke::new(2.0, egui::Color32::from_rgb(0xff, 0x66, 0x44)),
+        egui::Stroke::new(2.0_f32, egui::Color32::from_rgb(0xff, 0x66, 0x44)),
     );
 
     if response.dragged() || response.clicked() {

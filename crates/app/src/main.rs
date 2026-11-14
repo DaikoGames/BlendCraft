@@ -264,7 +264,7 @@ fn draw_edit_gizmo_ui(
         ) else {
             continue;
         };
-        let stroke = egui::Stroke::new(if on { 3.5 } else { 2.5 }, col);
+        let stroke = egui::Stroke::new(if on { 3.5 } else { 2.5_f32 }, col);
         painter.line_segment([pt(p0), pt(p1)], stroke);
         let d2 = (p1 - p0).normalize_or_zero();
         let n = glam::Vec2::new(-d2.y, d2.x);
@@ -908,7 +908,7 @@ impl App {
             return;
         };
         let len = self.edit_gizmo_len(origin);
-        let [vx, vy, vw, vh] = self.viewport;
+        // (viewport components unused here)
         let cam = &self.camera;
         let vp = self.viewport;
         use crate::tools::project_px;
@@ -956,7 +956,7 @@ impl App {
             self.camera.ray((nx, ny), vw / vh)
         };
         // param along axis from ray
-        let start = {
+        let _start = {
             let w = rd.cross(axis_dir);
             let den = w.length_squared();
             if den < 1e-10 {
