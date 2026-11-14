@@ -24,6 +24,8 @@ pub struct OrbitCamera {
     pub near: f32,
     pub far: f32,
     pub fixed: Option<FixedView>,
+    /// Orthographic projection for the free (orbit) camera.
+    pub ortho: bool,
 }
 
 impl Default for OrbitCamera {
@@ -37,6 +39,7 @@ impl Default for OrbitCamera {
             near: 0.05,
             far: 2000.0,
             fixed: None,
+            ortho: false,
         }
     }
 }
@@ -74,6 +77,21 @@ impl OrbitCamera {
             };
             return proj * f.view;
         }
+        if self.ortho {
+            // Same apparent size at the orbit target as the perspective view.
+            let h = 2.0 * self.distance * (self.fov_y * 0.5).tan();
+            // Symmetric depth range so geometry behind the eye stays visible.
+            let r = self.far.max(self.distance * 4.0) * 0.5;
+            let proj = Mat4::orthographic_rh(
+                -h * aspect * 0.5,
+                h * aspect * 0.5,
+                -h * 0.5,
+                h * 0.5,
+                -r,
+                r,
+            );
+            return proj * self.view();
+        }
         Mat4::perspective_rh(self.fov_y, aspect, self.near, self.far) * self.view()
     }
 
@@ -90,7 +108,7 @@ impl OrbitCamera {
             return;
         }
         self.yaw -= dx * 0.005;
-        self.pitch = (self.pitch + dy * 0.005).clamp(-1.55, 1.55);
+        self.pitch = (self.pitch + dy * 0.005).clamp(-1.5706, 1.5706);
     }
 
     pub fn pan(&mut self, dx: f32, dy: f32) {

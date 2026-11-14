@@ -1,6 +1,7 @@
 mod fonts_io;
 mod gizmo;
 mod keymap;
+mod navgizmo;
 mod overlay;
 mod recent;
 mod scripting;
@@ -170,6 +171,12 @@ struct App {
     viewport: [f32; 4],
     uploaded: u64,
     last_anim_tick: std::time::Instant,
+    /// Fractional part (0..1) of the current frame while playing, for smooth motion.
+    anim_subframe: f32,
+    /// Object transforms changed by playback only; GPU matrices need a refresh.
+    anim_gpu_dirty: bool,
+    /// Running eased transition of the orbit camera to an axis view.
+    view_anim: Option<ViewAnim>,
     title: String,
     initial: Option<PathBuf>,
 }
@@ -190,6 +197,13 @@ fn highlights(doc: &Document) -> Vec<Highlight> {
             }
         })
         .collect()
+}
+
+/// Smooth camera move to an axis-aligned view (yaw, pitch pairs).
+struct ViewAnim {
+    from: (f32, f32),
+    to: (f32, f32),
+    start: std::time::Instant,
 }
 
 fn ext_of(p: &Path) -> String {
@@ -340,6 +354,9 @@ impl App {
             viewport: [0.0, 0.0, 1280.0, 720.0],
             uploaded: u64::MAX,
             last_anim_tick: std::time::Instant::now(),
+            anim_subframe: 0.0,
+            anim_gpu_dirty: false,
+            view_anim: None,
             title: String::new(),
             initial,
         }
@@ -802,33 +819,122 @@ impl App {
     }
 
     // ------------------------------------------------------------------ camera view
+    /// Handle a click / drag on the viewport navigation gizmo.
+    fn apply_nav(&mut self, action: navgizmo::NavAction) {
+        use navgizmo::NavAction as N;
+        match action {
+            N::SnapView { yaw, pitch } => {
+                // Snapping to an axis leaves camera view, like Blender.
+                if self.camera_view.is_some() {
+                    self.camera_view = None;
+                    self.camera.fixed = None;
+                }
+                self.view_anim = Some(ViewAnim {
+                    from: (self.camera.yaw, self.camera.pitch),
+                    to: (yaw, pitch),
+                    start: std::time::Instant::now(),
+                });
+            }
+            N::Orbit(dx, dy) => {
+                self.view_anim = None;
+                self.camera.orbit(dx, dy);
+            }
+            N::Pan(dx, dy) => self.camera.pan(dx, dy),
+            N::Zoom(amount) => self.camera.zoom(amount),
+            N::ToggleCameraView => self.toggle_camera_view(),
+            N::TogglePerspective => {
+                self.camera.ortho = !self.camera.ortho;
+                self.status(if self.camera.ortho {
+                    "Orthographic view"
+                } else {
+                    "Perspective view"
+                });
+            }
+        }
+    }
+
+    /// Advance the eased axis-view transition, if one is running.
+    fn step_view_anim(&mut self) {
+        let Some((from, to, start)) = self.view_anim.as_ref().map(|a| (a.from, a.to, a.start))
+        else {
+            return;
+        };
+        let t = (start.elapsed().as_secs_f32() / 0.18).clamp(0.0, 1.0);
+        let e = t * t * (3.0 - 2.0 * t);
+        let tau = std::f32::consts::TAU;
+        let mut dyaw = (to.0 - from.0) % tau;
+        if dyaw > std::f32::consts::PI {
+            dyaw -= tau;
+        } else if dyaw < -std::f32::consts::PI {
+            dyaw += tau;
+        }
+        self.camera.yaw = from.0 + dyaw * e;
+        self.camera.pitch = from.1 + (to.1 - from.1) * e;
+        if t >= 1.0 {
+            self.camera.yaw = to.0;
+            self.camera.pitch = to.1;
+            self.view_anim = None;
+        }
+    }
+
+    /// Fixed view for a camera object at the scene's current transforms.
+    fn fixed_view_for(&self, id: u64) -> Option<FixedView> {
+        let i = self.doc.scene.index_of(id)?;
+        match &self.doc.scene.objects[i].kind {
+            ObjectKind::Camera(c) => {
+                let w = self.doc.scene.world_matrices()[i];
+                let (_, r, t) = w.to_scale_rotation_translation();
+                Some(FixedView {
+                    eye: t,
+                    view: Mat4::from_rotation_translation(r, t).inverse(),
+                    fov_y: c.fov_deg.to_radians(),
+                    near: c.near,
+                    far: c.far,
+                    ortho_height: c.ortho.then_some(c.ortho_size),
+                })
+            }
+            _ => None,
+        }
+    }
+
     fn sync_camera_view(&mut self) {
         let Some(id) = self.camera_view else {
             self.camera.fixed = None;
             return;
         };
-        let view = match self.doc.scene.index_of(id) {
-            Some(i) => match &self.doc.scene.objects[i].kind {
-                ObjectKind::Camera(c) => {
-                    let w = self.doc.scene.world_matrices()[i];
-                    let (_, r, t) = w.to_scale_rotation_translation();
-                    Some(FixedView {
-                        eye: t,
-                        view: Mat4::from_rotation_translation(r, t).inverse(),
-                        fov_y: c.fov_deg.to_radians(),
-                        near: c.near,
-                        far: c.far,
-                        ortho_height: c.ortho.then_some(c.ortho_size),
-                    })
-                }
-                _ => None,
-            },
-            None => None,
-        };
+        let view = self.fixed_view_for(id);
         if view.is_none() {
             self.camera_view = None;
         }
         self.camera.fixed = view;
+    }
+
+    /// Camera used for offline renders at the scene's *current* transforms.
+    /// Uses the camera you are looking through, otherwise the first camera that has
+    /// animation keys, otherwise the plain viewport camera.
+    fn render_camera(&self) -> OrbitCamera {
+        let mut cam = self.camera.clone();
+        let id = self.camera_view.or_else(|| {
+            self.doc
+                .scene
+                .objects
+                .iter()
+                .find(|o| {
+                    matches!(o.kind, ObjectKind::Camera(_))
+                        && self
+                            .doc
+                            .scene
+                            .animation
+                            .objects
+                            .get(&o.id)
+                            .map_or(false, |a| !a.keys.is_empty())
+                })
+                .map(|o| o.id)
+        });
+        if let Some(v) = id.and_then(|id| self.fixed_view_for(id)) {
+            cam.fixed = Some(v);
+        }
+        cam
     }
 
     fn toggle_camera_view(&mut self) {
@@ -1994,8 +2100,53 @@ impl App {
         }
     }
 
+    /// Import every model (.fbx / .obj / .glb) inside a Unity `.unitypackage`.
+    fn import_unitypackage(&mut self, path: &Path) {
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = path;
+            self.status("Unity package import is not available on WebAssembly yet");
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            match forge_io::load_unitypackage(path) {
+                Ok((models, notes)) => {
+                    if models.is_empty() {
+                        let extra = notes.first().map(|n| format!(" ({n})")).unwrap_or_default();
+                        self.status(format!(
+                            "No importable models (.fbx/.obj/.glb) found in {}{extra}",
+                            path.display()
+                        ));
+                        return;
+                    }
+                    let count = models.len();
+                    let mut objects = 0usize;
+                    for (_unity_path, scene) in models {
+                        objects += scene.objects.len();
+                        self.doc.import_scene(scene);
+                    }
+                    self.frame(false);
+                    let skipped = if notes.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" · {} asset(s) skipped", notes.len())
+                    };
+                    self.status(format!(
+                        "Imported {count} model(s), {objects} object(s) from {}{skipped}",
+                        path.display()
+                    ));
+                }
+                Err(e) => self.status(format!("Import failed: {e:#}")),
+            }
+        }
+    }
+
     fn import_path(&mut self, path: &Path) {
         let ext = ext_of(path);
+        if ext == "unitypackage" {
+            self.import_unitypackage(path);
+            return;
+        }
         let res = match ext.as_str() {
             "glb" | "gltf" => forge_io::load_gltf(path),
             "obj" => forge_io::load_obj(path),
@@ -2175,7 +2326,7 @@ impl App {
                 #[cfg(not(target_arch = "wasm32"))]
                 {
                     if let Some(p) = rfd::FileDialog::new()
-                        .add_filter("3D models", &["glb", "gltf", "obj", "fbx"])
+                        .add_filter("3D models", &["glb", "gltf", "obj", "fbx", "unitypackage"])
                         .pick_file()
                     {
                         self.import_path(&p);
@@ -3333,7 +3484,44 @@ impl App {
 
     /// Write evaluated animation onto object transforms for the current frame.
     fn apply_animation_frame(&mut self) {
+        self.anim_subframe = 0.0;
         let frame = self.doc.scene.animation.frame_current as f32;
+        self.eval_animation_at(frame);
+        self.doc.touch();
+    }
+
+    /// True when a light is animated directly or sits under an animated parent.
+    fn animation_moves_lights(&self) -> bool {
+        let anim = &self.doc.scene.animation.objects;
+        let animated = |id: u64| anim.get(&id).map_or(false, |a| !a.keys.is_empty());
+        self.doc.scene.objects.iter().any(|o| {
+            if !matches!(o.kind, ObjectKind::Light(_)) {
+                return false;
+            }
+            let mut cur = Some(o.id);
+            let mut guard = 0;
+            while let Some(id) = cur {
+                if animated(id) {
+                    return true;
+                }
+                guard += 1;
+                if guard > 64 {
+                    break;
+                }
+                cur = self
+                    .doc
+                    .scene
+                    .index_of(id)
+                    .and_then(|i| self.doc.scene.objects[i].parent);
+            }
+            false
+        })
+    }
+
+    /// Evaluate keyframes at a (possibly fractional) frame and write the object
+    /// transforms. Does not bump the document version, so playback does not force
+    /// a full GPU scene rebuild every tick.
+    fn eval_animation_at(&mut self, frame: f32) {
         let keys: Vec<(
             u64,
             (Option<glam::Vec3>, Option<glam::Quat>, Option<glam::Vec3>),
@@ -3360,7 +3548,6 @@ impl App {
                 o.scale = v;
             }
         }
-        self.doc.touch();
     }
 
     fn render_image(&mut self) {
@@ -3393,7 +3580,7 @@ impl App {
                     .set_scene(&self.doc.scene, &highlights(&self.doc));
             }
             self.uploaded = self.doc.version;
-            let cam = self.camera.clone();
+            let cam = self.render_camera();
             let settings = self.settings.clone();
             let result = {
                 let g = self.gfx.as_mut().unwrap();
@@ -3441,10 +3628,11 @@ impl App {
                 return;
             }
             self.uploaded = self.doc.version;
+            let cam = self.render_camera();
             let result = {
                 let g = self.gfx.as_mut().unwrap();
                 g.renderer
-                    .capture_with(&self.camera, &self.settings, w, h, false)
+                    .capture_with(&cam, &self.settings, w, h, false)
             };
             match result {
                 Ok(rgba)
@@ -3661,7 +3849,8 @@ impl App {
                 self.apply_animation_frame();
 
                 let highlight = highlights(&self.doc);
-                let cam = self.camera.clone();
+                // Re-evaluate the camera for THIS frame (it is an animated object).
+                let cam = self.render_camera();
                 let settings = self.settings.clone();
                 let result = {
                     let g = self.gfx.as_mut().unwrap();
@@ -4282,11 +4471,11 @@ impl App {
 
     // ------------------------------------------------------------------ frame
     fn redraw(&mut self, el: &ActiveEventLoop) {
-        self.sync_camera_view();
-
         // Advance timeline when playing (real-time FPS).
         // Accumulates time so slow frames still keep overall speed correct:
-        // at 24 fps, 24 steps ≈ 1 second of wall clock.
+        // at 24 fps, 24 steps ≈ 1 second of wall clock. The leftover time is turned
+        // into a fractional frame so motion is evaluated every display refresh
+        // (smooth) instead of only 24 times per second (choppy camera).
         if self.doc.scene.animation.playing {
             let fps = self.doc.scene.animation.fps.max(1) as f32;
             let frame_dt = 1.0 / fps;
@@ -4303,9 +4492,23 @@ impl App {
                 // Keep residual time so we do not drift slow.
                 self.last_anim_tick = std::time::Instant::now()
                     - std::time::Duration::from_secs_f32(elapsed.max(0.0));
-                self.apply_animation_frame();
             }
+            self.anim_subframe = (elapsed / frame_dt).clamp(0.0, 0.999);
+            let frame = self.doc.scene.animation.frame_current as f32 + self.anim_subframe;
+            self.eval_animation_at(frame);
+            if self.animation_moves_lights() {
+                // Light positions are baked into the scene upload: full refresh.
+                self.doc.touch();
+            } else {
+                self.anim_gpu_dirty = true;
+            }
+        } else if self.anim_subframe != 0.0 {
+            // Playback just stopped: snap back onto the whole frame.
+            self.apply_animation_frame();
         }
+        self.step_view_anim();
+        // Camera view follows the (already updated) camera object this very frame.
+        self.sync_camera_view();
 
         // 1) build the UI
         let raw = match self.gfx.as_mut() {
@@ -4321,6 +4524,15 @@ impl App {
             )
         });
         let mut actions = Vec::new();
+        let mut nav_actions: Vec<navgizmo::NavAction> = Vec::new();
+        // The zoom / pan / camera / projection buttons are Object Mode only.
+        let nav_full = !self.doc.in_edit_mode()
+            && !self.doc.sculpt_mode
+            && !self.doc.uv_mode
+            && !self.doc.paint_mode
+            && !self.doc.pose_mode
+            && !self.doc.armature_edit;
+        let nav_in_camera = self.camera_view.is_some();
         let mut rect = egui::Rect::NOTHING;
         let rendering_ws =
             (self.ui.rendering_mode || self.ui.compositing_mode || self.ui.scripting_mode)
@@ -4340,6 +4552,7 @@ impl App {
             // Rendering workspace: no 3D overlays / gizmos / tool HUD — only the Image editor UI.
             if !rendering_ws {
                 tools::draw_toolbar(ctx, r, &mut self.ts);
+                nav_actions = navgizmo::draw(ctx, &self.camera, r, nav_full, nav_in_camera);
                 let measure_preview = match (self.measure_a, self.measure_b) {
                     (Some(a), Some(b)) => Some((a, b)),
                     _ => None,
@@ -4392,6 +4605,9 @@ impl App {
         for a in actions {
             self.apply(a, el);
         }
+        for a in nav_actions {
+            self.apply_nav(a);
+        }
         self.sync_camera_view();
 
         // 3) window title
@@ -4419,6 +4635,12 @@ impl App {
             let hl = highlights(&self.doc);
             g.renderer.set_scene(&self.doc.scene, &hl);
             self.uploaded = self.doc.version;
+            self.anim_gpu_dirty = false;
+        } else if self.anim_gpu_dirty {
+            // Playback only moved transforms: cheap matrix refresh, no scene rebuild.
+            let hl = highlights(&self.doc);
+            g.renderer.update_transforms(&self.doc.scene, &hl);
+            self.anim_gpu_dirty = false;
         }
 
         // 5) render 3D + egui overlay

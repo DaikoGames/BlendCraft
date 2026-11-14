@@ -82,6 +82,9 @@ struct Draw {
 }
 
 struct GpuObject {
+    /// Index of this object in `Scene::objects` (cameras, lights and empties are
+    /// not uploaded, so GPU object order differs from scene order).
+    scene_index: usize,
     buffers: Arc<MeshBuffers>,
     model_buf: wgpu::Buffer,
     model_bg: wgpu::BindGroup,
@@ -755,6 +758,7 @@ fn vs_main(@location(0) pos: vec3<f32>) -> @builtin(position) vec4<f32> {
                 }],
             });
             objects.push(GpuObject {
+                scene_index: i,
                 buffers,
                 model_buf,
                 model_bg,
@@ -1402,17 +1406,16 @@ fn vs_main(@location(0) pos: vec3<f32>) -> @builtin(position) vec4<f32> {
     /// Call this instead of `set_scene` when meshes/materials did not change.
     pub fn update_transforms(&mut self, scene: &Scene, highlight: &[Highlight]) {
         let worlds = scene.world_matrices();
-        let n = self
-            .objects
-            .len()
-            .min(scene.objects.len())
-            .min(worlds.len());
-        for i in 0..n {
+        for obj in self.objects.iter_mut() {
+            let i = obj.scene_index;
+            let Some(world) = worlds.get(i) else {
+                continue;
+            };
             let hl = highlight.get(i).copied().unwrap_or(Highlight::None);
-            let mu = model_uniform(&worlds[i], hl);
+            let mu = model_uniform(world, hl);
             self.queue
-                .write_buffer(&self.objects[i].model_buf, 0, bytemuck::bytes_of(&mu));
-            self.objects[i].highlight = hl;
+                .write_buffer(&obj.model_buf, 0, bytemuck::bytes_of(&mu));
+            obj.highlight = hl;
         }
     }
 

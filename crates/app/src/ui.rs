@@ -6369,7 +6369,7 @@ fn menu_bar(
                 ui,
                 actions,
                 b,
-                "Import… (glTF, GLB, OBJ, FBX)",
+                "Import… (glTF, GLB, OBJ, FBX, Unity package)",
                 Action::Import,
                 true,
             );

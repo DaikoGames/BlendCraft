@@ -11,9 +11,13 @@ use std::sync::Arc;
 mod export;
 mod fbx;
 mod obj;
+#[cfg(not(target_arch = "wasm32"))]
+mod unity;
 pub use export::{export_glb, export_obj};
 pub use fbx::{export_fbx, load_fbx, load_fbx_bytes};
 pub use obj::load_obj;
+#[cfg(not(target_arch = "wasm32"))]
+pub use unity::load_unitypackage;
 
 #[cfg(not(target_arch = "wasm32"))]
 pub fn load_gltf(path: &Path) -> Result<Scene> {
