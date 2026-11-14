@@ -108,8 +108,12 @@ impl MeshData {
                 continue;
             }
             let p = |i: u32| Vec3::from(self.vertices[i as usize].position);
+            // Both triangles: normal = (to - from) × (other - from) using the
+            // oriented shared-edge endpoints stored above. The previous n1 formula
+            // used (from - to) and accidentally flipped one normal, so planar
+            // quads (e.g. primitives::plane) were rejected.
             let n0 = (p(b0) - p(a0)).cross(p(x) - p(a0)).normalize_or_zero();
-            let n1 = (p(a1) - p(b1)).cross(p(y) - p(b1)).normalize_or_zero();
+            let n1 = (p(b1) - p(a1)).cross(p(y) - p(a1)).normalize_or_zero();
             if n0.dot(n1) < 0.999 {
                 continue;
             }
