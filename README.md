@@ -81,25 +81,25 @@ This is a functional starter compositor, not full Blender compositor parity. It 
 compositing, masks, multilayer render passes, or color-management pipeline.
 
 ## Scripting
-The **Scripting** workspace runs Python in an embedded CPython runtime from a background worker,
-so scripts do not block the UI. BlendCraft itself and its scene bridge remain Rust; the small
-`bpy`-named compatibility module is implemented natively in Rust and is not copied from Blender.
-Building from source requires CPython development libraries. Official portable ZIP bundles for
-Linux x64/arm64, Windows x64, macOS x64/arm64, and FreeBSD x64, plus Linux x64/arm64 AppImages
-and Flatpaks, include the CPython runtime. Unzip a portable bundle and run the executable beside
-its `python/` directory; no separate Python installation is needed. Raw executable artifacts and
-experimental targets without bundled scripting are not self-contained.
-The `python-scripting` Cargo feature is enabled by default. CI disables it only for cross-target
-artifacts that lack a target CPython toolchain; those builds still run the app, but Python scripts
-are unavailable there and report that limitation.
+The **Scripting** workspace runs Python in an embedded **RustPython** interpreter from a
+background worker, so scripts do not block the UI. BlendCraft itself and its scene bridge remain
+Rust; the small `bpy`-named compatibility module is implemented natively in Rust (plus a thin
+pure-Python helper layer) and is not copied from Blender.
 
-The implemented subset includes object lookup (`get`, name/index lookup, iteration, membership),
+RustPython is a pure-Rust Python 3 interpreter. Because it does not depend on a system CPython
+or on platform-specific CPython development libraries, the same binary builds and runs on
+Windows, Linux, macOS, FreeBSD and any other target that the Rust toolchain supports. No separate
+Python installation and no bundled `python/` directory are required.
+
+The `python-scripting` Cargo feature is enabled by default. Disable it only when you intentionally
+want a build without scripting support.
+
+The implemented subset includes object lookup (name/index lookup, iteration, membership),
 context scene/active/selected objects, object names and transforms, selection methods, and
 `mathutils.Vector`, `Euler`, and `Quaternion` basics. Supported operators are object select-all
-(select/deselect/invert), delete, and mesh add for cube, plane, UV sphere, ico sphere, cylinder,
+(select/deselect/invert) and mesh add for cube, plane, UV sphere, ico sphere, cylinder,
 cone, torus, and monkey. Basic materials support lookup/creation, name, diffuse color,
-metallic/roughness, and one material slot per object. A comprehensive exercise script is
-`examples/blendcraft_blender_compat_test.py`.
+metallic/roughness, and one material slot per object.
 
 This is not full `bpy` compatibility: mesh editing, multiple material slots, node trees, modifiers,
 collections/linking, cameras/lights creation, animation, rendering, UI context, Blender-specific
