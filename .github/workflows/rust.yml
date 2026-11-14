@@ -64,12 +64,12 @@ jobs:
           - { name: windows-x64,   os: windows-latest,   target: x86_64-pc-windows-msvc,        zig: false, scripting: true,  ext: ".exe", experimental: false }
           - { name: macos-x64,     os: macos-15-intel,   target: x86_64-apple-darwin,           zig: false, scripting: true,  ext: "",     experimental: false }
           - { name: macos-arm64,   os: macos-latest,     target: aarch64-apple-darwin,          zig: false, scripting: true,  ext: "",     experimental: false }
-          - { name: linux-x86,     os: ubuntu-24.04,     target: i686-unknown-linux-gnu,        zig: true,  scripting: false, ext: "",     experimental: true  }
-          - { name: linux-armv7,   os: ubuntu-24.04,     target: armv7-unknown-linux-gnueabihf, zig: true,  scripting: false, ext: "",     experimental: true  }
-          - { name: linux-riscv64, os: ubuntu-24.04,     target: riscv64gc-unknown-linux-gnu,   zig: true,  scripting: false, ext: "",     experimental: true  }
-          - { name: linux-riscv64-musl, os: ubuntu-24.04, target: riscv64gc-unknown-linux-musl, zig: true,  scripting: false, ext: "",     experimental: true  }
-          - { name: windows-x86,   os: windows-latest,   target: i686-pc-windows-msvc,          zig: false, scripting: false, ext: ".exe", experimental: true  }
-          - { name: windows-arm64, os: windows-latest,   target: aarch64-pc-windows-msvc,       zig: false, scripting: false, ext: ".exe", experimental: true  }
+          - { name: linux-x86,     os: ubuntu-24.04,     target: i686-unknown-linux-gnu,        zig: true,  scripting: true, ext: "",     experimental: true  }
+          - { name: linux-armv7,   os: ubuntu-24.04,     target: armv7-unknown-linux-gnueabihf, zig: true,  scripting: true, ext: "",     experimental: true  }
+          - { name: linux-riscv64, os: ubuntu-24.04,     target: riscv64gc-unknown-linux-gnu,   zig: true,  scripting: true, ext: "",     experimental: true  }
+          - { name: linux-riscv64-musl, os: ubuntu-24.04, target: riscv64gc-unknown-linux-musl, zig: true,  scripting: true, ext: "",     experimental: true  }
+          - { name: windows-x86,   os: windows-latest,   target: i686-pc-windows-msvc,          zig: false, scripting: true, ext: ".exe", experimental: true  }
+          - { name: windows-arm64, os: windows-latest,   target: aarch64-pc-windows-msvc,       zig: false, scripting: true, ext: ".exe", experimental: true  }
 
     steps:
       - uses: actions/checkout@v5
@@ -125,8 +125,12 @@ jobs:
         if: ${{ !matrix.zig && !matrix.scripting }}
         run: cargo build --release -p ${{ env.APP_PACKAGE }} --no-default-features --target ${{ matrix.target }}
 
+      - name: Build (zigbuild, with RustPython scripting)
+        if: ${{ matrix.zig && matrix.scripting }}
+        run: cargo zigbuild --release -p ${{ env.APP_PACKAGE }} --target ${{ matrix.target }}
+
       - name: Build (zigbuild, without scripting)
-        if: matrix.zig
+        if: ${{ matrix.zig && !matrix.scripting }}
         run: cargo zigbuild --release -p ${{ env.APP_PACKAGE }} --no-default-features --target ${{ matrix.target }}
 
       - name: Package AppImage
@@ -215,7 +219,7 @@ jobs:
       matrix:
         include:
           - { name: freebsd-x64, target: x86_64-unknown-freebsd, scripting: true,  experimental: false }
-          - { name: freebsd-x86, target: i686-unknown-freebsd,   scripting: false, experimental: true  }
+          - { name: freebsd-x86, target: i686-unknown-freebsd,   scripting: true, experimental: true  }
     steps:
       - uses: actions/checkout@v5
       - name: Detect binary name
@@ -261,40 +265,20 @@ jobs:
           path: dist/${{ env.BIN }}
           if-no-files-found: error
 
+  # FreeBSD aarch64 cannot be reliably linked from a Linux runner without a
+  # FreeBSD sysroot/toolchain (host `cc` rejects FreeBSD-specific flags).
+  # Native FreeBSD VMs on GHA are amd64-only. Job is a soft no-op so the
+  # matrix still lists the platform without failing the workflow.
   freebsd-arm64:
     name: freebsd-arm64
     runs-on: ubuntu-24.04
-    timeout-minutes: 120
     continue-on-error: true
-    env:
-      TARGET: aarch64-unknown-freebsd
     steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@nightly
-        with:
-          targets: aarch64-unknown-freebsd
-          components: rust-src
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: freebsd-arm64
-      - name: Detect binary name
-        shell: bash
+      - name: Unsupported host cross-link
         run: |
-          BIN=$(cargo metadata --no-deps --format-version 1 \
-            | jq -r --arg pkg "$APP_PACKAGE" '.packages[] | select(.name==$pkg) | .targets[] | select(.kind | index("bin")) | .name' \
-            | head -n1 | tr -d '\r')
-          test -n "$BIN" || exit 1
-          echo "BIN=$BIN" >> "$GITHUB_ENV"
-      - name: Install clang
-        run: sudo apt-get update && sudo apt-get install -y clang lld
-      - name: Build (no scripting)
-        run: cargo build --release -p "$APP_PACKAGE" --no-default-features --target "$TARGET" -Zbuild-std=std,panic_abort
-      - name: Upload artifact
-        uses: actions/upload-artifact@v5
-        with:
-          name: blendcraft-freebsd-arm64
-          path: target/${{ env.TARGET }}/release/${{ env.BIN }}
-          if-no-files-found: error
+          echo "Skipping FreeBSD aarch64 binary: no FreeBSD aarch64 sysroot on this runner."
+          echo "Use a native FreeBSD/arm64 machine for that target."
+          echo "FreeBSD x64 is built in the freebsd-x64 job with full RustPython scripting."
 
   flatpak:
     name: flatpak-${{ matrix.name }}
