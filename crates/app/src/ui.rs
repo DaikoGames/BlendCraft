@@ -9,6 +9,8 @@ use forge_core::{
     AlignTo, AlphaMode, AnimationData, ArmatureData, CameraData, Constraint, ConstraintKind,
     Document, EmptyShape, ForceFieldData, ForceFieldType, GreasePencilData, LightData,
     LightProbeData, LightProbeType, LightType, Material, ObjectKind, OriginMode, Primitive,
+    CollisionShape, RigidBody, RigidBodyType, RigidBodyConstraint,
+    RigidBodyConstraintType,
     ShaderGraph, ShaderLink, ShaderNode, ShaderNodeKind, SpeakerData, SurfaceData, TextFont,
     TextureData, VolumeData,
 };
@@ -173,6 +175,8 @@ pub enum PropertiesTab {
     Render,
     Output,
     Material,
+    Physics,
+    Scene,
 }
 
 /// Records one undo step per continuous edit (drag / typing / click), then applies it.
@@ -8187,6 +8191,450 @@ fn draw_material_props_summary(ui: &mut egui::Ui, doc: &mut Document, object_ind
     ui.weak("Use the Shader Editor for graph, Apply Graph, and Bake.");
 }
 
+fn physics_commit(doc: &mut Document) {
+    if !doc.edit_open {
+        doc.checkpoint();
+        doc.edit_open = true;
+    }
+    doc.touch();
+}
+
+fn draw_physics_world_props(ui: &mut egui::Ui, doc: &mut Document) {
+    ui.label(RichText::new("Rigid Body World").strong());
+    if doc.scene.animation.playing {
+        ui.weak("Pause the timeline before changing the physics world or baking.");
+        return;
+    }
+    let mut settings = doc.scene.physics_world.clone();
+    let original = settings.clone();
+    ui.checkbox(&mut settings.enabled, "Enabled");
+    ui.horizontal(|ui| {
+        ui.label("Gravity");
+        ui.add(egui::DragValue::new(&mut settings.gravity.x).speed(0.05).prefix("X "));
+        ui.add(egui::DragValue::new(&mut settings.gravity.y).speed(0.05).prefix("Y "));
+        ui.add(egui::DragValue::new(&mut settings.gravity.z).speed(0.05).prefix("Z "));
+    });
+    ui.horizontal(|ui| {
+        ui.label("Speed");
+        ui.add(egui::DragValue::new(&mut settings.time_scale).speed(0.01).range(0.0..=10.0).suffix("×"));
+    });
+    ui.horizontal(|ui| {
+        ui.label("Substeps");
+        ui.add(egui::DragValue::new(&mut settings.substeps_per_frame).range(1..=128));
+        ui.label("Solver Iterations");
+        ui.add(egui::DragValue::new(&mut settings.solver_iterations).range(1..=128));
+    });
+    ui.collapsing("Cache", |ui| {
+        ui.horizontal(|ui| {
+            ui.label("Start");
+            ui.add(egui::DragValue::new(&mut settings.cache_start).range(-100_000..=100_000));
+            ui.label("End");
+            ui.add(egui::DragValue::new(&mut settings.cache_end).range(-100_000..=100_000));
+        });
+        if settings.cache_end < settings.cache_start { settings.cache_end = settings.cache_start; }
+    });
+    if settings != original {
+        physics_commit(doc);
+        doc.scene.physics_world = settings;
+        doc.scene.physics_cache = None;
+    }
+    ui.horizontal(|ui| {
+        if ui.button("Bake").on_hover_text("Simulate and store rigid-body transforms for the cache range").clicked() {
+            physics_commit(doc);
+            let cache = forge_core::bake_scene(&doc.scene);
+            doc.scene.physics_cache = Some(cache);
+        }
+        if ui.button("Delete Bake").clicked() && doc.scene.physics_cache.is_some() {
+            physics_commit(doc);
+            doc.scene.physics_cache = None;
+        }
+    });
+    if let Some(cache) = &doc.scene.physics_cache {
+        ui.weak(format!("Baked frames: {}", cache.frames.len()));
+        if ui.button("Bake to Keyframes").on_hover_text(
+            "Convert the baked rigid-body motion into editable object transform keyframes"
+        ).clicked() {
+            physics_commit(doc);
+            let count = forge_core::bake_physics_to_keyframes(&mut doc.scene);
+            ui.label(format!("Created {count} transform keys."));
+        }
+    } else {
+        ui.weak("No baked simulation.");
+    }
+    ui.separator();
+}
+
+fn draw_simulation_systems_props(ui: &mut egui::Ui, doc: &mut Document) {
+    ui.add_space(8.0);
+    ui.separator();
+    ui.label(RichText::new("Simulation Systems").strong());
+    ui.weak("Experimental scene-level settings for non-rigid simulations.");
+    ui.colored_label(egui::Color32::from_rgb(210, 160, 70), "Solver status: settings are saved; these four solvers are not yet connected to playback or baking.");
+
+    let mut settings = doc.scene.simulations.clone();
+    let original = settings.clone();
+    ui.collapsing("Cloth", |ui| {
+        ui.checkbox(&mut settings.cloth.enabled, "Enable Cloth");
+        ui.horizontal(|ui| { ui.label("Quality Steps"); ui.add(egui::DragValue::new(&mut settings.cloth.quality_steps).range(1..=64)); });
+        ui.horizontal(|ui| { ui.label("Vertex Mass"); ui.add(egui::DragValue::new(&mut settings.cloth.vertex_mass).speed(0.01).range(0.001..=100.0)); });
+        ui.horizontal(|ui| { ui.label("Tension"); ui.add(egui::DragValue::new(&mut settings.cloth.tension_stiffness).speed(0.1).range(0.0..=1000.0)); });
+        ui.horizontal(|ui| { ui.label("Bending"); ui.add(egui::DragValue::new(&mut settings.cloth.bending_stiffness).speed(0.01).range(0.0..=100.0)); });
+        ui.horizontal(|ui| { ui.label("Damping"); ui.add(egui::DragValue::new(&mut settings.cloth.damping).speed(0.001).range(0.0..=1.0)); });
+        ui.horizontal(|ui| { ui.label("Air Damping"); ui.add(egui::DragValue::new(&mut settings.cloth.air_damping).speed(0.01).range(0.0..=10.0)); });
+        ui.horizontal(|ui| { ui.label("Gravity Scale"); ui.add(egui::DragValue::new(&mut settings.cloth.gravity_scale).speed(0.01).range(-10.0..=10.0)); });
+        ui.checkbox(&mut settings.cloth.pin_boundary, "Pin Boundary Vertices");
+        ui.weak("Intended for fabric meshes, flags and hanging surfaces.");
+    });
+    ui.collapsing("Soft Body", |ui| {
+        ui.checkbox(&mut settings.soft_body.enabled, "Enable Soft Body");
+        ui.horizontal(|ui| { ui.label("Mass"); ui.add(egui::DragValue::new(&mut settings.soft_body.mass).speed(0.01).range(0.001..=10000.0)); });
+        ui.horizontal(|ui| { ui.label("Edge Stiffness"); ui.add(egui::DragValue::new(&mut settings.soft_body.edge_stiffness).speed(0.01).range(0.0..=1.0)); });
+        ui.horizontal(|ui| { ui.label("Bending Stiffness"); ui.add(egui::DragValue::new(&mut settings.soft_body.bending_stiffness).speed(0.01).range(0.0..=1.0)); });
+        ui.horizontal(|ui| { ui.label("Damping"); ui.add(egui::DragValue::new(&mut settings.soft_body.damping).speed(0.001).range(0.0..=1.0)); });
+        ui.horizontal(|ui| { ui.label("Goal Strength"); ui.add(egui::DragValue::new(&mut settings.soft_body.goal_strength).speed(0.01).range(0.0..=1.0)); });
+        ui.horizontal(|ui| { ui.label("Goal Friction"); ui.add(egui::DragValue::new(&mut settings.soft_body.goal_friction).speed(0.01).range(0.0..=1.0)); });
+        ui.horizontal(|ui| { ui.label("Gravity Scale"); ui.add(egui::DragValue::new(&mut settings.soft_body.gravity_scale).speed(0.01).range(-10.0..=10.0)); });
+        ui.checkbox(&mut settings.soft_body.use_self_collision, "Self Collision");
+        ui.weak("Intended for deformable meshes such as rubber, foam and flexible props.");
+    });
+    ui.collapsing("Fluid", |ui| {
+        ui.checkbox(&mut settings.fluid.enabled, "Enable Fluid Domain");
+        ui.horizontal(|ui| { ui.label("Resolution"); ui.add(egui::DragValue::new(&mut settings.fluid.domain_resolution).range(8..=256)); });
+        ui.horizontal(|ui| { ui.label("Particle Radius"); ui.add(egui::DragValue::new(&mut settings.fluid.particle_radius).speed(0.005).range(0.001..=10.0)); });
+        ui.horizontal(|ui| { ui.label("Viscosity"); ui.add(egui::DragValue::new(&mut settings.fluid.viscosity).speed(0.001).range(0.0..=100.0)); });
+        ui.horizontal(|ui| { ui.label("Surface Tension"); ui.add(egui::DragValue::new(&mut settings.fluid.surface_tension).speed(0.01).range(0.0..=100.0)); });
+        ui.horizontal(|ui| { ui.label("Time Scale"); ui.add(egui::DragValue::new(&mut settings.fluid.time_scale).speed(0.01).range(0.0..=10.0)); });
+        ui.horizontal(|ui| { ui.label("Gravity Scale"); ui.add(egui::DragValue::new(&mut settings.fluid.gravity_scale).speed(0.01).range(-10.0..=10.0)); });
+        ui.horizontal(|ui| { ui.label("Max Particles"); ui.add(egui::DragValue::new(&mut settings.fluid.max_particles).range(100..=2_000_000)); });
+        ui.checkbox(&mut settings.fluid.use_adaptive_time, "Adaptive Time Stepping");
+        ui.weak("Fluid-domain configuration; liquid/gas solving and meshing are not wired yet.");
+    });
+    ui.collapsing("Particle System", |ui| {
+        ui.checkbox(&mut settings.particles.enabled, "Enable Emitter");
+        ui.horizontal(|ui| { ui.label("Count"); ui.add(egui::DragValue::new(&mut settings.particles.count).range(1..=2_000_000)); });
+        ui.horizontal(|ui| { ui.label("Emit Rate"); ui.add(egui::DragValue::new(&mut settings.particles.emit_rate).speed(1.0).range(0.0..=100_000.0)); });
+        ui.horizontal(|ui| { ui.label("Lifetime"); ui.add(egui::DragValue::new(&mut settings.particles.lifetime).speed(0.1).range(0.01..=100_000.0)); });
+        ui.horizontal(|ui| { ui.label("Start / End"); ui.add(egui::DragValue::new(&mut settings.particles.frame_start).speed(0.1)); ui.add(egui::DragValue::new(&mut settings.particles.frame_end).speed(0.1)); });
+        ui.horizontal(|ui| { ui.label("Initial Velocity"); ui.add(egui::DragValue::new(&mut settings.particles.initial_velocity.x).speed(0.05).prefix("X ")); ui.add(egui::DragValue::new(&mut settings.particles.initial_velocity.y).speed(0.05).prefix("Y ")); ui.add(egui::DragValue::new(&mut settings.particles.initial_velocity.z).speed(0.05).prefix("Z ")); });
+        ui.horizontal(|ui| { ui.label("Velocity Randomness"); ui.add(egui::DragValue::new(&mut settings.particles.velocity_randomness).speed(0.01).range(0.0..=10.0)); });
+        ui.horizontal(|ui| { ui.label("Gravity Scale"); ui.add(egui::DragValue::new(&mut settings.particles.gravity_scale).speed(0.01).range(-10.0..=10.0)); });
+        ui.horizontal(|ui| { ui.label("Size"); ui.add(egui::DragValue::new(&mut settings.particles.size).speed(0.001).range(0.0001..=1000.0)); });
+        ui.horizontal(|ui| { ui.label("Size Randomness"); ui.add(egui::DragValue::new(&mut settings.particles.size_randomness).speed(0.01).range(0.0..=1.0)); });
+        ui.weak("Emitter configuration; particle instances and rendering are not wired to the timeline yet.");
+    });
+
+    if settings != original {
+        physics_commit(doc);
+        doc.scene.simulations = settings;
+    }
+    ui.separator();
+}
+
+fn draw_rigid_body_constraints(ui: &mut egui::Ui, doc: &mut Document, object_id: u64) {
+    ui.collapsing("Rigid Body Constraints", |ui| {
+        let other_selected = doc.selection.iter().copied()
+            .find(|&id| id != object_id && doc.scene.objects.iter().any(|o| o.id == id));
+        if let Some(other_id) = other_selected {
+            let both_have_bodies = doc.scene.rigid_bodies.contains_key(&object_id)
+                && doc.scene.rigid_bodies.contains_key(&other_id);
+            if !both_have_bodies {
+                ui.weak("Add rigid bodies to both selected objects before creating a constraint.");
+            } else if ui.button("＋ Add Constraint (Active + Selected)").clicked() {
+                physics_commit(doc);
+                let mut constraint = RigidBodyConstraint::default();
+                constraint.object_a = object_id;
+                constraint.object_b = other_id;
+                doc.scene.rigid_body_constraints.push(constraint);
+                doc.scene.physics_cache = None;
+            }
+        } else {
+            ui.weak("Select two objects to create a constraint between them.");
+        }
+
+        let indices: Vec<usize> = doc.scene.rigid_body_constraints.iter().enumerate()
+            .filter_map(|(i, c)| (c.object_a == object_id || c.object_b == object_id).then_some(i)).collect();
+        for index in indices.into_iter().rev() {
+            if index >= doc.scene.rigid_body_constraints.len() { continue; }
+            let mut constraint = doc.scene.rigid_body_constraints[index].clone();
+            let original = constraint.clone();
+            let a_name = doc.scene.objects.iter().find(|o| o.id == constraint.object_a).map(|o| o.name.as_str()).unwrap_or("Missing");
+            let b_name = doc.scene.objects.iter().find(|o| o.id == constraint.object_b).map(|o| o.name.as_str()).unwrap_or("Missing");
+            let mut remove = false;
+            ui.push_id(index, |ui| {
+                ui.group(|ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(format!("{} ↔ {}", a_name, b_name)).strong());
+                        remove = ui.small_button("Remove").clicked();
+                    });
+                    ui.checkbox(&mut constraint.enabled, "Enabled");
+                    ui.checkbox(&mut constraint.disable_collisions, "Disable Collisions");
+                    egui::ComboBox::from_id_salt(("rb_constraint_kind", index))
+                        .selected_text(match constraint.kind {
+                            RigidBodyConstraintType::Fixed => "Fixed",
+                            RigidBodyConstraintType::Point => "Point",
+                            RigidBodyConstraintType::Hinge => "Hinge",
+                            RigidBodyConstraintType::Slider => "Slider",
+                        }).show_ui(ui, |ui| {
+                            ui.selectable_value(&mut constraint.kind, RigidBodyConstraintType::Fixed, "Fixed");
+                            ui.selectable_value(&mut constraint.kind, RigidBodyConstraintType::Point, "Point");
+                            ui.selectable_value(&mut constraint.kind, RigidBodyConstraintType::Hinge, "Hinge");
+                            ui.selectable_value(&mut constraint.kind, RigidBodyConstraintType::Slider, "Slider");
+                        });
+                    ui.checkbox(&mut constraint.use_limits, "Use Limits");
+                    if constraint.use_limits {
+                        ui.horizontal(|ui| {
+                            ui.label("Lower"); ui.add(egui::DragValue::new(&mut constraint.lower_limit).speed(0.01));
+                            ui.label("Upper"); ui.add(egui::DragValue::new(&mut constraint.upper_limit).speed(0.01));
+                        });
+                    }
+                    ui.horizontal(|ui| {
+                        ui.label("Axis");
+                        ui.add(egui::DragValue::new(&mut constraint.axis.x).speed(0.01));
+                        ui.add(egui::DragValue::new(&mut constraint.axis.y).speed(0.01));
+                        ui.add(egui::DragValue::new(&mut constraint.axis.z).speed(0.01));
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Anchor A");
+                        ui.add(egui::DragValue::new(&mut constraint.anchor_a.x).speed(0.01));
+                        ui.add(egui::DragValue::new(&mut constraint.anchor_a.y).speed(0.01));
+                        ui.add(egui::DragValue::new(&mut constraint.anchor_a.z).speed(0.01));
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Anchor B");
+                        ui.add(egui::DragValue::new(&mut constraint.anchor_b.x).speed(0.01));
+                        ui.add(egui::DragValue::new(&mut constraint.anchor_b.y).speed(0.01));
+                        ui.add(egui::DragValue::new(&mut constraint.anchor_b.z).speed(0.01));
+                    });
+                });
+            });
+            if remove {
+                physics_commit(doc);
+                doc.scene.rigid_body_constraints.remove(index);
+                doc.scene.physics_cache = None;
+            } else if constraint != original {
+                physics_commit(doc);
+                doc.scene.rigid_body_constraints[index] = constraint;
+                doc.scene.physics_cache = None;
+            }
+        }
+    });
+}
+
+fn draw_object_simulation_props(ui: &mut egui::Ui, doc: &mut Document, object_id: u64) {
+    use forge_core::{ObjectSimulation, ClothSettings, SoftBodySettings, FluidSettings, ParticleSettings};
+    ui.separator();
+    ui.label(RichText::new("Non-Rigid Simulations").strong());
+    ui.weak("Components are assigned to the selected mesh, not globally to the scene.");
+    ui.colored_label(egui::Color32::from_rgb(210, 160, 70), "Implementation status: object assignment and saved settings only; simulation solvers are not connected yet.");
+    if doc.in_edit_mode() || doc.sculpt_mode || doc.paint_mode || doc.uv_mode || doc.pose_mode {
+        ui.weak("Switch to Object Mode to add or edit simulation components.");
+        return;
+    }
+    if !doc.scene.object_simulations.contains_key(&object_id) {
+        ui.horizontal_wrapped(|ui| {
+            if ui.button("＋ Cloth").clicked() {
+                physics_commit(doc);
+                doc.scene.object_simulations.insert(object_id, ObjectSimulation::Cloth(ClothSettings { enabled: true, ..Default::default() }));
+            }
+            if ui.button("＋ Soft Body").clicked() {
+                physics_commit(doc);
+                doc.scene.object_simulations.insert(object_id, ObjectSimulation::SoftBody(SoftBodySettings { enabled: true, ..Default::default() }));
+            }
+            if ui.button("＋ Fluid").clicked() {
+                physics_commit(doc);
+                doc.scene.object_simulations.insert(object_id, ObjectSimulation::Fluid(FluidSettings { enabled: true, ..Default::default() }));
+            }
+            if ui.button("＋ Particle System").clicked() {
+                physics_commit(doc);
+                doc.scene.object_simulations.insert(object_id, ObjectSimulation::Particles(ParticleSettings { enabled: true, ..Default::default() }));
+            }
+        });
+        ui.weak("Choose a system to attach it to this object.");
+        return;
+    }
+
+    let mut component = doc.scene.object_simulations.get(&object_id).cloned().unwrap();
+    let original = component.clone();
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(component.label()).strong());
+        if ui.button("Remove Component").clicked() {
+            physics_commit(doc);
+            doc.scene.object_simulations.remove(&object_id);
+            doc.scene.physics_cache = None;
+        }
+    });
+    match &mut component {
+        ObjectSimulation::Cloth(v) => {
+            ui.checkbox(&mut v.enabled, "Enabled");
+            ui.horizontal(|ui| { ui.label("Quality Steps"); ui.add(egui::DragValue::new(&mut v.quality_steps).range(1..=64)); });
+            ui.horizontal(|ui| { ui.label("Vertex Mass"); ui.add(egui::DragValue::new(&mut v.vertex_mass).speed(0.01).range(0.001..=100.0)); });
+            ui.horizontal(|ui| { ui.label("Tension"); ui.add(egui::DragValue::new(&mut v.tension_stiffness).speed(0.1).range(0.0..=1000.0)); });
+            ui.horizontal(|ui| { ui.label("Bending"); ui.add(egui::DragValue::new(&mut v.bending_stiffness).speed(0.01).range(0.0..=100.0)); });
+            ui.horizontal(|ui| { ui.label("Damping"); ui.add(egui::DragValue::new(&mut v.damping).speed(0.001).range(0.0..=1.0)); });
+            ui.horizontal(|ui| { ui.label("Air Damping"); ui.add(egui::DragValue::new(&mut v.air_damping).speed(0.01).range(0.0..=10.0)); });
+            ui.horizontal(|ui| { ui.label("Gravity Scale"); ui.add(egui::DragValue::new(&mut v.gravity_scale).speed(0.01).range(-10.0..=10.0)); });
+            ui.checkbox(&mut v.pin_boundary, "Pin Boundary Vertices");
+        }
+        ObjectSimulation::SoftBody(v) => {
+            ui.checkbox(&mut v.enabled, "Enabled");
+            ui.horizontal(|ui| { ui.label("Mass"); ui.add(egui::DragValue::new(&mut v.mass).speed(0.01).range(0.001..=10000.0)); });
+            ui.horizontal(|ui| { ui.label("Edge Stiffness"); ui.add(egui::DragValue::new(&mut v.edge_stiffness).speed(0.01).range(0.0..=1.0)); });
+            ui.horizontal(|ui| { ui.label("Bending Stiffness"); ui.add(egui::DragValue::new(&mut v.bending_stiffness).speed(0.01).range(0.0..=1.0)); });
+            ui.horizontal(|ui| { ui.label("Damping"); ui.add(egui::DragValue::new(&mut v.damping).speed(0.001).range(0.0..=1.0)); });
+            ui.horizontal(|ui| { ui.label("Goal Strength"); ui.add(egui::DragValue::new(&mut v.goal_strength).speed(0.01).range(0.0..=1.0)); });
+            ui.horizontal(|ui| { ui.label("Goal Friction"); ui.add(egui::DragValue::new(&mut v.goal_friction).speed(0.01).range(0.0..=1.0)); });
+            ui.horizontal(|ui| { ui.label("Gravity Scale"); ui.add(egui::DragValue::new(&mut v.gravity_scale).speed(0.01).range(-10.0..=10.0)); });
+            ui.checkbox(&mut v.use_self_collision, "Self Collision");
+        }
+        ObjectSimulation::Fluid(v) => {
+            ui.checkbox(&mut v.enabled, "Enabled");
+            ui.horizontal(|ui| { ui.label("Domain Resolution"); ui.add(egui::DragValue::new(&mut v.domain_resolution).range(8..=256)); });
+            ui.horizontal(|ui| { ui.label("Particle Radius"); ui.add(egui::DragValue::new(&mut v.particle_radius).speed(0.005).range(0.001..=10.0)); });
+            ui.horizontal(|ui| { ui.label("Viscosity"); ui.add(egui::DragValue::new(&mut v.viscosity).speed(0.001).range(0.0..=100.0)); });
+            ui.horizontal(|ui| { ui.label("Surface Tension"); ui.add(egui::DragValue::new(&mut v.surface_tension).speed(0.01).range(0.0..=100.0)); });
+            ui.horizontal(|ui| { ui.label("Time Scale"); ui.add(egui::DragValue::new(&mut v.time_scale).speed(0.01).range(0.0..=10.0)); });
+            ui.horizontal(|ui| { ui.label("Gravity Scale"); ui.add(egui::DragValue::new(&mut v.gravity_scale).speed(0.01).range(-10.0..=10.0)); });
+            ui.horizontal(|ui| { ui.label("Max Particles"); ui.add(egui::DragValue::new(&mut v.max_particles).range(100..=2_000_000)); });
+            ui.checkbox(&mut v.use_adaptive_time, "Adaptive Time Stepping");
+            ui.weak("This assigns fluid settings to the selected object. Domain/Flow/Effector roles and the fluid solver still need implementation.");
+        }
+        ObjectSimulation::Particles(v) => {
+            ui.checkbox(&mut v.enabled, "Enabled");
+            ui.horizontal(|ui| { ui.label("Count"); ui.add(egui::DragValue::new(&mut v.count).range(1..=2_000_000)); });
+            ui.horizontal(|ui| { ui.label("Emit Rate"); ui.add(egui::DragValue::new(&mut v.emit_rate).speed(1.0).range(0.0..=100_000.0)); });
+            ui.horizontal(|ui| { ui.label("Lifetime"); ui.add(egui::DragValue::new(&mut v.lifetime).speed(0.1).range(0.01..=100_000.0)); });
+            ui.horizontal(|ui| { ui.label("Start / End"); ui.add(egui::DragValue::new(&mut v.frame_start).speed(0.1)); ui.add(egui::DragValue::new(&mut v.frame_end).speed(0.1)); });
+            ui.horizontal(|ui| { ui.label("Initial Velocity"); ui.add(egui::DragValue::new(&mut v.initial_velocity.x).speed(0.05).prefix("X ")); ui.add(egui::DragValue::new(&mut v.initial_velocity.y).speed(0.05).prefix("Y ")); ui.add(egui::DragValue::new(&mut v.initial_velocity.z).speed(0.05).prefix("Z ")); });
+            ui.horizontal(|ui| { ui.label("Velocity Randomness"); ui.add(egui::DragValue::new(&mut v.velocity_randomness).speed(0.01).range(0.0..=10.0)); });
+            ui.horizontal(|ui| { ui.label("Gravity Scale"); ui.add(egui::DragValue::new(&mut v.gravity_scale).speed(0.01).range(-10.0..=10.0)); });
+            ui.horizontal(|ui| { ui.label("Size"); ui.add(egui::DragValue::new(&mut v.size).speed(0.001).range(0.0001..=1000.0)); });
+            ui.horizontal(|ui| { ui.label("Size Randomness"); ui.add(egui::DragValue::new(&mut v.size_randomness).speed(0.01).range(0.0..=1.0)); });
+            ui.weak("This assigns emitter settings to the selected object. Particle simulation, instances and rendering still need implementation.");
+        }
+    }
+    if component != original {
+        physics_commit(doc);
+        doc.scene.object_simulations.insert(object_id, component);
+        doc.scene.physics_cache = None;
+    }
+}
+
+fn draw_physics_props(ui: &mut egui::Ui, doc: &mut Document, object_index: usize) {
+    if doc.scene.animation.playing {
+        ui.weak("Pause the timeline before changing rigid-body settings.");
+        return;
+    }
+    let object_id = doc.scene.objects[object_index].id;
+    let object_name = doc.scene.objects[object_index].name.clone();
+    ui.label(RichText::new("Rigid Body").strong());
+    ui.weak("Rigid-body simulation runs locally during timeline playback.");
+    ui.separator();
+
+    if doc.in_edit_mode() || doc.sculpt_mode || doc.paint_mode || doc.uv_mode || doc.pose_mode {
+        ui.label("Switch to Object Mode to edit rigid-body settings.");
+        return;
+    }
+    if doc.scene.objects[object_index].mesh.bounds().is_none() {
+        ui.label("Rigid bodies require an object with mesh geometry.");
+        return;
+    }
+
+    draw_object_simulation_props(ui, doc, object_id);
+
+    let Some(mut body) = doc.scene.rigid_bodies.get(&object_id).cloned() else {
+        ui.label("No rigid body is assigned to this object.");
+        ui.horizontal(|ui| {
+            if ui.button("＋ Active").clicked() {
+                physics_commit(doc);
+                doc.scene.rigid_bodies.insert(object_id, RigidBody::default());
+                doc.scene.physics_cache = None;
+            }
+            if ui.button("＋ Passive").clicked() {
+                physics_commit(doc);
+                doc.scene.rigid_bodies.insert(object_id, RigidBody { body_type: RigidBodyType::Passive, ..RigidBody::default() });
+                doc.scene.physics_cache = None;
+            }
+        });
+        draw_rigid_body_constraints(ui, doc, object_id);
+        return;
+    };
+
+    let original_body = body.clone();
+    ui.horizontal(|ui| {
+        ui.label("Type");
+        egui::ComboBox::from_id_salt(("rigid_body_type", object_id))
+            .selected_text(match body.body_type { RigidBodyType::Active => "Active", RigidBodyType::Passive => "Passive" })
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut body.body_type, RigidBodyType::Active, "Active");
+                ui.selectable_value(&mut body.body_type, RigidBodyType::Passive, "Passive");
+            });
+    });
+    ui.checkbox(&mut body.enabled, "Enabled");
+    if body.body_type == RigidBodyType::Active {
+        ui.checkbox(&mut body.dynamic, "Dynamic");
+    }
+    ui.checkbox(&mut body.animated, "Animated");
+    ui.separator();
+    ui.label(RichText::new("Collisions").strong());
+    egui::ComboBox::from_id_salt(("rigid_body_shape", object_id))
+        .selected_text(match body.collision_shape {
+            CollisionShape::ConvexHull => "Convex Hull", CollisionShape::Box => "Box",
+            CollisionShape::Sphere => "Sphere", CollisionShape::Capsule => "Capsule",
+            CollisionShape::Cylinder => "Cylinder", CollisionShape::Cone => "Cone",
+            CollisionShape::Mesh => "Mesh",
+        }).show_ui(ui, |ui| {
+            ui.selectable_value(&mut body.collision_shape, CollisionShape::ConvexHull, "Convex Hull");
+            ui.selectable_value(&mut body.collision_shape, CollisionShape::Box, "Box");
+            ui.selectable_value(&mut body.collision_shape, CollisionShape::Sphere, "Sphere");
+            ui.selectable_value(&mut body.collision_shape, CollisionShape::Capsule, "Capsule");
+            ui.selectable_value(&mut body.collision_shape, CollisionShape::Cylinder, "Cylinder");
+            ui.selectable_value(&mut body.collision_shape, CollisionShape::Cone, "Cone");
+            ui.selectable_value(&mut body.collision_shape, CollisionShape::Mesh, "Mesh (Passive recommended)");
+        });
+    ui.horizontal(|ui| {
+        ui.label("Friction");
+        ui.add(egui::DragValue::new(&mut body.friction).speed(0.01).range(0.0..=1.0));
+    });
+    ui.horizontal(|ui| {
+        ui.label("Bounciness");
+        ui.add(egui::DragValue::new(&mut body.restitution).speed(0.01).range(0.0..=1.0));
+    });
+    ui.horizontal(|ui| {
+        ui.label("Margin");
+        ui.add(egui::DragValue::new(&mut body.collision_margin).speed(0.001).range(0.0..=1.0));
+    });
+    if body.body_type == RigidBodyType::Active {
+        ui.separator();
+        ui.label(RichText::new("Dynamics").strong());
+        ui.horizontal(|ui| {
+            ui.label("Mass");
+            ui.add(egui::DragValue::new(&mut body.mass).speed(0.05).range(0.001..=100_000.0).suffix(" kg"));
+        });
+        ui.horizontal(|ui| {
+            ui.label("Linear Damping");
+            ui.add(egui::DragValue::new(&mut body.linear_damping).speed(0.005).range(0.0..=1.0));
+        });
+        ui.horizontal(|ui| {
+            ui.label("Angular Damping");
+            ui.add(egui::DragValue::new(&mut body.angular_damping).speed(0.005).range(0.0..=1.0));
+        });
+        ui.checkbox(&mut body.use_deactivation, "Deactivation");
+        ui.checkbox(&mut body.use_ccd, "Use Continuous Collision Detection");
+    }
+    ui.separator();
+    if ui.button("Remove Rigid Body").clicked() {
+        physics_commit(doc);
+        doc.scene.rigid_bodies.remove(&object_id);
+        doc.scene.physics_cache = None;
+    } else if body != original_body {
+        physics_commit(doc);
+        doc.scene.rigid_bodies.insert(object_id, body);
+        doc.scene.physics_cache = None;
+    }
+    ui.weak(format!("Object: {object_name}"));
+    draw_rigid_body_constraints(ui, doc, object_id);
+}
+
 fn properties(ui: &mut egui::Ui, doc: &mut Document, st: &mut UiState, actions: &mut Vec<Action>) {
     // Blender-style context tabs
     ui.horizontal(|ui| {
@@ -8195,6 +8643,8 @@ fn properties(ui: &mut egui::Ui, doc: &mut Document, st: &mut UiState, actions: 
             (PropertiesTab::Render, "📷", "Render"),
             (PropertiesTab::Output, "🖼", "Output"),
             (PropertiesTab::Material, "🎨", "Material"),
+            (PropertiesTab::Physics, "⚛", "Physics"),
+            (PropertiesTab::Scene, "◉", "Scene"),
         ] {
             let selected = st.properties_tab == tab;
             let btn = ui.selectable_label(selected, icon).on_hover_text(tip);
@@ -8209,11 +8659,34 @@ fn properties(ui: &mut egui::Ui, doc: &mut Document, st: &mut UiState, actions: 
                 PropertiesTab::Render => "Render Properties",
                 PropertiesTab::Output => "Output Properties",
                 PropertiesTab::Material => "Material Properties",
+                PropertiesTab::Physics => "Physics Properties",
+                PropertiesTab::Scene => "Scene Properties",
             })
             .strong(),
         );
     });
     ui.separator();
+
+    // Blender separates scene-wide rigid-body world settings from per-object physics.
+    if st.properties_tab == PropertiesTab::Scene {
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            draw_physics_world_props(ui, doc);
+            ui.separator();
+            ui.label(RichText::new("Cloth, Soft Body, Fluid and Particle Systems").strong());
+            ui.weak("Select a mesh and open the Physics tab to add a simulation component to that object.");
+        });
+        return;
+    }
+    if st.properties_tab == PropertiesTab::Physics {
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            if let Some(i) = doc.active_index() {
+                draw_physics_props(ui, doc, i);
+            } else {
+                ui.weak("Select a mesh to add rigid-body, cloth, soft-body, fluid or particle components.");
+            }
+        });
+        return;
+    }
 
     // --- Render / Output tabs do not need a selection ---
     if st.properties_tab == PropertiesTab::Render || st.properties_tab == PropertiesTab::Output {
@@ -8236,7 +8709,6 @@ fn properties(ui: &mut egui::Ui, doc: &mut Document, st: &mut UiState, actions: 
         draw_material_props_summary(ui, doc, i);
         return;
     }
-
     egui::ScrollArea::vertical().show(ui, |ui| {
         // name
         let mut name = doc.scene.objects[i].name.clone();

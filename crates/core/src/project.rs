@@ -1,7 +1,7 @@
 //! Native project format (.forge): magic + zlib(bincode(Scene)).
 use crate::{
     AnimationData, Collection, ColorRampStop, Material, Object, Scene, ShaderGraph, ShaderLink,
-    ShaderNode, ShaderNodeKind, TextureData,
+    ShaderNode, ShaderNodeKind, TextureData, CompositorGraph, RigidBody,
 };
 use anyhow::{anyhow, bail, Result};
 use glam::Vec3;
@@ -9,8 +9,125 @@ use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
 use std::sync::Arc;
 
-const MAGIC: &[u8; 4] = b"FRG4";
+const MAGIC: &[u8; 4] = b"FRG8";
+const V7_MAGIC: &[u8; 4] = b"FRG7";
+const V6_MAGIC: &[u8; 4] = b"FRG6";
+const V5_MAGIC: &[u8; 4] = b"FRG5";
+const V4_MAGIC: &[u8; 4] = b"FRG4";
 const LEGACY_MAGIC: &[u8; 4] = b"FRG3";
+
+
+
+/// Previous current layout (FRG7), before per-object simulation components.
+#[derive(Serialize, Deserialize)]
+struct Version7Scene {
+    objects: Vec<Object>, materials: Vec<Material>, textures: Arc<Vec<TextureData>>,
+    collections: Vec<Collection>, cursor: Vec3, next_id: u64, animation: AnimationData,
+    compositor_graph: CompositorGraph,
+    rigid_bodies: std::collections::HashMap<u64, crate::RigidBody>,
+    physics_world: crate::PhysicsWorldSettings,
+    rigid_body_constraints: Vec<crate::RigidBodyConstraint>,
+    physics_cache: Option<crate::PhysicsCache>,
+    simulations: crate::SimulationSettings,
+}
+impl From<Version7Scene> for Scene {
+    fn from(scene: Version7Scene) -> Self {
+        Self { objects: scene.objects, materials: scene.materials, textures: scene.textures,
+            collections: scene.collections, cursor: scene.cursor, next_id: scene.next_id,
+            animation: scene.animation, compositor_graph: scene.compositor_graph,
+            rigid_bodies: scene.rigid_bodies, physics_world: scene.physics_world,
+            rigid_body_constraints: scene.rigid_body_constraints, physics_cache: scene.physics_cache,
+            simulations: scene.simulations, object_simulations: Default::default() }
+    }
+}
+
+/// Previous current layout (FRG6), before non-rigid simulation settings.
+#[derive(Serialize, Deserialize)]
+struct Version6Scene {
+    objects: Vec<Object>, materials: Vec<Material>, textures: Arc<Vec<TextureData>>,
+    collections: Vec<Collection>, cursor: Vec3, next_id: u64, animation: AnimationData,
+    compositor_graph: CompositorGraph,
+    rigid_bodies: std::collections::HashMap<u64, crate::RigidBody>,
+    physics_world: crate::PhysicsWorldSettings,
+    rigid_body_constraints: Vec<crate::RigidBodyConstraint>,
+    physics_cache: Option<crate::PhysicsCache>,
+}
+impl From<Version6Scene> for Scene {
+    fn from(scene: Version6Scene) -> Self {
+        Self { objects: scene.objects, materials: scene.materials, textures: scene.textures,
+            collections: scene.collections, cursor: scene.cursor, next_id: scene.next_id,
+            animation: scene.animation, compositor_graph: scene.compositor_graph,
+            rigid_bodies: scene.rigid_bodies, physics_world: scene.physics_world,
+            rigid_body_constraints: scene.rigid_body_constraints, physics_cache: scene.physics_cache,
+            simulations: Default::default(), object_simulations: Default::default() }
+    }
+}
+
+/// Previous project layout. Keeping this decoder lets existing FRG5 projects
+/// load after the full rigid-body world and bake data were added to Scene.
+#[derive(Serialize, Deserialize)]
+struct Version5Scene {
+    objects: Vec<Object>,
+    materials: Vec<Material>,
+    textures: Arc<Vec<TextureData>>,
+    collections: Vec<Collection>,
+    cursor: Vec3,
+    next_id: u64,
+    animation: AnimationData,
+    compositor_graph: CompositorGraph,
+    rigid_bodies: std::collections::HashMap<u64, Version5RigidBody>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct Version5RigidBody {
+    body_type: crate::RigidBodyType,
+    collision_shape: crate::CollisionShape,
+    mass: f32,
+    friction: f32,
+    restitution: f32,
+    linear_damping: f32,
+    enabled: bool,
+}
+
+impl From<Version5Scene> for Scene {
+    fn from(scene: Version5Scene) -> Self {
+        Self {
+            objects: scene.objects, materials: scene.materials, textures: scene.textures,
+            collections: scene.collections, cursor: scene.cursor, next_id: scene.next_id,
+            animation: scene.animation, compositor_graph: scene.compositor_graph,
+            rigid_bodies: scene.rigid_bodies.into_iter().map(|(id, b)| (id, RigidBody {
+                body_type: b.body_type, collision_shape: b.collision_shape, mass: b.mass,
+                friction: b.friction, restitution: b.restitution, linear_damping: b.linear_damping,
+                enabled: b.enabled, ..RigidBody::default()
+            })).collect(), physics_world: Default::default(),
+            rigid_body_constraints: Vec::new(), physics_cache: None, simulations: Default::default(), object_simulations: Default::default(),
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+struct Version4Scene {
+    objects: Vec<Object>,
+    materials: Vec<Material>,
+    textures: Arc<Vec<TextureData>>,
+    collections: Vec<Collection>,
+    cursor: Vec3,
+    next_id: u64,
+    animation: AnimationData,
+    compositor_graph: CompositorGraph,
+}
+
+impl From<Version4Scene> for Scene {
+    fn from(scene: Version4Scene) -> Self {
+        Self {
+            objects: scene.objects, materials: scene.materials, textures: scene.textures,
+            collections: scene.collections, cursor: scene.cursor, next_id: scene.next_id,
+            animation: scene.animation, compositor_graph: scene.compositor_graph,
+            rigid_bodies: Default::default(), physics_world: Default::default(),
+            rigid_body_constraints: Vec::new(), physics_cache: None, simulations: Default::default(), object_simulations: Default::default(),
+        }
+    }
+}
 
 #[derive(Serialize, Deserialize)]
 struct Version3Scene {
@@ -123,6 +240,8 @@ impl From<Version3Scene> for Scene {
             next_id: scene.next_id,
             animation: scene.animation,
             compositor_graph: Default::default(),
+            rigid_bodies: Default::default(), physics_world: Default::default(),
+            rigid_body_constraints: Vec::new(), physics_cache: None, simulations: Default::default(), object_simulations: Default::default(),
         }
     }
 }
@@ -238,6 +357,8 @@ impl From<LegacyScene> for Scene {
             next_id: scene.next_id,
             animation: scene.animation,
             compositor_graph: Default::default(),
+            rigid_bodies: Default::default(), physics_world: Default::default(),
+            rigid_body_constraints: Vec::new(), physics_cache: None, simulations: Default::default(), object_simulations: Default::default(),
         }
     }
 }
@@ -252,14 +373,32 @@ pub fn to_bytes(scene: &Scene) -> Result<Vec<u8>> {
 }
 
 pub fn from_bytes(bytes: &[u8]) -> Result<Scene> {
-    if bytes.len() < 4 || (&bytes[..4] != MAGIC && &bytes[..4] != LEGACY_MAGIC) {
+    if bytes.len() < 4 || (&bytes[..4] != MAGIC && &bytes[..4] != V7_MAGIC && &bytes[..4] != V6_MAGIC && &bytes[..4] != V5_MAGIC && &bytes[..4] != V4_MAGIC && &bytes[..4] != LEGACY_MAGIC) {
         bail!("not a Forge3D project file");
     }
-    let is_v4 = &bytes[..4] == MAGIC;
+    let is_v8 = &bytes[..4] == MAGIC;
+    let is_v7 = &bytes[..4] == V7_MAGIC;
+    let is_v6 = &bytes[..4] == V6_MAGIC;
+    let is_v5 = &bytes[..4] == V5_MAGIC;
+    let is_v4 = &bytes[..4] == V4_MAGIC;
     let mut raw = Vec::new();
     flate2::read::ZlibDecoder::new(&bytes[4..]).read_to_end(&mut raw)?;
+    if is_v8 { return Ok(bincode::deserialize(&raw)?); }
+    if is_v7 {
+        let scene: Version7Scene = bincode::deserialize(&raw)?;
+        return Ok(Scene::from(scene));
+    }
+    if is_v6 {
+        let scene: Version6Scene = bincode::deserialize(&raw)?;
+        return Ok(Scene::from(scene));
+    }
+    if is_v5 {
+        let scene: Version5Scene = bincode::deserialize(&raw)?;
+        return Ok(Scene::from(scene));
+    }
     if is_v4 {
-        return Ok(bincode::deserialize(&raw)?);
+        let scene: Version4Scene = bincode::deserialize(&raw)?;
+        return Ok(Scene::from(scene));
     }
     let version3_error = match bincode::deserialize::<Version3Scene>(&raw) {
         Ok(scene) => return Ok(Scene::from(scene)),
@@ -319,6 +458,125 @@ mod tests {
         assert!(tex.rgba8[center] > 240);
         assert!(tex.rgba8[center + 1] < 20);
         assert!(tex.rgba8[center + 2] < 20);
+    }
+
+    #[test]
+    fn object_simulation_components_survive_project_roundtrip() {
+        let mut d = Document::new();
+        let id = 42;
+        d.scene.object_simulations.insert(id, crate::ObjectSimulation::Cloth(
+            crate::ClothSettings { enabled: true, quality_steps: 17, ..Default::default() }
+        ));
+        let loaded = from_bytes(&to_bytes(&d.scene).unwrap()).unwrap();
+        match loaded.object_simulations.get(&id).unwrap() {
+            crate::ObjectSimulation::Cloth(settings) => {
+                assert!(settings.enabled);
+                assert_eq!(settings.quality_steps, 17);
+            }
+            _ => panic!("wrong simulation component type"),
+        }
+    }
+
+    #[test]
+    fn non_rigid_simulation_settings_survive_project_roundtrip() {
+        let mut d = Document::new();
+        d.scene.simulations.cloth.enabled = true;
+        d.scene.simulations.cloth.quality_steps = 24;
+        d.scene.simulations.soft_body.edge_stiffness = 0.42;
+        d.scene.simulations.fluid.domain_resolution = 96;
+        d.scene.simulations.particles.count = 12_345;
+        let loaded = from_bytes(&to_bytes(&d.scene).unwrap()).unwrap();
+        assert!(loaded.simulations.cloth.enabled);
+        assert_eq!(loaded.simulations.cloth.quality_steps, 24);
+        assert!((loaded.simulations.soft_body.edge_stiffness - 0.42).abs() < 1e-6);
+        assert_eq!(loaded.simulations.fluid.domain_resolution, 96);
+        assert_eq!(loaded.simulations.particles.count, 12_345);
+    }
+
+    #[test]
+    fn rigid_body_settings_survive_project_roundtrip() {
+        let mut d = Document::new();
+        let id = d.scene.objects[0].id;
+        d.scene.rigid_bodies.insert(id, crate::RigidBody {
+            body_type: crate::RigidBodyType::Passive,
+            collision_shape: crate::CollisionShape::Box,
+            mass: 7.5,
+            friction: 0.8,
+            restitution: 0.25,
+            linear_damping: 0.1,
+            enabled: true,
+            ..crate::RigidBody::default()
+        });
+        let loaded = from_bytes(&to_bytes(&d.scene).unwrap()).unwrap();
+        let body = loaded.rigid_bodies.get(&id).unwrap();
+        assert_eq!(body.body_type, crate::RigidBodyType::Passive);
+        assert_eq!(body.collision_shape, crate::CollisionShape::Box);
+        assert!((body.mass - 7.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn rigid_body_world_constraints_and_bake_survive_project_roundtrip() {
+        let mut d = Document::new();
+        let a = d.scene.objects[0].id;
+        let b = d.scene.objects[1].id;
+        d.scene.rigid_bodies.insert(a, crate::RigidBody::default());
+        d.scene.rigid_bodies.insert(b, crate::RigidBody {
+            body_type: crate::RigidBodyType::Passive,
+            collision_shape: crate::CollisionShape::Mesh,
+            ..crate::RigidBody::default()
+        });
+        d.scene.physics_world.gravity = Vec3::new(0.0, -3.0, 0.0);
+        d.scene.physics_world.substeps_per_frame = 24;
+        d.scene.physics_world.solver_iterations = 18;
+        d.scene.rigid_body_constraints.push(crate::RigidBodyConstraint {
+            object_a: a,
+            object_b: b,
+            kind: crate::RigidBodyConstraintType::Hinge,
+            anchor_a: Vec3::new(0.1, 0.2, 0.3),
+            anchor_b: Vec3::new(-0.1, 0.0, 0.2),
+            ..crate::RigidBodyConstraint::default()
+        });
+        d.scene.physics_cache = Some(crate::PhysicsCache {
+            frames: [(
+                1,
+                vec![crate::PhysicsTransform {
+                    object_id: a,
+                    translation: Vec3::new(1.0, 2.0, 3.0),
+                    rotation: glam::Quat::IDENTITY,
+                }],
+            )].into_iter().collect(),
+        });
+
+        let loaded = from_bytes(&to_bytes(&d.scene).unwrap()).unwrap();
+        assert_eq!(loaded.physics_world.substeps_per_frame, 24);
+        assert!((loaded.physics_world.gravity.y + 3.0).abs() < 1e-6);
+        assert_eq!(loaded.rigid_body_constraints.len(), 1);
+        assert_eq!(loaded.rigid_body_constraints[0].kind, crate::RigidBodyConstraintType::Hinge);
+        assert_eq!(loaded.physics_cache.as_ref().unwrap().frames[&1].len(), 1);
+        assert_eq!(loaded.rigid_bodies[&b].collision_shape, crate::CollisionShape::Mesh);
+    }
+
+    #[test]
+    fn frg4_projects_load_without_rigid_body_settings() {
+        let d = Document::new();
+        let old = Version4Scene {
+            objects: d.scene.objects.clone(),
+            materials: d.scene.materials.clone(),
+            textures: d.scene.textures.clone(),
+            collections: d.scene.collections.clone(),
+            cursor: d.scene.cursor,
+            next_id: d.scene.next_id,
+            animation: d.scene.animation.clone(),
+            compositor_graph: d.scene.compositor_graph.clone(),
+        };
+        let raw = bincode::serialize(&old).unwrap();
+        let mut encoded = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
+        encoded.write_all(&raw).unwrap();
+        let mut bytes = V4_MAGIC.to_vec();
+        bytes.extend(encoded.finish().unwrap());
+        let loaded = from_bytes(&bytes).unwrap();
+        assert!(loaded.rigid_bodies.is_empty());
+        assert_eq!(loaded.objects.len(), d.scene.objects.len());
     }
 
     #[test]

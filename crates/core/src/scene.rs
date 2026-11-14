@@ -6,6 +6,8 @@ use crate::kinds::{helper_radius, ObjectKind};
 use crate::material::{Material, TextureData};
 use crate::mesh::{Aabb, MeshData};
 use crate::primitives::Primitive;
+use crate::physics::{PhysicsCache, PhysicsWorldSettings, RigidBody, RigidBodyConstraint};
+use crate::simulation::{ObjectSimulation, SimulationSettings};
 use glam::{Mat4, Quat, Vec3};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -96,6 +98,24 @@ pub struct Scene {
     /// Image compositing graph evaluated over the most recent render.
     #[serde(default)]
     pub compositor_graph: CompositorGraph,
+    /// Per-object rigid-body settings, keyed by stable object ID.
+    #[serde(default)]
+    pub rigid_bodies: HashMap<u64, RigidBody>,
+    /// Scene-wide rigid-body world settings (Blender: Scene > Rigid Body World).
+    #[serde(default)]
+    pub physics_world: PhysicsWorldSettings,
+    /// Constraints between rigid-body object IDs.
+    #[serde(default)]
+    pub rigid_body_constraints: Vec<RigidBodyConstraint>,
+    /// Baked per-frame rigid-body transforms.
+    #[serde(default)]
+    pub physics_cache: Option<PhysicsCache>,
+    /// Settings for cloth, soft-body, fluid and particle systems.
+    #[serde(default)]
+    pub simulations: SimulationSettings,
+    /// Per-object non-rigid simulation components (Blender-style Physics assignments).
+    #[serde(default)]
+    pub object_simulations: HashMap<u64, ObjectSimulation>,
 }
 
 struct Eval<'a> {

@@ -13,9 +13,11 @@ pub mod kinds;
 pub mod material;
 pub mod mesh;
 pub mod primitives;
+pub mod physics;
 pub mod project;
 pub mod scene;
 pub mod sculpt;
+pub mod simulation;
 pub mod shader_graph;
 pub mod uv;
 
@@ -39,7 +41,13 @@ pub use kinds::{
 pub use material::{AlphaMode, Material, TextureData};
 pub use mesh::{Aabb, MeshData, MeshGroup, Vertex};
 pub use primitives::{Primitive, TextFont};
+pub use physics::{
+    apply_baked_frame, bake_physics_to_keyframes, bake_scene, CollisionShape, PhysicsCache, PhysicsRuntime,
+    PhysicsTransform, PhysicsWorldSettings, RigidBody, RigidBodyConstraint,
+    RigidBodyConstraintType, RigidBodyType,
+};
 pub use scene::{Collection, Object, Scene};
+pub use simulation::{ClothSettings, FluidSettings, ObjectSimulation, ParticleSettings, SimulationSettings, SoftBodySettings};
 pub use sculpt::{apply_brush, dyntopo_refine, raycast_mesh, SculptBrush, SculptSettings};
 pub use shader_graph::{
     apply_eval_to_material, bake_graph_texture, color_ramp_eval_stops, color_ramp_from_node,

@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 glam.workspace = true
+rapier3d.workspace = true
 bytemuck.workspace = true
 serde.workspace = true
 bincode.workspace = true

@@ -73,12 +73,38 @@ off the UI thread. The initial graph passes Render Layers to Composite and Viewe
 are Brightness/Contrast, Exposure, Blur, Glare, and Invert; render results can be previewed and
 saved as PNG. Nodes can be added, moved, connected by dragging their sockets, and deleted; pan the
 canvas by dragging empty space or middle-drag, zoom with the wheel, and right-click a wire to remove
-it. The graph is stored in `.forge` projects, which are written as FRG4; existing FRG3 projects
+it. The graph is stored in `.forge` projects. New projects use FRG6; existing FRG5, FRG4 and FRG3 projects
 remain readable.
 
 This is a functional starter compositor, not full Blender compositor parity. It currently uses
 8-bit RGBA CPU image operations and does not implement Blender's full node catalog, multi-input
 compositing, masks, multilayer render passes, or color-management pipeline.
+
+## Rigid-body physics
+
+BlendCraft includes a local, Rust-native 3D rigid-body simulation powered by the embedded
+Rapier3D library. It does not send scene data to a server and does not call an online physics
+service; simulation, playback and baking are performed on the user's computer. Rapier is a
+build-time Rust dependency, not a runtime network service.
+
+In **Object Mode**, select a mesh and open the **Physics** tab in the Properties editor. Add an
+**Active** or **Passive** rigid body. Object settings include dynamic/animated behavior, mass,
+collision shape (Convex Hull, Box, Sphere, Capsule, Cylinder, Cone or Mesh), friction, bounciness,
+collision margin, linear/angular damping, deactivation and continuous collision detection.
+Mesh collision is intended for static/passive bodies; active mesh bodies use a convex hull.
+
+The **Scene** properties tab exposes the Rigid Body World settings: gravity, simulation speed,
+substeps, solver iterations and cache range. Its Cache controls bake transforms for the configured
+frame range and delete a bake. The constraint editor supports Fixed, Point, Hinge and Slider joints between two objects
+that both have rigid bodies, with collision disabling, anchors, axes and optional limits. Animated
+rigid bodies are driven by object keyframes and can affect simulated bodies. Playback advances the
+solver frame-by-frame, including catch-up frames, and baked frames are used when a cache exists.
+
+This is a functional rigid-body foundation, not full Blender physics parity. It does not yet
+implement Bullet-identical simulation, Blender's full rigid-body constraint catalog (including
+piston, generic spring and motor variants), cloth/soft-body or fluid solvers, force fields,
+fracture, or a complete Blender-compatible physics API. Physics behavior and cross-platform
+builds still need testing on each target OS and architecture.
 
 ## Scripting
 The **Scripting** workspace runs Python in an embedded **RustPython** interpreter from a

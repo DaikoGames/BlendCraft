@@ -175,6 +175,9 @@ struct App {
     anim_subframe: f32,
     /// Object transforms changed by playback only; GPU matrices need a refresh.
     anim_gpu_dirty: bool,
+    /// Transient Rapier world, rebuilt from the saved scene when playback starts.
+    physics_runtime: Option<forge_core::PhysicsRuntime>,
+    physics_runtime_doc_version: u64,
     /// Running eased transition of the orbit camera to an axis view.
     view_anim: Option<ViewAnim>,
     title: String,
@@ -356,6 +359,8 @@ impl App {
             last_anim_tick: std::time::Instant::now(),
             anim_subframe: 0.0,
             anim_gpu_dirty: false,
+            physics_runtime: None,
+            physics_runtime_doc_version: 0,
             view_anim: None,
             title: String::new(),
             initial,
@@ -2090,6 +2095,7 @@ impl App {
             match res {
                 Ok(scene) => {
                     self.doc = Document::from_scene(scene, Some(path.clone()));
+                    self.physics_runtime = None;
                     self.recent.add(&path);
                     self.reset_view_state();
                     self.frame(false);
@@ -2278,6 +2284,7 @@ impl App {
             A::New => {
                 if self.confirm_discard() {
                     self.doc = Document::new();
+                    self.physics_runtime = None;
                     self.reset_view_state();
                     self.frame(false);
                 }
@@ -3487,6 +3494,8 @@ impl App {
         self.anim_subframe = 0.0;
         let frame = self.doc.scene.animation.frame_current as f32;
         self.eval_animation_at(frame);
+        let current_frame = self.doc.scene.animation.frame_current;
+        forge_core::apply_baked_frame(&mut self.doc.scene, current_frame);
         self.doc.touch();
     }
 
@@ -3537,6 +3546,12 @@ impl App {
             let Some(idx) = self.doc.scene.index_of(id) else {
                 continue;
             };
+            if self.doc.scene.rigid_bodies.get(&id).is_some_and(|body|
+                body.enabled && body.body_type == forge_core::RigidBodyType::Active
+                    && body.dynamic && !body.animated
+            ) {
+                continue;
+            }
             let o = &mut self.doc.scene.objects[idx];
             if let Some(v) = loc {
                 o.translation = v;
@@ -4482,29 +4497,71 @@ impl App {
             let mut elapsed = self.last_anim_tick.elapsed().as_secs_f32();
             // Cap catch-up so a long hitch does not jump the whole timeline at once.
             let max_steps = 8u32;
-            let mut steps = 0u32;
-            while elapsed >= frame_dt && steps < max_steps {
+            let mut advanced_frames = Vec::new();
+            while elapsed >= frame_dt && advanced_frames.len() < max_steps as usize {
                 elapsed -= frame_dt;
                 self.doc.scene.animation.step();
-                steps += 1;
+                advanced_frames.push(self.doc.scene.animation.frame_current);
             }
-            if steps > 0 {
+            if !advanced_frames.is_empty() {
                 // Keep residual time so we do not drift slow.
                 self.last_anim_tick = std::time::Instant::now()
                     - std::time::Duration::from_secs_f32(elapsed.max(0.0));
             }
+            let steps = advanced_frames.len();
             self.anim_subframe = (elapsed / frame_dt).clamp(0.0, 0.999);
             let frame = self.doc.scene.animation.frame_current as f32 + self.anim_subframe;
-            self.eval_animation_at(frame);
+            let mut physics_changed = false;
+            if self.doc.scene.physics_cache.is_some() {
+                self.eval_animation_at(frame);
+                let current_frame = self.doc.scene.animation.frame_current;
+                physics_changed = forge_core::apply_baked_frame(
+                    &mut self.doc.scene,
+                    current_frame,
+                );
+                self.physics_runtime = None;
+            } else if steps > 0 {
+                // Build the runtime from the scene at the frame playback started,
+                // before evaluating the next animation frame. Then evaluate and
+                // simulate each frame in order so catch-up never skips physics time.
+                if self.physics_runtime.is_some()
+                    && self.physics_runtime_doc_version != self.doc.version
+                {
+                    // User edits made while paused invalidate the transient solver state.
+                    self.physics_runtime = None;
+                }
+                if self.physics_runtime.is_none() {
+                    self.physics_runtime = Some(forge_core::PhysicsRuntime::new(&self.doc.scene));
+                    self.physics_runtime_doc_version = self.doc.version;
+                }
+                for simulation_frame in advanced_frames {
+                    self.eval_animation_at(simulation_frame as f32);
+                    if let Some(runtime) = self.physics_runtime.as_mut() {
+                        physics_changed |= runtime.step_scene(&mut self.doc.scene, frame_dt);
+                    }
+                }
+                self.eval_animation_at(frame);
+            } else {
+                self.eval_animation_at(frame);
+            }
             if self.animation_moves_lights() {
                 // Light positions are baked into the scene upload: full refresh.
                 self.doc.touch();
+                if self.physics_runtime.is_some() {
+                    self.physics_runtime_doc_version = self.doc.version;
+                }
             } else {
                 self.anim_gpu_dirty = true;
             }
-        } else if self.anim_subframe != 0.0 {
-            // Playback just stopped: snap back onto the whole frame.
-            self.apply_animation_frame();
+            if physics_changed {
+                self.anim_gpu_dirty = true;
+                self.doc.dirty = true;
+            }
+        } else {
+            if self.anim_subframe != 0.0 {
+                // Playback just stopped: snap back onto the whole frame.
+                self.apply_animation_frame();
+            }
         }
         self.step_view_anim();
         // Camera view follows the (already updated) camera object this very frame.
@@ -4736,6 +4793,7 @@ impl ApplicationHandler for App {
                 "forge" => self.open_project(p),
                 "glb" | "gltf" | "obj" => {
                     self.doc = Document::from_scene(Default::default(), None);
+                    self.physics_runtime = None;
                     self.import_path(&p);
                     self.doc.dirty = false;
                 }
