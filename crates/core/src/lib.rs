@@ -55,7 +55,10 @@ pub use physics::{
     RigidBodyConstraintType, RigidBodyType,
 };
 pub use scene::{Collection, Object, Scene};
-pub use simulation::{ClothSettings, FluidSettings, ObjectSimulation, ParticleSettings, SimulationSettings, SoftBodySettings};
+pub use simulation::{
+    bake_non_rigid_simulations, free_sim_bake, promote_legacy_fluid_components, ClothSettings,
+    FluidSettings, ObjectSimulation, ParticleSettings, SimulationSettings, SoftBodySettings,
+};
 pub use sculpt::{apply_brush, dyntopo_refine, raycast_mesh, SculptBrush, SculptSettings};
 pub use shader_graph::{
     apply_eval_to_material, bake_graph_texture, color_ramp_eval_stops, color_ramp_from_node,

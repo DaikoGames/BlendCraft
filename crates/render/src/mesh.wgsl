@@ -166,69 +166,105 @@ fn fs_main(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f
     let nov = max(dot(n, v), 1e-4);
     let f0 = mix(vec3<f32>(0.04), base.rgb, metallic);
     let diffuse_color = base.rgb * (1.0 - metallic);
+    let engine = u32(g.light_info.z + 0.5); // 0 Workbench, 1 EEVEE, 2 Cycles
 
-    let irradiance = sh_irradiance(rot_env(n));
-    let rdir = reflect(-v, n);
-    let prefiltered = sample_env(rdir, roughness * g.env.z);
-    let spec = prefiltered * env_brdf_approx(f0, roughness, nov);
+    var lit = vec3<f32>(0.0);
 
-    // scene lights (point / sun / spot) with optional shadow for one light
-    var direct = vec3<f32>(0.0);
-    let light_count = u32(g.light_info.x + 0.5);
-    let shadow_idx = i32(g.light_info.y);
-    let shadow_enabled = g.opts.w >= 1.0;
-
-    // HARD RULE: light does not pass through geometry.
-    // One shadow factor from the primary light's depth map; applied to ALL lighting.
-    var shadow_factor = 1.0;
-    if (shadow_enabled && shadow_idx >= 0) {
-        let slt = g.lights[u32(shadow_idx)];
-        var light_dir = vec3<f32>(0.0, 1.0, 0.0);
-        if (slt.pos_type.w >= 0.5 && slt.pos_type.w <= 1.5) {
-            light_dir = -normalize(slt.dir.xyz); // sun
-        } else {
-            light_dir = normalize(slt.pos_type.xyz - in.world); // point / spot
-        }
-        shadow_factor = sample_shadow(in.world, n, light_dir);
-    }
-
-    for (var i: u32 = 0u; i < light_count; i = i + 1u) {
-        let lt = g.lights[i];
-        var l = vec3<f32>(0.0, 1.0, 0.0);
-        var atten = 1.0;
-        if (lt.pos_type.w < 0.5 || lt.pos_type.w > 1.5) {
-            // Point / Spot
-            let dvec = lt.pos_type.xyz - in.world;
-            let dist2 = max(dot(dvec, dvec), 0.05 * 0.05);
-            let inv_dist = inverseSqrt(dist2);
-            l = dvec * inv_dist;
-            atten = inv_dist * inv_dist;
-            if (lt.color.w > 0.0) {
-                let r = lt.color.w;
-                let d = 1.0 / inv_dist;
-                let x = clamp(1.0 - (d / r) * (d / r) * (d / r) * (d / r), 0.0, 1.0);
-                atten = atten * x * x;
+    if (engine == 0u) {
+        // -------- Workbench (Blender solid / studio) --------
+        // Three-point studio lights in view space, no IBL, fast Lambert + soft highlight.
+        let key = normalize(vec3<f32>(0.45, 0.85, 0.35));
+        let fill = normalize(vec3<f32>(-0.55, 0.25, 0.40));
+        let rim = normalize(vec3<f32>(0.10, 0.20, -0.90));
+        // Approximate view-space normals using camera-facing axes from eye→world.
+        let key_c = max(dot(n, key), 0.0);
+        let fill_c = max(dot(n, fill), 0.0);
+        let rim_c = pow(max(1.0 - max(dot(n, v), 0.0), 0.0), 2.0) * max(dot(n, rim), 0.0);
+        let studio = base.rgb * (0.18 + 0.70 * key_c + 0.28 * fill_c) + base.rgb * rim_c * 0.25;
+        let spec_wb = pow(max(dot(n, normalize(key + v)), 0.0), 48.0) * (0.12 + 0.25 * metallic);
+        lit = studio + vec3<f32>(spec_wb) + graph_emission * 0.5;
+    } else {
+        // -------- EEVEE / Cycles shared direct + IBL path --------
+        let irradiance = sh_irradiance(rot_env(n));
+        let rdir = reflect(-v, n);
+        var prefiltered = sample_env(rdir, roughness * g.env.z);
+        // Cycles: multi-sample the environment around the reflection lobe for a softer, path-traced look.
+        if (engine == 2u) {
+            var acc = prefiltered;
+            let hops = 4u;
+            for (var s: u32 = 0u; s < hops; s = s + 1u) {
+                let a = f32(s) * 1.6180339887;
+                let off = normalize(rdir + n * 0.15 * roughness
+                    + vec3<f32>(sin(a), cos(a * 1.3), sin(a * 0.7)) * (0.35 * roughness));
+                acc = acc + sample_env(off, roughness * g.env.z);
             }
-            if (lt.pos_type.w > 1.5) {
-                let cd = dot(-l, normalize(lt.dir.xyz));
-                atten = atten * smoothstep(lt.spot.x, lt.spot.y, cd);
-            }
-        } else {
-            // Sun
-            l = -normalize(lt.dir.xyz);
+            prefiltered = acc / f32(hops + 1u);
         }
-        var contrib = ggx_direct(n, v, l, base.rgb, metallic, roughness) * lt.color.rgb * atten;
-        // RULE: blocked fragments receive no direct light
+        let spec = prefiltered * env_brdf_approx(f0, roughness, nov);
+
+        var direct = vec3<f32>(0.0);
+        let light_count = u32(g.light_info.x + 0.5);
+        let shadow_idx = i32(g.light_info.y);
+        // Workbench ignores mapped shadows; EEVEE uses them; Cycles softens further.
+        var shadow_enabled = g.opts.w >= 1.0 && engine != 0u;
+        var shadow_factor = 1.0;
         if (shadow_enabled && shadow_idx >= 0) {
-            contrib = contrib * shadow_factor;
+            let slt = g.lights[u32(shadow_idx)];
+            var light_dir = vec3<f32>(0.0, 1.0, 0.0);
+            if (slt.pos_type.w >= 0.5 && slt.pos_type.w <= 1.5) {
+                light_dir = -normalize(slt.dir.xyz);
+            } else {
+                light_dir = normalize(slt.pos_type.xyz - in.world);
+            }
+            shadow_factor = sample_shadow(in.world, n, light_dir);
+            if (engine == 2u) {
+                // Soften contact: blend toward lit so Cycles doesn't look hard-raster.
+                shadow_factor = mix(0.35, 1.0, shadow_factor);
+            }
         }
-        direct = direct + contrib;
-    }
 
-    // Ambient also respects the rule (no "glow through" walls)
-    let shade = mix(0.0, 1.0, shadow_factor);
-    let ambient = diffuse_color * 0.02 * ao * shade;
-    let lit = ambient + (diffuse_color * irradiance + spec) * ao * g.opts.z * shade + direct + graph_emission;
+        for (var i: u32 = 0u; i < light_count; i = i + 1u) {
+            let lt = g.lights[i];
+            var l = vec3<f32>(0.0, 1.0, 0.0);
+            var atten = 1.0;
+            if (lt.pos_type.w < 0.5 || lt.pos_type.w > 1.5) {
+                let dvec = lt.pos_type.xyz - in.world;
+                let dist2 = max(dot(dvec, dvec), 0.05 * 0.05);
+                let inv_dist = inverseSqrt(dist2);
+                l = dvec * inv_dist;
+                atten = inv_dist * inv_dist;
+                if (lt.color.w > 0.0) {
+                    let r = lt.color.w;
+                    let d = 1.0 / inv_dist;
+                    let x = clamp(1.0 - (d / r) * (d / r) * (d / r) * (d / r), 0.0, 1.0);
+                    atten = atten * x * x;
+                }
+                if (lt.pos_type.w > 1.5) {
+                    let cd = dot(-l, normalize(lt.dir.xyz));
+                    atten = atten * smoothstep(lt.spot.x, lt.spot.y, cd);
+                }
+            } else {
+                l = -normalize(lt.dir.xyz);
+            }
+            var rough_use = roughness;
+            if (engine == 2u) {
+                rough_use = clamp(roughness * 1.05 + 0.02, 0.045, 1.0);
+            }
+            var contrib = ggx_direct(n, v, l, base.rgb, metallic, rough_use) * lt.color.rgb * atten;
+            if (shadow_enabled && shadow_idx >= 0) {
+                contrib = contrib * shadow_factor;
+            }
+            direct = direct + contrib;
+        }
+
+        let shade = mix(0.0, 1.0, shadow_factor);
+        let ambient = diffuse_color * 0.02 * ao * shade;
+        var env_str = g.opts.z;
+        if (engine == 2u) {
+            env_str = max(env_str, 0.35); // Cycles always uses some environment bounce
+        }
+        lit = ambient + (diffuse_color * irradiance + spec) * ao * env_str * shade + direct + graph_emission;
+    }
 
     let mode = u32(g.env.w + 0.5);
     var rgb = finish_color(lit);

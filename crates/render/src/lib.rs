@@ -2,11 +2,12 @@
 //!
 //! Step 2 features: glTF PBR materials + textures (with mips), image-based lighting from an
 //! equirect HDR (SH diffuse + roughness-mip specular), procedural sky, view modes, wireframe.
+mod cycles;
 mod settings;
 mod shader_graph_wgsl;
 mod texture;
 
-pub use settings::{Highlight, ShadingMode, ViewSettings, WireMode};
+pub use settings::{Highlight, RenderEngine, ShadingMode, ViewSettings, WireMode};
 
 pub fn supports_shader_graph(graph: &forge_core::ShaderGraph) -> bool {
     shader_graph_wgsl::compile(graph).is_ok()
@@ -156,6 +157,22 @@ pub struct Renderer {
     tex_owner: Option<Arc<Vec<TextureData>>>,
     /// Reused offscreen targets for capture (avoid alloc per frame).
     capture_cache: Option<CaptureCache>,
+    /// Progressive CPU path tracer (Cycles engine).
+    cycles: cycles::CyclesState,
+    /// GPU resources for presenting the Cycles preview (lazy).
+    cycles_gpu: Option<CyclesGpu>,
+}
+
+/// Fullscreen blit of the Cycles path-traced preview into the viewport.
+struct CyclesGpu {
+    pipeline: wgpu::RenderPipeline,
+    bgl: wgpu::BindGroupLayout,
+    sampler: wgpu::Sampler,
+    tex: wgpu::Texture,
+    view: wgpu::TextureView,
+    bg: wgpu::BindGroup,
+    width: u32,
+    height: u32,
 }
 
 struct CaptureCache {
@@ -627,6 +644,8 @@ fn vs_main(@location(0) pos: vec3<f32>) -> @builtin(position) vec4<f32> {
             mesh_blend,
             wire_pipeline,
             grid_vb,
+            cycles: cycles::CyclesState::default(),
+            cycles_gpu: None,
             grid_count: grid.len() as u32,
             materials: Vec::new(),
             graph_pipeline_cache: HashMap::new(),
@@ -769,6 +788,8 @@ fn vs_main(@location(0) pos: vec3<f32>) -> @builtin(position) vec4<f32> {
         self.mesh_cache = fresh;
         self.materials = mats;
         self.objects = objects;
+        // Path-tracer geometry must match the GPU scene.
+        self.cycles.rebuild_scene(scene);
 
         // punctual lights (max 8)
         let mut lights = [[[0.0f32; 4]; 4]; 8];
@@ -1250,7 +1271,12 @@ fn vs_main(@location(0) pos: vec3<f32>) -> @builtin(position) vec4<f32> {
                 },
             ],
             sh: self.sh,
-            light_info: [self.light_count as f32, self.shadow_light as f32, 0.0, 0.0],
+            light_info: [
+                self.light_count as f32,
+                self.shadow_light as f32,
+                s.engine as u32 as f32,
+                s.cycles_samples as f32,
+            ],
             lights: self.lights,
             light_view_proj: self.light_view_proj.to_cols_array_2d(),
         };
@@ -1308,7 +1334,41 @@ fn vs_main(@location(0) pos: vec3<f32>) -> @builtin(position) vec4<f32> {
                 }
             }
         }
-        {
+        let use_cycles = s.engine == RenderEngine::Cycles && !skip_3d;
+        if use_cycles {
+            // Clear the swapchain, then path-trace and blit into the viewport.
+            {
+                let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("cycles clear"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color {
+                                r: 0.02,
+                                g: 0.02,
+                                b: 0.025,
+                                a: 1.0,
+                            }),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+                let _ = &mut pass;
+            }
+            let target = s.cycles_samples.max(1);
+            self.cycles.accumulate(
+                camera,
+                vw as u32,
+                vh as u32,
+                s.exposure,
+                target,
+            );
+            self.blit_cycles_preview(&mut enc, &view, vx, vy, vw, vh);
+        } else {
             let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("main pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -1378,7 +1438,6 @@ fn vs_main(@location(0) pos: vec3<f32>) -> @builtin(position) vec4<f32> {
                     }
                 }
 
-                // wireframe for everything (if enabled) and always for selected objects
                 pass.set_pipeline(&self.wire_pipeline);
                 for o in self
                     .objects
@@ -1390,7 +1449,7 @@ fn vs_main(@location(0) pos: vec3<f32>) -> @builtin(position) vec4<f32> {
                     pass.set_index_buffer(o.buffers.wire_ib.slice(..), wgpu::IndexFormat::Uint32);
                     pass.draw_indexed(0..o.buffers.wire_count, 0, 0..1);
                 }
-            } // !skip_3d
+            }
         }
         let extra = overlay(&self.device, &self.queue, &mut enc, &view);
         self.queue
@@ -1401,6 +1460,198 @@ fn vs_main(@location(0) pos: vec3<f32>) -> @builtin(position) vec4<f32> {
 
     /// Render the scene off-screen at the given resolution and return RGBA8 pixels.
     /// Does not draw UI overlays or selection highlights.
+
+    /// Ensure a Cycles blit pipeline + texture exist for the path-traced preview size.
+    fn ensure_cycles_gpu(&mut self, width: u32, height: u32) {
+        let need_new = match &self.cycles_gpu {
+            None => true,
+            Some(g) => g.width != width || g.height != height,
+        };
+        if !need_new {
+            return;
+        }
+        let shader = self
+            .device
+            .create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("cycles-blit"),
+                source: wgpu::ShaderSource::Wgsl(
+                    r#"
+@group(0) @binding(0) var tex: texture_2d<f32>;
+@group(0) @binding(1) var samp: sampler;
+struct VsOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32>, };
+@vertex fn vs(@builtin(vertex_index) i: u32) -> VsOut {
+    var p = array<vec2<f32>, 3>(vec2(-1.0,-1.0), vec2(3.0,-1.0), vec2(-1.0,3.0));
+    var o: VsOut;
+    o.pos = vec4(p[i], 0.0, 1.0);
+    o.uv = p[i] * vec2(0.5, -0.5) + vec2(0.5, 0.5);
+    return o;
+}
+@fragment fn fs(i: VsOut) -> @location(0) vec4<f32> {
+    return textureSample(tex, samp, i.uv);
+}
+"#
+                    .into(),
+                ),
+            });
+        let bgl = self
+            .device
+            .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("cycles-blit-bgl"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            multisampled: false,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                ],
+            });
+        let layout = self
+            .device
+            .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("cycles-blit-pl"),
+                bind_group_layouts: &[&bgl],
+                push_constant_ranges: &[],
+            });
+        let pipeline = self
+            .device
+            .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("cycles-blit-pipe"),
+                layout: Some(&layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: "vs",
+                    buffers: &[],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: "fs",
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: self.config.format,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState::default(),
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview: None,
+                cache: None,
+            });
+        let sampler = self.device.create_sampler(&wgpu::SamplerDescriptor {
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        let tex = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("cycles-preview"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+        let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("cycles-blit-bg"),
+            layout: &bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&sampler),
+                },
+            ],
+        });
+        self.cycles_gpu = Some(CyclesGpu {
+            pipeline,
+            bgl,
+            sampler,
+            tex,
+            view,
+            bg,
+            width,
+            height,
+        });
+    }
+
+    fn blit_cycles_preview(
+        &mut self,
+        enc: &mut wgpu::CommandEncoder,
+        target: &wgpu::TextureView,
+        vx: f32,
+        vy: f32,
+        vw: f32,
+        vh: f32,
+    ) {
+        let (cw, ch) = self.cycles.size();
+        if cw == 0 || ch == 0 || self.cycles.preview_rgba().is_empty() {
+            return;
+        }
+        self.ensure_cycles_gpu(cw, ch);
+        let rgba = self.cycles.preview_rgba();
+        if let Some(gpu) = self.cycles_gpu.as_ref() {
+            self.queue.write_texture(
+                wgpu::ImageCopyTexture {
+                    texture: &gpu.tex,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                rgba,
+                wgpu::ImageDataLayout {
+                    offset: 0,
+                    bytes_per_row: Some(4 * cw),
+                    rows_per_image: Some(ch),
+                },
+                wgpu::Extent3d {
+                    width: cw,
+                    height: ch,
+                    depth_or_array_layers: 1,
+                },
+            );
+            let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("cycles blit"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: target,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            pass.set_viewport(vx, vy, vw, vh, 0.0, 1.0);
+            pass.set_scissor_rect(vx as u32, vy as u32, vw as u32, vh as u32);
+            pass.set_pipeline(&gpu.pipeline);
+            pass.set_bind_group(0, &gpu.bg, &[]);
+            pass.draw(0..3, 0..1);
+        }
+    }
 
     /// Fast path: only rewrite model matrices (animation scrub / playback).
     /// Call this instead of `set_scene` when meshes/materials did not change.
@@ -1440,6 +1691,31 @@ fn vs_main(@location(0) pos: vec3<f32>) -> @builtin(position) vec4<f32> {
     ) -> Result<Vec<u8>> {
         let width = width.max(64);
         let height = height.max(64);
+        if s.engine == RenderEngine::Cycles {
+            let target = s.cycles_samples.max(16);
+            // Force a fresh accumulation at the capture resolution.
+            self.cycles.reset_accumulation();
+            while self.cycles.samples() < target {
+                self.cycles
+                    .accumulate(camera, width, height, s.exposure, target);
+            }
+            let (sw, sh) = self.cycles.size();
+            let src = self.cycles.preview_rgba();
+            if sw == width && sh == height {
+                return Ok(src.to_vec());
+            }
+            let mut out = vec![0u8; (width * height * 4) as usize];
+            for y in 0..height {
+                for x in 0..width {
+                    let sx = (x as f32 * sw as f32 / width as f32) as u32;
+                    let sy = (y as f32 * sh as f32 / height as f32) as u32;
+                    let si = ((sy.min(sh - 1) * sw + sx.min(sw - 1)) * 4) as usize;
+                    let di = ((y * width + x) * 4) as usize;
+                    out[di..di + 4].copy_from_slice(&src[si..si + 4]);
+                }
+            }
+            return Ok(out);
+        }
         let format = self.config.format;
 
         // Reuse offscreen targets across frames when size matches.
@@ -1514,7 +1790,12 @@ fn vs_main(@location(0) pos: vec3<f32>) -> @builtin(position) vec4<f32> {
                 },
             ],
             sh: self.sh,
-            light_info: [self.light_count as f32, self.shadow_light as f32, 0.0, 0.0],
+            light_info: [
+                self.light_count as f32,
+                self.shadow_light as f32,
+                s.engine as u32 as f32,
+                s.cycles_samples as f32,
+            ],
             lights: self.lights,
             light_view_proj: self.light_view_proj.to_cols_array_2d(),
         };

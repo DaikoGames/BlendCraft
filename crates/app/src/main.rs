@@ -14,7 +14,7 @@ use forge_core::{
     project, Constraint, Document, EditDomain, EnvironmentMap, FixedView, ObjectKind, OrbitCamera,
     SameKind, SculptSettings,
 };
-use forge_render::{Highlight, Renderer, ViewSettings};
+use forge_render::{Highlight, RenderEngine, Renderer, ViewSettings};
 use glam::{Mat4, Vec2};
 use keymap::{Action, Binding};
 use std::{
@@ -4752,6 +4752,17 @@ impl App {
                 g.window.set_title(&title);
             }
             self.title = title;
+        }
+
+        // Sync Blender-style render engine from the Render properties panel.
+        self.settings.engine = RenderEngine::from_u8(self.ui.render_engine);
+        if self.settings.engine == RenderEngine::Cycles {
+            self.settings.cycles_samples = self.ui.render_samples.max(1);
+            // Soft shadows look closer to a path-traced result.
+            self.settings.shadow_softness = self.settings.shadow_softness.max(2.0);
+        } else if self.settings.engine == RenderEngine::Workbench {
+            // Solid mode: keep shadows off for a pure studio look unless user enables them.
+            // (Leave settings.shadows as user set; shader ignores mapped shadows in Workbench.)
         }
 
         // 4) sync scene to the GPU when something changed

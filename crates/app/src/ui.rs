@@ -4412,18 +4412,25 @@ fn draw_rendering_properties(
     });
     ui.add_space(2.0);
 
-    // Engine
+    // Engine — drives the viewport + F12 lighting model (wired into the GPU renderer).
     ui.label(RichText::new("Render Engine").strong());
     ui.horizontal(|ui| {
-        for (i, name) in ["Workbench", "EEVEE", "Cycles"].iter().enumerate() {
-            if ui
-                .selectable_label(st.render_engine as usize == i, *name)
-                .clicked()
-            {
-                st.render_engine = i as u8;
-            }
-        }
+        ui.radio_value(&mut st.render_engine, 0u8, "Workbench");
+        ui.radio_value(&mut st.render_engine, 1u8, "EEVEE");
+        ui.radio_value(&mut st.render_engine, 2u8, "Cycles");
     });
+    match st.render_engine {
+        0 => {
+            ui.weak("Workbench — solid studio shading (fast modeling look).");
+        }
+        1 => {
+            ui.weak("EEVEE — real-time PBR, shadows, optional HDRI.");
+        }
+        2 => {
+            ui.weak("Cycles — multi-sampled environment + soft lighting (path-traced look).");
+        }
+        _ => {}
+    }
     ui.add_space(4.0);
 
     egui::ScrollArea::vertical()
@@ -7078,6 +7085,27 @@ fn menu_bar(
         });
 
         ui.menu_button("View", |ui| {
+            ui.menu_button("Render Engine", |ui| {
+                // Change while looking at the 3D viewport (Rendering workspace also has this).
+                if ui
+                    .radio_value(&mut st.render_engine, 0u8, "Workbench")
+                    .changed()
+                {
+                    settings.engine = forge_render::RenderEngine::Workbench;
+                }
+                if ui
+                    .radio_value(&mut st.render_engine, 1u8, "EEVEE")
+                    .changed()
+                {
+                    settings.engine = forge_render::RenderEngine::Eevee;
+                }
+                if ui
+                    .radio_value(&mut st.render_engine, 2u8, "Cycles")
+                    .changed()
+                {
+                    settings.engine = forge_render::RenderEngine::Cycles;
+                }
+            });
             ui.menu_button("Shading", |ui| {
                 for m in [
                     ShadingMode::Rendered,
@@ -8077,15 +8105,29 @@ fn draw_render_output_props(
         if st.properties_tab == PropertiesTab::Render {
             ui.label(RichText::new("Render Engine").strong());
             ui.horizontal(|ui| {
-                ui.selectable_label(true, "Workbench");
-                ui.add_enabled(false, egui::Button::new("Cycles"))
-                    .on_hover_text("Not available yet");
-                ui.add_enabled(false, egui::Button::new("EEVEE"))
-                    .on_hover_text("Not available yet");
+                ui.radio_value(&mut st.render_engine, 0u8, "Workbench");
+                ui.radio_value(&mut st.render_engine, 1u8, "EEVEE");
+                ui.radio_value(&mut st.render_engine, 2u8, "Cycles");
             });
+            match st.render_engine {
+                0 => {
+                    ui.weak("Solid studio shading — fast modeling look.");
+                }
+                1 => {
+                    ui.weak("Real-time PBR with shadows and optional HDRI.");
+                }
+                2 => {
+                    ui.weak("Multi-sampled environment + soft lighting.");
+                }
+                _ => {}
+            }
             ui.separator();
             ui.label(RichText::new("Sampling").strong());
-            ui.weak("Realtime viewport path · offline capture uses 1 sample");
+            ui.horizontal(|ui| {
+                ui.label("Render samples");
+                ui.add(egui::DragValue::new(&mut st.render_samples).range(1..=4096));
+            });
+            ui.weak("Used by Cycles quality settings and offline capture.");
             ui.separator();
             ui.label(RichText::new("Film").strong());
             ui.checkbox(
@@ -8329,15 +8371,24 @@ fn draw_simulation_systems_props(ui: &mut egui::Ui, doc: &mut Document) {
     ui.add_space(8.0);
     ui.separator();
     ui.label(RichText::new("Simulation Systems").strong());
-    ui.weak("Experimental scene-level settings for non-rigid simulations.");
-    ui.colored_label(
-        egui::Color32::from_rgb(210, 160, 70),
-        "Cloth / Soft Body / Particles: settings only (not yet connected to playback or baking). Real water uses the per-object Fluid system below (Physics tab).",
-    );
+    ui.weak("Scene-level defaults. Assign Cloth / Soft Body / Particles on objects (Physics tab), then bake.");
+
+    ui.horizontal(|ui| {
+        if ui.button("Bake All Cloth / Soft Body / Particles").clicked() {
+            physics_commit(doc);
+            let n = forge_core::bake_non_rigid_simulations(&mut doc.scene);
+            ui.label(format!("Baked {n} simulation(s). Scrub the timeline to play."));
+        }
+        if ui.button("Promote Legacy Fluids → Domain").clicked() {
+            physics_commit(doc);
+            forge_core::promote_legacy_fluid_components(&mut doc.scene);
+            ui.label("Legacy fluid components promoted where possible.");
+        }
+    });
 
     let mut settings = doc.scene.simulations.clone();
     let original = settings.clone();
-    ui.collapsing("Cloth", |ui| {
+    ui.collapsing("Cloth (defaults)", |ui| {
         ui.checkbox(&mut settings.cloth.enabled, "Enable Cloth");
         ui.horizontal(|ui| { ui.label("Quality Steps"); ui.add(egui::DragValue::new(&mut settings.cloth.quality_steps).range(1..=64)); });
         ui.horizontal(|ui| { ui.label("Vertex Mass"); ui.add(egui::DragValue::new(&mut settings.cloth.vertex_mass).speed(0.01).range(0.001..=100.0)); });
@@ -8347,9 +8398,9 @@ fn draw_simulation_systems_props(ui: &mut egui::Ui, doc: &mut Document) {
         ui.horizontal(|ui| { ui.label("Air Damping"); ui.add(egui::DragValue::new(&mut settings.cloth.air_damping).speed(0.01).range(0.0..=10.0)); });
         ui.horizontal(|ui| { ui.label("Gravity Scale"); ui.add(egui::DragValue::new(&mut settings.cloth.gravity_scale).speed(0.01).range(-10.0..=10.0)); });
         ui.checkbox(&mut settings.cloth.pin_boundary, "Pin Boundary Vertices");
-        ui.weak("Intended for fabric meshes, flags and hanging surfaces.");
+        ui.weak("Fabric, flags, hanging surfaces. Assign ＋ Cloth on the object, then Bake.");
     });
-    ui.collapsing("Soft Body", |ui| {
+    ui.collapsing("Soft Body (defaults)", |ui| {
         ui.checkbox(&mut settings.soft_body.enabled, "Enable Soft Body");
         ui.horizontal(|ui| { ui.label("Mass"); ui.add(egui::DragValue::new(&mut settings.soft_body.mass).speed(0.01).range(0.001..=10000.0)); });
         ui.horizontal(|ui| { ui.label("Edge Stiffness"); ui.add(egui::DragValue::new(&mut settings.soft_body.edge_stiffness).speed(0.01).range(0.0..=1.0)); });
@@ -8359,9 +8410,9 @@ fn draw_simulation_systems_props(ui: &mut egui::Ui, doc: &mut Document) {
         ui.horizontal(|ui| { ui.label("Goal Friction"); ui.add(egui::DragValue::new(&mut settings.soft_body.goal_friction).speed(0.01).range(0.0..=1.0)); });
         ui.horizontal(|ui| { ui.label("Gravity Scale"); ui.add(egui::DragValue::new(&mut settings.soft_body.gravity_scale).speed(0.01).range(-10.0..=10.0)); });
         ui.checkbox(&mut settings.soft_body.use_self_collision, "Self Collision");
-        ui.weak("Intended for deformable meshes such as rubber, foam and flexible props.");
+        ui.weak("Rubber, foam, soft props. Assign ＋ Soft Body on the object, then Bake.");
     });
-    ui.collapsing("Fluid", |ui| {
+    ui.collapsing("Fluid (legacy defaults)", |ui| {
         ui.checkbox(&mut settings.fluid.enabled, "Enable Fluid Domain");
         ui.horizontal(|ui| { ui.label("Resolution"); ui.add(egui::DragValue::new(&mut settings.fluid.domain_resolution).range(8..=256)); });
         ui.horizontal(|ui| { ui.label("Particle Radius"); ui.add(egui::DragValue::new(&mut settings.fluid.particle_radius).speed(0.005).range(0.001..=10.0)); });
@@ -8371,7 +8422,7 @@ fn draw_simulation_systems_props(ui: &mut egui::Ui, doc: &mut Document) {
         ui.horizontal(|ui| { ui.label("Gravity Scale"); ui.add(egui::DragValue::new(&mut settings.fluid.gravity_scale).speed(0.01).range(-10.0..=10.0)); });
         ui.horizontal(|ui| { ui.label("Max Particles"); ui.add(egui::DragValue::new(&mut settings.fluid.max_particles).range(100..=2_000_000)); });
         ui.checkbox(&mut settings.fluid.use_adaptive_time, "Adaptive Time Stepping");
-        ui.weak("Legacy scene-level placeholder. Use Physics tab → Fluid (Domain / Flow / Effector) for the full water solver and bake.");
+        ui.weak("Prefer Physics tab → Fluid Domain / Flow / Effector for water. Use “Promote Legacy Fluids” above if needed.");
     });
     ui.collapsing("Particle System", |ui| {
         ui.checkbox(&mut settings.particles.enabled, "Enable Emitter");
@@ -8384,7 +8435,7 @@ fn draw_simulation_systems_props(ui: &mut egui::Ui, doc: &mut Document) {
         ui.horizontal(|ui| { ui.label("Gravity Scale"); ui.add(egui::DragValue::new(&mut settings.particles.gravity_scale).speed(0.01).range(-10.0..=10.0)); });
         ui.horizontal(|ui| { ui.label("Size"); ui.add(egui::DragValue::new(&mut settings.particles.size).speed(0.001).range(0.0001..=1000.0)); });
         ui.horizontal(|ui| { ui.label("Size Randomness"); ui.add(egui::DragValue::new(&mut settings.particles.size_randomness).speed(0.01).range(0.0..=1.0)); });
-        ui.weak("Emitter configuration; particle instances and rendering are not wired to the timeline yet.");
+        ui.weak("Defaults for ＋ Particle System. Bake writes a mesh sequence of particle blobs.");
     });
 
     if settings != original {
@@ -8485,11 +8536,10 @@ fn draw_rigid_body_constraints(ui: &mut egui::Ui, doc: &mut Document, object_id:
 }
 
 fn draw_object_simulation_props(ui: &mut egui::Ui, doc: &mut Document, object_id: u64) {
-    use forge_core::{ObjectSimulation, ClothSettings, SoftBodySettings, FluidSettings, ParticleSettings};
+    use forge_core::ObjectSimulation;
     ui.separator();
     ui.label(RichText::new("Non-Rigid Simulations").strong());
-    ui.weak("Components are assigned to the selected mesh, not globally to the scene.");
-    ui.colored_label(egui::Color32::from_rgb(210, 160, 70), "Cloth, Soft Body and Particle components store settings only; their solvers are not connected yet. Water physics is in the Fluid section above.");
+    ui.weak("Cloth / Soft Body / Particles bake into a mesh sequence on this object (same as fluid). Scrub the timeline after baking.");
     if doc.in_edit_mode() || doc.sculpt_mode || doc.paint_mode || doc.uv_mode || doc.pose_mode {
         ui.weak("Switch to Object Mode to add or edit simulation components.");
         return;
@@ -8498,15 +8548,21 @@ fn draw_object_simulation_props(ui: &mut egui::Ui, doc: &mut Document, object_id
         ui.horizontal_wrapped(|ui| {
             if ui.button("＋ Cloth").clicked() {
                 physics_commit(doc);
-                doc.scene.object_simulations.insert(object_id, ObjectSimulation::Cloth(ClothSettings { enabled: true, ..Default::default() }));
+                let mut s = doc.scene.simulations.cloth.clone();
+                s.enabled = true;
+                doc.scene.object_simulations.insert(object_id, ObjectSimulation::Cloth(s));
             }
             if ui.button("＋ Soft Body").clicked() {
                 physics_commit(doc);
-                doc.scene.object_simulations.insert(object_id, ObjectSimulation::SoftBody(SoftBodySettings { enabled: true, ..Default::default() }));
+                let mut s = doc.scene.simulations.soft_body.clone();
+                s.enabled = true;
+                doc.scene.object_simulations.insert(object_id, ObjectSimulation::SoftBody(s));
             }
             if ui.button("＋ Particle System").clicked() {
                 physics_commit(doc);
-                doc.scene.object_simulations.insert(object_id, ObjectSimulation::Particles(ParticleSettings { enabled: true, ..Default::default() }));
+                let mut s = doc.scene.simulations.particles.clone();
+                s.enabled = true;
+                doc.scene.object_simulations.insert(object_id, ObjectSimulation::Particles(s));
             }
         });
         ui.weak("Choose a system to attach it to this object.");
@@ -8520,9 +8576,32 @@ fn draw_object_simulation_props(ui: &mut egui::Ui, doc: &mut Document, object_id
         if ui.button("Remove Component").clicked() {
             physics_commit(doc);
             doc.scene.object_simulations.remove(&object_id);
-            doc.scene.physics_cache = None;
+            forge_core::free_sim_bake(&mut doc.scene, object_id);
         }
     });
+    ui.horizontal(|ui| {
+        if ui.button("Bake").on_hover_text("Simulate this component over the timeline and store a mesh cache").clicked() {
+            physics_commit(doc);
+            // Ensure this object is enabled before a full bake.
+            if let Some(sim) = doc.scene.object_simulations.get_mut(&object_id) {
+                match sim {
+                    ObjectSimulation::Cloth(s) => s.enabled = true,
+                    ObjectSimulation::SoftBody(s) => s.enabled = true,
+                    ObjectSimulation::Particles(s) => s.enabled = true,
+                    ObjectSimulation::Fluid(s) => s.enabled = true,
+                }
+            }
+            let n = forge_core::bake_non_rigid_simulations(&mut doc.scene);
+            ui.label(format!("Baked {n} object(s)."));
+        }
+        if ui.button("Free Bake").clicked() {
+            physics_commit(doc);
+            forge_core::free_sim_bake(&mut doc.scene, object_id);
+        }
+    });
+    if let Some(seq) = doc.scene.mesh_caches.get(&object_id) {
+        ui.weak(format!("Cache: {} frames ({})", seq.len(), seq.source));
+    }
     match &mut component {
         ObjectSimulation::Cloth(v) => {
             ui.checkbox(&mut v.enabled, "Enabled");
@@ -8569,7 +8648,7 @@ fn draw_object_simulation_props(ui: &mut egui::Ui, doc: &mut Document, object_id
             ui.horizontal(|ui| { ui.label("Gravity Scale"); ui.add(egui::DragValue::new(&mut v.gravity_scale).speed(0.01).range(-10.0..=10.0)); });
             ui.horizontal(|ui| { ui.label("Size"); ui.add(egui::DragValue::new(&mut v.size).speed(0.001).range(0.0001..=1000.0)); });
             ui.horizontal(|ui| { ui.label("Size Randomness"); ui.add(egui::DragValue::new(&mut v.size_randomness).speed(0.01).range(0.0..=1.0)); });
-            ui.weak("This assigns emitter settings to the selected object. Particle simulation, instances and rendering still need implementation.");
+            ui.weak("Bake to simulate the emitter and store a mesh sequence on this object.");
         }
     }
     if component != original {

@@ -6,6 +6,38 @@ pub enum Highlight {
     Active,
 }
 
+/// Blender-style render engines. These drive different lighting models in the viewport
+/// and offline capture path (Workbench = solid studio, EEVEE = real-time PBR,
+/// Cycles = multi-sample path-traced look).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum RenderEngine {
+    /// Solid / studio viewport — fast, no IBL, three-point lighting.
+    Workbench = 0,
+    /// Real-time PBR with shadows and optional image-based lighting.
+    #[default]
+    Eevee = 1,
+    /// Path-traced style: multi-sampled environment + soft direct lights.
+    Cycles = 2,
+}
+
+impl RenderEngine {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Workbench => "Workbench",
+            Self::Eevee => "EEVEE",
+            Self::Cycles => "Cycles",
+        }
+    }
+
+    pub fn from_u8(v: u8) -> Self {
+        match v {
+            0 => Self::Workbench,
+            2 => Self::Cycles,
+            _ => Self::Eevee,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ShadingMode {
     Rendered = 0,
@@ -69,6 +101,10 @@ pub struct ViewSettings {
     pub shadows: bool,
     /// Softness of the shadow PCF filter (0 = hard, higher = softer).
     pub shadow_softness: f32,
+    /// Active render engine (Workbench / EEVEE / Cycles).
+    pub engine: RenderEngine,
+    /// Cycles path-trace sample count used for offline / progressive quality.
+    pub cycles_samples: u32,
 }
 
 impl Default for ViewSettings {
@@ -76,15 +112,15 @@ impl Default for ViewSettings {
         Self {
             shading: ShadingMode::Rendered,
             wireframe: WireMode::Off,
-            // Off by default so the viewport behaves like a pure 3D engine / Blender solid mode.
-            // User can enable the procedural sky (or load an HDRI) from the View menu.
             show_background: false,
             background_blur: 0.35,
             exposure: 1.0,
-            env_strength: 0.0, // no IBL contribution until the user enables a sky/HDRI
+            env_strength: 0.0,
             env_rotation: 0.0,
             shadows: true,
             shadow_softness: 1.5,
+            engine: RenderEngine::Eevee,
+            cycles_samples: 64,
         }
     }
 }
