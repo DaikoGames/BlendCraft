@@ -6414,7 +6414,7 @@ fn menu_bar(
                     ui,
                     actions,
                     b,
-                    "Alembic (.abc) — experimental",
+                    "Alembic (.abc)",
                     Action::ExportAlembic,
                     true,
                 );
@@ -7621,17 +7621,30 @@ fn font_library_window(ctx: &egui::Context, st: &mut UiState) {
         return;
     }
     let mut open = st.show_font_library;
+    // Fixed, resizable size: the old auto-sized window grew every frame because a text field
+    // asked for infinite width and the catalog grid contained very long cells.
+    // Tooltip order is above Middle/Foreground painters used by the 3D viewport
+    // (gizmos, object overlays), so the library is never covered by them.
     egui::Window::new("Font Library")
         .open(&mut open)
-        .default_width(520.0)
-        .default_height(480.0)
+        .order(egui::Order::Tooltip)
+        .default_size([560.0, 560.0])
+        .min_width(420.0)
+        .min_height(320.0)
+        .resizable(true)
         .show(ctx, |ui| {
-            ui.label("Browse free fonts (download once, then offline) and fonts already on this computer.");
-            ui.add(
-                egui::TextEdit::singleline(&mut st.font_filter)
-                    .hint_text("Filter fonts…")
-                    .desired_width(f32::INFINITY),
-            );
+            ui.label("Use fonts from this computer for Text objects.");
+            ui.weak("Fonts are never downloaded by BlendCraft. Get a .ttf/.otf yourself, then import it.");
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.label("Filter");
+                let width = (ui.available_width() - 4.0).max(120.0);
+                ui.add(
+                    egui::TextEdit::singleline(&mut st.font_filter)
+                        .hint_text("Type to filter…")
+                        .desired_width(width),
+                );
+            });
             ui.horizontal(|ui| {
                 #[cfg(not(target_arch = "wasm32"))]
                 if ui.button("Import .ttf / .otf…").clicked() {
@@ -7652,52 +7665,65 @@ fn font_library_window(ctx: &egui::Context, st: &mut UiState) {
                 }
             });
             if !st.font_status.is_empty() {
-                ui.weak(&st.font_status);
+                ui.weak(st.font_status.clone());
             }
             ui.separator();
-            ui.heading("Font catalog (offline reference)");
+
             let filter = st.font_filter.to_ascii_lowercase();
-            egui::ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
-                egui::Grid::new("catalog_fonts").num_columns(4).striped(true).show(ui, |ui| {
-                    ui.strong("Name");
-                    ui.strong("Family");
-                    ui.strong("License");
-                    ui.strong("");
-                    ui.end_row();
-                    for f in free_font_catalog() {
-                        if !filter.is_empty()
-                            && !f.name.to_ascii_lowercase().contains(&filter)
-                            && !f.family.to_ascii_lowercase().contains(&filter)
-                        {
-                            continue;
-                        }
-                        let installed = crate::fonts_io::is_catalog_installed(f.name);
-                        ui.label(f.name);
-                        ui.label(f.family);
-                        ui.label(f.license);
-                        if installed {
-                            ui.label("✓ Installed");
-                        } else {
-                            ui.label("Import a local font file to use");
-                        }
-                        ui.end_row();
+            let installed_names: Vec<String> = font_registry().lock().map(|r| r.names()).unwrap_or_default();
+
+            ui.strong("Font catalog (reference list)");
+            egui::ScrollArea::vertical()
+                .id_salt("font_catalog_scroll")
+                .max_height(210.0)
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    egui::Grid::new("font_catalog_grid")
+                        .num_columns(4)
+                        .striped(true)
+                        .spacing([14.0, 4.0])
+                        .show(ui, |ui| {
+                            ui.strong("Name");
+                            ui.strong("Family");
+                            ui.strong("License");
+                            ui.strong("Status");
+                            ui.end_row();
+                            for f in free_font_catalog() {
+                                if !filter.is_empty()
+                                    && !f.name.to_ascii_lowercase().contains(&filter)
+                                    && !f.family.to_ascii_lowercase().contains(&filter)
+                                {
+                                    continue;
+                                }
+                                ui.label(f.name);
+                                ui.label(f.family);
+                                ui.label(f.license);
+                                if crate::fonts_io::catalog_font_installed(f.name, &installed_names) {
+                                    ui.colored_label(egui::Color32::from_rgb(110, 200, 120), "✓ Installed");
+                                } else {
+                                    ui.weak("Not imported");
+                                }
+                                ui.end_row();
+                            }
+                        });
+                });
+            ui.separator();
+
+            let shown: Vec<&String> = installed_names
+                .iter()
+                .filter(|n| filter.is_empty() || n.to_ascii_lowercase().contains(&filter))
+                .collect();
+            ui.strong(format!("Installed fonts ({})", shown.len()));
+            let row_height = ui.text_style_height(&egui::TextStyle::Body) + 2.0;
+            egui::ScrollArea::vertical()
+                .id_salt("font_installed_scroll")
+                .max_height(180.0)
+                .auto_shrink([false, false])
+                .show_rows(ui, row_height, shown.len(), |ui, range| {
+                    for i in range {
+                        ui.label(shown[i].as_str());
                     }
                 });
-            });
-            ui.separator();
-            ui.heading("Installed (ready to use on Text objects)");
-            let names = font_registry()
-                .lock()
-                .map(|r| r.names())
-                .unwrap_or_default();
-            egui::ScrollArea::vertical().max_height(180.0).show(ui, |ui| {
-                for n in names {
-                    if !filter.is_empty() && !n.to_ascii_lowercase().contains(&filter) {
-                        continue;
-                    }
-                    ui.label(n);
-                }
-            });
         });
     st.show_font_library = open;
 }

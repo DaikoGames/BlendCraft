@@ -138,3 +138,32 @@ pub fn is_catalog_installed(name: &str) -> bool {
         .map(|r| r.contains(name))
         .unwrap_or(false)
 }
+
+/// Loose match between a catalog entry ("Roboto Regular") and installed font names
+/// ("Roboto-Regular", "System: Roboto-Regular"): compares letters and digits only.
+pub fn catalog_font_installed(catalog_name: &str, installed: &[String]) -> bool {
+    fn norm(s: &str) -> String {
+        s.chars().filter(|c| c.is_ascii_alphanumeric()).collect::<String>().to_ascii_lowercase()
+    }
+    let want = norm(catalog_name);
+    if want.is_empty() {
+        return false;
+    }
+    installed.iter().any(|n| {
+        let have = norm(n.strip_prefix("System: ").unwrap_or(n));
+        have == want || have == want.replace("regular", "")
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::catalog_font_installed;
+
+    #[test]
+    fn catalog_names_match_file_style_names() {
+        let installed = vec!["System: Roboto-Regular".to_string(), "OpenSans-Bold".to_string()];
+        assert!(catalog_font_installed("Roboto Regular", &installed));
+        assert!(catalog_font_installed("Open Sans Bold", &installed));
+        assert!(!catalog_font_installed("Lato Bold", &installed));
+    }
+}

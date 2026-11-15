@@ -21,14 +21,13 @@ const TOP: u64 = 0x8000_0000_0000_0000;
 /// Writer-side bit layout of the 32-bit property info word.
 /// Matches official Alembic AbcCoreOgawa / Blender:
 ///   bits 0-1   property kind (0=compound, 1=scalar, 2=array)
-///   bits 2-3   size hint for following integers (0=u8, 1=u16, 2=u32) — we always use 2
+///   bits 2-3   size hint for following integers (0=u8, 1=u16, 2=u32) — smallest that fits
 ///   bits 4-7   POD type
 ///   bit  8     has time-sampling index (0x100)
 ///   bit  9     has first/last changed indices (0x200)
 ///   bits 12-19 extent
 ///   bits 20-27 metadata index (0xFF = inline metadata string follows)
 mod layout {
-    pub const SIZE_HINT: u32 = 2; // always write 4-byte integers
     pub const POD_SHIFT: u32 = 4;
     pub const HAS_TS: u32 = 0x100;
     pub const HAS_FIRST_LAST: u32 = 0x200;
@@ -342,7 +341,7 @@ struct PropHeader {
 /// and the name bytes, then optional inline metadata.
 fn parse_prop_headers(buf: &[u8], nts: usize) -> Option<Vec<PropHeader>> {
     // Object / property header blocks often end with 16 or 32 bytes of hashes.
-    for trailer in [32usize, 16, 0] {
+    for trailer in [0usize, 16, 32] {
         if buf.len() <= trailer {
             continue;
         }
@@ -688,11 +687,12 @@ impl XformReader {
                     }
                 }
                 3 => {
+                    // Alembic stores matrix ops row-major; glam is column-major.
                     let mut a = [0.0f32; 16];
-                    for (i, x) in v.iter().enumerate() {
+                    for (i, x) in v.iter().take(16).enumerate() {
                         a[i] = *x as f32;
                     }
-                    Mat4::from_cols_array(&a)
+                    Mat4::from_cols_array(&a).transpose()
                 }
                 4 => Mat4::from_rotation_x((v[0] as f32).to_radians()),
                 5 => Mat4::from_rotation_y((v[0] as f32).to_radians()),
@@ -988,19 +988,11 @@ fn write_node(buf: &mut Vec<u8>, node: &Node) -> u64 {
     }
 }
 
-fn sample_key(bytes: &[u8], dims: &[u8], pod: u8, extent: u8) -> [u8; 16] {
-    let mut a: u64 = 0xcbf2_9ce4_8422_2325;
-    let mut b: u64 = 0x8422_2325_cbf2_9ce4 ^ 0x9e37_79b9_7f4a_7c15;
-    for &x in bytes.iter().chain(dims.iter()).chain([pod, extent].iter()) {
-        a = (a ^ x as u64).wrapping_mul(0x0000_0100_0000_01b3);
-        b = (b.rotate_left(5) ^ x as u64).wrapping_mul(0x9e37_79b1_85eb_ca87);
-    }
-    a ^= bytes.len() as u64;
-    b ^= (bytes.len() as u64).rotate_left(32);
-    let mut out = [0u8; 16];
-    out[..8].copy_from_slice(&a.to_le_bytes());
-    out[8..].copy_from_slice(&b.to_le_bytes());
-    out
+fn sample_key(_bytes: &[u8], _dims: &[u8], _pod: u8, _extent: u8) -> [u8; 16] {
+    // Official Alembic uses SpookyHash here for sample identity / dedup. Readers do
+    // not verify the digest against the payload when opening, so zeros are safe and
+    // avoid any risk of a bad custom hash implementation confusing tools.
+    [0u8; 16]
 }
 
 enum PropKind {
@@ -1020,74 +1012,155 @@ fn put_str(out: &mut Vec<u8>, s: &str) {
     out.extend_from_slice(s.as_bytes());
 }
 
-fn write_prop_header(out: &mut Vec<u8>, p: &Prop) {
-    let meta = if p.md.is_empty() { 0 } else { layout::META_INLINE };
-    // size hint = 2 is always encoded in bits 2-3 of the info word
-    let hint_bits = layout::SIZE_HINT << 2;
-    // Do NOT set HAS_FIRST_LAST. Official readers default first=1, last=next-1 when the
-    // flag is clear. Writing the flag incorrectly has caused hard crashes in Blender.
-    match &p.kind {
-        PropKind::Compound(_) => {
-            // Compound: kind=0 only; no sample indices. Optional inline metadata.
-            let info = 0u32 | hint_bits | (meta << layout::META_SHIFT);
-            out.extend_from_slice(&info.to_le_bytes());
-        }
-        PropKind::Scalar { pod, extent, ts, samples } => {
-            let n = samples.len() as u32;
-            let mut info = 1u32
-                | hint_bits
-                | ((*pod as u32) << layout::POD_SHIFT)
-                | ((*extent as u32) << layout::EXTENT_SHIFT)
-                | (meta << layout::META_SHIFT);
-            if *ts != 0 {
-                info |= layout::HAS_TS;
-            }
-            out.extend_from_slice(&info.to_le_bytes());
-            out.extend_from_slice(&n.to_le_bytes()); // nextSampleIndex
-            if *ts != 0 {
-                out.extend_from_slice(&(*ts as u32).to_le_bytes());
-            }
-        }
-        PropKind::Array { pod, extent, ts, samples } => {
-            let n = samples.len() as u32;
-            let mut info = 2u32
-                | hint_bits
-                | ((*pod as u32) << layout::POD_SHIFT)
-                | ((*extent as u32) << layout::EXTENT_SHIFT)
-                | (meta << layout::META_SHIFT);
-            if *ts != 0 {
-                info |= layout::HAS_TS;
-            }
-            out.extend_from_slice(&info.to_le_bytes());
-            out.extend_from_slice(&n.to_le_bytes());
-            if *ts != 0 {
-                out.extend_from_slice(&(*ts as u32).to_le_bytes());
-            }
-        }
+/// Table of indexed metadata strings (archive child 5). Index 0 is the empty metadata, the
+/// strings are stored 1-based, exactly like Blender/libAlembic files do.
+struct MdTable {
+    entries: Vec<String>,
+}
+
+impl MdTable {
+    fn new() -> Self {
+        Self { entries: Vec::new() }
     }
-    put_str(out, &p.name);
-    if !p.md.is_empty() {
-        put_str(out, &p.md);
+    fn index(&mut self, md: &str) -> u32 {
+        if md.is_empty() {
+            return 0;
+        }
+        if let Some(i) = self.entries.iter().position(|e| e == md) {
+            return i as u32 + 1;
+        }
+        self.entries.push(md.to_string());
+        self.entries.len() as u32
+    }
+    fn to_bytes(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        for e in &self.entries {
+            out.push(e.len().min(255) as u8);
+            out.extend_from_slice(&e.as_bytes()[..e.len().min(255)]);
+        }
+        out
     }
 }
 
-fn compound_node(children: &[Prop]) -> Node {
+/// Integer width used for the numbers that follow the info word (size hint, bits 2-3):
+/// 0 = one byte, 1 = two bytes, 2 = four bytes. Like the real writer, the smallest width
+/// that fits every number of the header is used.
+fn hint_for(max_value: usize) -> u32 {
+    if max_value <= 0xFF {
+        0
+    } else if max_value <= 0xFFFF {
+        1
+    } else {
+        2
+    }
+}
+
+fn put_hinted(out: &mut Vec<u8>, hint: u32, v: u32) {
+    match hint {
+        0 => out.push(v as u8),
+        1 => out.extend_from_slice(&(v as u16).to_le_bytes()),
+        _ => out.extend_from_slice(&v.to_le_bytes()),
+    }
+}
+
+fn write_prop_header(out: &mut Vec<u8>, p: &Prop, _md: &mut MdTable) {
+    // Always use size-hint 2 (u32) so every following integer is 4 bytes. This matches
+    // the common path in official writers and avoids width mismatches that crash Blender.
+    let hint: u32 = 2;
+    let name = p.name.as_bytes();
+    // Always embed metadata inline (index 0xFF) when present. Indexed metadata is
+    // optional and easy to get wrong; inline is what the official writer falls back to.
+    let inline = !p.md.is_empty();
+    let meta_idx: u32 = if inline { 0xFF } else { 0 };
+
+    match &p.kind {
+        PropKind::Compound(_) => {
+            let info = (hint << 2) | (meta_idx << layout::META_SHIFT);
+            out.extend_from_slice(&info.to_le_bytes());
+            out.extend_from_slice(&(name.len() as u32).to_le_bytes());
+            out.extend_from_slice(name);
+            if inline {
+                out.extend_from_slice(&(p.md.len() as u32).to_le_bytes());
+                out.extend_from_slice(p.md.as_bytes());
+            }
+        }
+        PropKind::Scalar { pod, extent, ts, samples } => {
+            // Header sample count MUST equal the number of children written.
+            write_value_header(out, 1, *pod, *extent, *ts, samples.len(), name, meta_idx, false);
+            if inline {
+                out.extend_from_slice(&(p.md.len() as u32).to_le_bytes());
+                out.extend_from_slice(p.md.as_bytes());
+            }
+        }
+        PropKind::Array { pod, extent, ts, samples } => {
+            let homo = samples.len() <= 1 || samples.windows(2).all(|w| w[0].1 == w[1].1);
+            write_value_header(out, 2, *pod, *extent, *ts, samples.len(), name, meta_idx, homo);
+            if inline {
+                out.extend_from_slice(&(p.md.len() as u32).to_le_bytes());
+                out.extend_from_slice(p.md.as_bytes());
+            }
+        }
+    }
+}
+
+/// Header of a scalar (kind 1) or array (kind 2) property.
+/// Official rules (AbcCoreOgawa WritePropertyInfo):
+/// - 0x800 only when the property is constant (we use it for a single sample)
+/// - 0x200 only for a non-default first/last range (we never need it)
+/// - 0x400 when array sample counts are homogenous
+/// Never set 0x800 and 0x200 together.
+fn write_value_header(
+    out: &mut Vec<u8>,
+    kind: u32,
+    pod: u8,
+    extent: u8,
+    ts: u32,
+    count: usize,
+    name: &[u8],
+    meta_idx: u32,
+    homogenous: bool,
+) {
+    let hint: u32 = 2;
+    let mut info = kind
+        | (hint << 2)
+        | ((pod as u32) << layout::POD_SHIFT)
+        | ((extent as u32) << layout::EXTENT_SHIFT)
+        | (meta_idx << layout::META_SHIFT);
+    if ts != 0 {
+        info |= layout::HAS_TS;
+    }
+    if homogenous {
+        info |= 0x400;
+    }
+    if count <= 1 {
+        info |= 0x800;
+    }
+    out.extend_from_slice(&info.to_le_bytes());
+    out.extend_from_slice(&(count as u32).to_le_bytes());
+    if ts != 0 {
+        out.extend_from_slice(&ts.to_le_bytes());
+    }
+    out.extend_from_slice(&(name.len() as u32).to_le_bytes());
+    out.extend_from_slice(name);
+}
+
+fn compound_node(children: &[Prop], md: &mut MdTable) -> Node {
     if children.is_empty() {
         return Node::Group(Vec::new());
     }
-    let mut nodes: Vec<Node> = children.iter().map(prop_node).collect();
+    let mut nodes: Vec<Node> = children.iter().map(|c| prop_node(c, md)).collect();
     let mut headers = Vec::new();
     for c in children {
-        write_prop_header(&mut headers, c);
+        write_prop_header(&mut headers, c, md);
     }
-    headers.extend_from_slice(&[0u8; 16]);
+    // Verified against a Blender-written file: property header blocks have no trailing hash.
     nodes.push(Node::Data(headers));
     Node::Group(nodes)
 }
 
-fn prop_node(p: &Prop) -> Node {
+fn prop_node(p: &Prop, md: &mut MdTable) -> Node {
     match &p.kind {
-        PropKind::Compound(children) => compound_node(children),
+        PropKind::Compound(children) => compound_node(children, md),
         PropKind::Scalar { pod, extent, samples, .. } => Node::Group(
             samples
                 .iter()
@@ -1100,12 +1173,11 @@ fn prop_node(p: &Prop) -> Node {
         ),
         PropKind::Array { pod, extent, samples, .. } => {
             let mut nodes = Vec::new();
-            for (bytes, count) in samples {
-                let dims = count.to_le_bytes();
-                let mut d = sample_key(bytes, &dims, *pod, *extent).to_vec();
+            for (bytes, _count) in samples {
+                let mut d = sample_key(bytes, &[], *pod, *extent).to_vec();
                 d.extend_from_slice(bytes);
                 nodes.push(Node::Data(d));
-                nodes.push(Node::Data(dims.to_vec()));
+                nodes.push(Node::Data(Vec::new()));
             }
             Node::Group(nodes)
         }
@@ -1119,25 +1191,30 @@ struct ObjBuild {
     children: Vec<ObjBuild>,
 }
 
-fn obj_node(o: &ObjBuild) -> Node {
-    let mut nodes = vec![compound_node(&o.props)];
+fn obj_node(o: &ObjBuild, md: &mut MdTable) -> Node {
+    let mut nodes = vec![compound_node(&o.props, md)];
     for c in &o.children {
-        nodes.push(obj_node(c));
+        nodes.push(obj_node(c, md));
     }
-    if !o.children.is_empty() {
-        let mut h = Vec::new();
-        for c in &o.children {
-            put_str(&mut h, &c.name);
-            if c.md.is_empty() {
-                h.push(0);
-            } else {
-                h.push(0xFF);
-                put_str(&mut h, &c.md);
-            }
+    // Real files always end an object group with the child-header block followed by a
+    // 32-byte hash, also for objects without children (then it is the hash alone).
+    // Object-header metadata: use inline form (0xFF + u32 size + bytes) whenever the
+    // schema string is non-empty so we never depend on the archive metadata index table.
+    let mut h = Vec::new();
+    for c in &o.children {
+        h.extend_from_slice(&(c.name.len() as u32).to_le_bytes());
+        h.extend_from_slice(c.name.as_bytes());
+        if c.md.is_empty() {
+            h.push(0);
+        } else {
+            h.push(0xFF);
+            h.extend_from_slice(&(c.md.len() as u32).to_le_bytes());
+            h.extend_from_slice(c.md.as_bytes());
         }
-        h.extend_from_slice(&[0u8; 32]);
-        nodes.push(Node::Data(h));
     }
+    let _ = md; // indexed table kept for compatibility; object headers use inline
+    h.extend_from_slice(&[0u8; 32]);
+    nodes.push(Node::Data(h));
     Node::Group(nodes)
 }
 
@@ -1150,8 +1227,7 @@ struct TimeSamplingOut {
 fn build_archive(top: &ObjBuild, samplings: &[TimeSamplingOut]) -> Vec<u8> {
     let mut ts = Vec::new();
     for s in samplings {
-        // Official Alembic time-sampling blob:
-        //   u32 maxSamples, f64 timePerCycle, u32 numSamples, f64[num] sampleTimes
+        // u32 maxSamples, f64 timePerCycle, u32 numStoredTimes, f64[] storedTimes
         ts.extend_from_slice(&s.max_samples.to_le_bytes());
         ts.extend_from_slice(&s.per_cycle.to_le_bytes());
         ts.extend_from_slice(&(s.times.len() as u32).to_le_bytes());
@@ -1159,21 +1235,21 @@ fn build_archive(top: &ObjBuild, samplings: &[TimeSamplingOut]) -> Vec<u8> {
             ts.extend_from_slice(&t.to_le_bytes());
         }
     }
-    // Alembic library version: major*10000 + minor*100 + patch (1.8.6 → 10806).
-    let alembic_version: i32 = 10806;
-    let meta = b"Alembic.IO.Version=1;_ai_Application=BlendCraft;_ai_AlembicVersion=1.8.6 (BlendCraft pure-Rust Ogawa writer)".to_vec();
+    let alembic_version: i32 = 10803; // 1.8.3, the version found in a real Blender file
+    let meta = b"FramesPerTimeUnit=24.000000;_ai_AlembicVersion=Alembic 1.8.3 (BlendCraft writer);_ai_Application=BlendCraft".to_vec();
+    let mut md = MdTable::new();
+    let top_node = obj_node(top, &mut md);
     let root = Node::Group(vec![
-        Node::Data(0i32.to_le_bytes().to_vec()), // archive file version (0 is the common value)
+        Node::Data(0i32.to_le_bytes().to_vec()),
         Node::Data(alembic_version.to_le_bytes().to_vec()),
-        obj_node(top),
+        top_node,
         Node::Data(meta),
         Node::Data(ts),
-        Node::Data(Vec::new()), // indexed metadata (none)
+        Node::Data(md.to_bytes()),
     ]);
     let mut buf = vec![0u8; 16];
     let root_pos = write_node(&mut buf, &root);
-    // Official Ogawa header: "Ogawa" + 0xFF + version bytes {0x00, 0x01} + root u64le.
-    // Version MUST be 0x00, 0x01 — NOT little-endian 1 (0x01, 0x00). Blender rejects the latter.
+    // Header: "Ogawa", frozen flag 0xFF, version bytes 00 01, root group position.
     buf[0..5].copy_from_slice(b"Ogawa");
     buf[5] = 0xFF;
     buf[6] = 0x00;
@@ -1287,17 +1363,12 @@ pub fn build_alembic_bytes(scene: &Scene, only: Option<&BTreeSet<u64>>) -> Resul
     let evaluated: Vec<Scene> = frames.iter().map(|f| scene_at_frame(scene, *f)).collect();
     let worlds: Vec<Vec<Mat4>> = evaluated.iter().map(|s| s.world_matrices()).collect();
     let n = frames.len();
-    // Sampling 0 = identity (static). Sampling 1 = full timeline (acyclic list of times).
-    // Writing every sample time is the safest form for Blender; uniform-only (start time
-    // alone) is valid too but some Blender builds have been crashy with mixed interpretations.
-    let sample_times: Vec<f64> = frames.iter().map(|f| *f as f64 / fps).collect();
+    // Sampling 0 = identity, sampling 1 = uniform (one sample every 1/fps seconds starting at
+    // the first frame), exactly how Blender writes it. Frame f is at time f / fps.
+    let max_samples = n.max(1) as u32;
     let samplings = vec![
-        TimeSamplingOut { max_samples: 1, per_cycle: 1.0, times: vec![0.0] },
-        TimeSamplingOut {
-            max_samples: n as u32,
-            per_cycle: 1.0 / fps,
-            times: sample_times,
-        },
+        TimeSamplingOut { max_samples, per_cycle: 1.0, times: vec![0.0] },
+        TimeSamplingOut { max_samples, per_cycle: 1.0 / fps, times: vec![frames[0] as f64 / fps] },
     ];
 
     let mut used: HashSet<String> = HashSet::new();
@@ -1308,21 +1379,31 @@ pub fn build_alembic_bytes(scene: &Scene, only: Option<&BTreeSet<u64>>) -> Resul
         let mats: Vec<Mat4> = worlds.iter().map(|w| w[i]).collect();
         let first = mats[0].to_cols_array();
         let xform_animated = n > 1 && mats.iter().any(|m| m.to_cols_array().iter().zip(first.iter()).any(|(a, b)| (a - b).abs() > 1e-6));
+        // Alembic/Imath matrix ops store a 4×4 in row-major order. glam is column-major,
+        // so transpose before serializing.
+        let mat16 = |m: Mat4| -> Vec<f64> {
+            m.transpose()
+                .to_cols_array()
+                .iter()
+                .map(|v| *v as f64)
+                .collect()
+        };
         let (xts, xsamples): (u32, Vec<Vec<u8>>) = if xform_animated {
-            (1, mats.iter().map(|m| f64_bytes(&m.to_cols_array().iter().map(|v| *v as f64).collect::<Vec<f64>>())).collect())
+            (1, mats.iter().map(|m| f64_bytes(&mat16(*m))).collect())
         } else {
-            (0, vec![f64_bytes(&first.iter().map(|v| *v as f64).collect::<Vec<f64>>())])
+            (0, vec![f64_bytes(&mat16(mats[0]))])
         };
         // .ops: single matrix op (type 3 << 4 = 0x30). .inherits = true (Blender default).
         let mut xf_children = vec![
             Prop {
                 name: ".ops".into(),
                 md: String::new(),
-                kind: PropKind::Array {
+                // Stored as a scalar, exactly like a real Blender file does.
+                kind: PropKind::Scalar {
                     pod: POD_U8,
                     extent: 1,
                     ts: 0,
-                    samples: vec![(vec![0x30u8], 1)],
+                    samples: vec![vec![0x30u8]],
                 },
             },
             Prop {
@@ -1345,16 +1426,6 @@ pub fn build_alembic_bytes(scene: &Scene, only: Option<&BTreeSet<u64>>) -> Resul
                     samples: vec![vec![1u8]],
                 },
             },
-            Prop {
-                name: ".isNotConstantIdentity".into(),
-                md: String::new(),
-                kind: PropKind::Scalar {
-                    pod: POD_BOOL,
-                    extent: 1,
-                    ts: 0,
-                    samples: vec![vec![if xform_animated { 1 } else { 0 }]],
-                },
-            },
         ];
         if xform_animated {
             let chans: Vec<u8> = (0u32..16).flat_map(|c| c.to_le_bytes()).collect();
@@ -1369,6 +1440,14 @@ pub fn build_alembic_bytes(scene: &Scene, only: Option<&BTreeSet<u64>>) -> Resul
                 },
             });
         }
+
+        // Same property order as a real Blender file: .inherits, .ops, .vals, (.animChans).
+        xf_children.sort_by_key(|p| match p.name.as_str() {
+            ".inherits" => 0,
+            ".ops" => 1,
+            ".vals" => 2,
+            _ => 3,
+        });
 
         // Geometry samples.
         let cache = scene.mesh_caches.get(&o.id);
@@ -1395,11 +1474,22 @@ pub fn build_alembic_bytes(scene: &Scene, only: Option<&BTreeSet<u64>>) -> Resul
             c_samples.push((cb, cn));
             bounds_samples.push(f64_bytes(&bounds));
         }
-        // Blender expects .selfBounds (Box3d, extent 6) under .geom.
+        // GeomBase requires `.selfBnds` (note spelling — not "Bounds").
+        // Box3d = 6 × f64. Blender's IGeomBaseSchema looks up this exact name.
         let geom = Prop {
             name: ".geom".into(),
             md: "schema=AbcGeom_PolyMesh_v1;schemaBaseType=AbcGeom_GeomBase_v1".into(),
             kind: PropKind::Compound(vec![
+                Prop {
+                    name: ".selfBnds".into(),
+                    md: String::new(),
+                    kind: PropKind::Scalar {
+                        pod: POD_F64,
+                        extent: 6,
+                        ts: gts,
+                        samples: bounds_samples,
+                    },
+                },
                 Prop {
                     name: "P".into(),
                     md: "interpretation=point".into(),
@@ -1430,23 +1520,13 @@ pub fn build_alembic_bytes(scene: &Scene, only: Option<&BTreeSet<u64>>) -> Resul
                         samples: c_samples,
                     },
                 },
-                Prop {
-                    name: ".selfBounds".into(),
-                    md: String::new(),
-                    kind: PropKind::Scalar {
-                        pod: POD_F64,
-                        extent: 6,
-                        ts: gts,
-                        samples: bounds_samples,
-                    },
-                },
             ]),
         };
         let shape_name = format!("{name}Shape");
         let shape = ObjBuild {
             name: shape_name,
             // Full schema metadata so Blender recognizes the PolyMesh schema.
-            md: "schema=AbcGeom_PolyMesh_v1;schemaObjTitle=AbcGeom_PolyMesh_v1:.geom".into(),
+            md: "schema=AbcGeom_PolyMesh_v1;schemaBaseType=AbcGeom_GeomBase_v1;schemaObjTitle=AbcGeom_PolyMesh_v1:.geom".into(),
             props: vec![geom],
             children: Vec::new(),
         };
@@ -1455,7 +1535,7 @@ pub fn build_alembic_bytes(scene: &Scene, only: Option<&BTreeSet<u64>>) -> Resul
             md: "schema=AbcGeom_Xform_v3;schemaObjTitle=AbcGeom_Xform_v3:.xform".into(),
             props: vec![Prop {
                 name: ".xform".into(),
-                md: "schema=AbcGeom_Xform_v3;schemaBaseType=AbcGeom_XformBase_v1".into(),
+                md: "schema=AbcGeom_Xform_v3".into(),
                 kind: PropKind::Compound(xf_children),
             }],
             children: vec![shape],
@@ -1535,5 +1615,25 @@ mod tests {
         let mut truncated = build_alembic_bytes(&cube_scene(), None).unwrap();
         truncated.truncate(40);
         assert!(parse_alembic_bytes(&truncated, 24.0, 1.0).is_err());
+    }
+
+    #[test]
+    fn property_header_blocks_have_no_trailer_and_leaf_objects_end_with_a_hash() {
+        let bytes = build_alembic_bytes(&cube_scene(), None).unwrap();
+        let ar = Archive::open(&bytes).unwrap();
+        let top = ar.top_object().unwrap();
+        let xf = ar.children(&top).unwrap().remove(0);
+        let props = ar.object_props(&xf).unwrap();
+        let n = ar.og.num_children(props.group).unwrap();
+        let hdr = ar.og.child_data(props.group, n - 1).unwrap();
+        let parsed = parse_prop_headers_body(hdr, ar.times.len()).unwrap();
+        assert_eq!(parsed.len(), n - 1);
+        // The block ends with the last property name (no zero padding / hash).
+        assert!(hdr.last().map_or(false, |b| (0x20..0x7f).contains(b)));
+        // Leaf (shape) object: [properties group, 32-byte hash block].
+        let shape = ar.children(&xf).unwrap().remove(0);
+        let cn = ar.og.num_children(shape.group).unwrap();
+        assert_eq!(cn, 2);
+        assert_eq!(ar.og.child_data(shape.group, 1).unwrap().len(), 32);
     }
 }

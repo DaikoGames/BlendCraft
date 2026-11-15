@@ -130,9 +130,10 @@ Import reads PolyMesh/SubD objects and Xform hierarchies, including per-frame me
 and the timeline range is set to the cache. Animated transforms become keyframes. Polygons are triangulated; normals
 are recomputed; UVs, cameras, curves, points and custom attributes are skipped. Export samples animation, rigid-body
 bakes and mesh sequences over the timeline range (static scenes are written as one sample). The Ogawa container and
-Alembic layer are implemented in pure Rust (`crates/io/src/alembic.rs`). Property headers now respect the official
+Alembic layer are implemented in pure Rust (`crates/io/src/alembic.rs`). Property headers respect the official
 variable-width integer encoding (size hint), so files written by Blender and other Alembic 1.7/1.8 tools import
-correctly. HDF5-based archives from very old Alembic versions are not supported. Large water caches are held in
+correctly. The exporter follows the structure of a real Blender-written file (no hash after property headers, a hash
+block after every object, empty dimension blocks for rank-1 arrays, uniform time sampling). HDF5-based archives from very old Alembic versions are not supported. Large water caches are held in
 memory, one mesh per frame.
 
 ## Scripting
