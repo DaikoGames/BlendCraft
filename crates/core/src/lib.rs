@@ -8,9 +8,11 @@ pub mod constraints;
 pub mod document;
 mod edit;
 pub mod environment;
+pub mod fluid;
 pub mod fonts;
 pub mod kinds;
 pub mod material;
+pub mod meshcache;
 pub mod mesh;
 pub mod primitives;
 pub mod physics;
@@ -30,6 +32,12 @@ pub use constraints::{Constraint, ConstraintKind};
 pub use document::{AlignMode, AlignTo, Document, OriginMode, SameKind};
 pub use edit::{edge_key, world_positions, EditDomain, EditPick, EditSelection, EditSession};
 pub use environment::{sh_basis, EnvironmentMap};
+pub use fluid::{
+    apply_domain_display, domain_material_index, fluid_bake_frames, free_fluid_bake,
+    mesh_from_particles, migrate_legacy_fluids, scene_at_frame, FlowBehavior, FluidBaker,
+    FluidDomain, FluidEffector, FluidFlow, FluidObject, FluidSolver, FluidType,
+};
+pub use meshcache::{apply_mesh_caches, MeshSequence};
 pub use fonts::{
     font_registry, free_font_catalog, mesh_from_font, system_font_dirs, CatalogFont, FontRegistry,
 };

@@ -25,6 +25,11 @@ pub enum Action {
     ExportObjSelected,
     ExportFbx,
     ExportFbxSelected,
+    ExportAlembic,
+    ExportAlembicSelected,
+    /// USD ASCII — reliable path into Blender (preferred over Alembic export).
+    ExportUsda,
+    ExportUsdaSelected,
     Quit,
     // edit
     Undo,

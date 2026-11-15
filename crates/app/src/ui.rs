@@ -71,6 +71,9 @@ pub struct UiState {
     pub viewport_context_menu: Option<egui::Pos2>,
     pub viewport_context_menu_rect: Option<egui::Rect>,
     pub status: String,
+    /// Running water-physics bake (stepped a little every UI frame).
+    pub fluid_baker: Option<forge_core::FluidBaker>,
+    pub fluid_bake_status: String,
     pub shortcut_filter: String,
     pub outliner_filter: String,
     pub renaming: Option<Rename>,
@@ -6373,7 +6376,7 @@ fn menu_bar(
                 ui,
                 actions,
                 b,
-                "Import… (glTF, GLB, OBJ, FBX, Unity package)",
+                "Import… (glTF, GLB, OBJ, FBX, Alembic, Unity package)",
                 Action::Import,
                 true,
             );
@@ -6399,6 +6402,22 @@ fn menu_bar(
                     Action::ExportFbx,
                     true,
                 );
+                mi(
+                    ui,
+                    actions,
+                    b,
+                    "USD ASCII (.usda) — best for Blender",
+                    Action::ExportUsda,
+                    true,
+                );
+                mi(
+                    ui,
+                    actions,
+                    b,
+                    "Alembic (.abc) — experimental",
+                    Action::ExportAlembic,
+                    true,
+                );
                 ui.separator();
                 mi(
                     ui,
@@ -6422,6 +6441,22 @@ fn menu_bar(
                     b,
                     "Autodesk FBX, selected only",
                     Action::ExportFbxSelected,
+                    has_sel,
+                );
+                mi(
+                    ui,
+                    actions,
+                    b,
+                    "USD ASCII, selected only",
+                    Action::ExportUsdaSelected,
+                    has_sel,
+                );
+                mi(
+                    ui,
+                    actions,
+                    b,
+                    "Alembic, selected only",
+                    Action::ExportAlembicSelected,
                     has_sel,
                 );
             });
@@ -8269,7 +8304,10 @@ fn draw_simulation_systems_props(ui: &mut egui::Ui, doc: &mut Document) {
     ui.separator();
     ui.label(RichText::new("Simulation Systems").strong());
     ui.weak("Experimental scene-level settings for non-rigid simulations.");
-    ui.colored_label(egui::Color32::from_rgb(210, 160, 70), "Solver status: settings are saved; these four solvers are not yet connected to playback or baking.");
+    ui.colored_label(
+        egui::Color32::from_rgb(210, 160, 70),
+        "Cloth / Soft Body / Particles: settings only (not yet connected to playback or baking). Real water uses the per-object Fluid system below (Physics tab).",
+    );
 
     let mut settings = doc.scene.simulations.clone();
     let original = settings.clone();
@@ -8307,7 +8345,7 @@ fn draw_simulation_systems_props(ui: &mut egui::Ui, doc: &mut Document) {
         ui.horizontal(|ui| { ui.label("Gravity Scale"); ui.add(egui::DragValue::new(&mut settings.fluid.gravity_scale).speed(0.01).range(-10.0..=10.0)); });
         ui.horizontal(|ui| { ui.label("Max Particles"); ui.add(egui::DragValue::new(&mut settings.fluid.max_particles).range(100..=2_000_000)); });
         ui.checkbox(&mut settings.fluid.use_adaptive_time, "Adaptive Time Stepping");
-        ui.weak("Fluid-domain configuration; liquid/gas solving and meshing are not wired yet.");
+        ui.weak("Legacy scene-level placeholder. Use Physics tab → Fluid (Domain / Flow / Effector) for the full water solver and bake.");
     });
     ui.collapsing("Particle System", |ui| {
         ui.checkbox(&mut settings.particles.enabled, "Enable Emitter");
@@ -8425,7 +8463,7 @@ fn draw_object_simulation_props(ui: &mut egui::Ui, doc: &mut Document, object_id
     ui.separator();
     ui.label(RichText::new("Non-Rigid Simulations").strong());
     ui.weak("Components are assigned to the selected mesh, not globally to the scene.");
-    ui.colored_label(egui::Color32::from_rgb(210, 160, 70), "Implementation status: object assignment and saved settings only; simulation solvers are not connected yet.");
+    ui.colored_label(egui::Color32::from_rgb(210, 160, 70), "Cloth, Soft Body and Particle components store settings only; their solvers are not connected yet. Water physics is in the Fluid section above.");
     if doc.in_edit_mode() || doc.sculpt_mode || doc.paint_mode || doc.uv_mode || doc.pose_mode {
         ui.weak("Switch to Object Mode to add or edit simulation components.");
         return;
@@ -8439,10 +8477,6 @@ fn draw_object_simulation_props(ui: &mut egui::Ui, doc: &mut Document, object_id
             if ui.button("＋ Soft Body").clicked() {
                 physics_commit(doc);
                 doc.scene.object_simulations.insert(object_id, ObjectSimulation::SoftBody(SoftBodySettings { enabled: true, ..Default::default() }));
-            }
-            if ui.button("＋ Fluid").clicked() {
-                physics_commit(doc);
-                doc.scene.object_simulations.insert(object_id, ObjectSimulation::Fluid(FluidSettings { enabled: true, ..Default::default() }));
             }
             if ui.button("＋ Particle System").clicked() {
                 physics_commit(doc);
@@ -8496,7 +8530,7 @@ fn draw_object_simulation_props(ui: &mut egui::Ui, doc: &mut Document, object_id
             ui.horizontal(|ui| { ui.label("Gravity Scale"); ui.add(egui::DragValue::new(&mut v.gravity_scale).speed(0.01).range(-10.0..=10.0)); });
             ui.horizontal(|ui| { ui.label("Max Particles"); ui.add(egui::DragValue::new(&mut v.max_particles).range(100..=2_000_000)); });
             ui.checkbox(&mut v.use_adaptive_time, "Adaptive Time Stepping");
-            ui.weak("This assigns fluid settings to the selected object. Domain/Flow/Effector roles and the fluid solver still need implementation.");
+            ui.weak("Legacy fluid placeholder (converted to a Fluid Domain when the project is reopened).");
         }
         ObjectSimulation::Particles(v) => {
             ui.checkbox(&mut v.enabled, "Enabled");
@@ -8519,7 +8553,229 @@ fn draw_object_simulation_props(ui: &mut egui::Ui, doc: &mut Document, object_id
     }
 }
 
-fn draw_physics_props(ui: &mut egui::Ui, doc: &mut Document, object_index: usize) {
+
+fn draw_mesh_cache_props(ui: &mut egui::Ui, doc: &mut Document, object_id: u64) {
+    let Some(seq) = doc.scene.mesh_caches.get(&object_id).cloned() else { return };
+    ui.separator();
+    ui.label(RichText::new("Mesh Sequence Cache").strong());
+    ui.weak(format!("Source: {}", seq.source));
+    ui.weak(format!(
+        "{} frame(s) at {:.2} fps, starting at frame {:.0}",
+        seq.len(),
+        seq.fps,
+        seq.start_frame
+    ));
+    let mut edited = seq.clone();
+    let mut changed = false;
+    changed |= ui.checkbox(&mut edited.enabled, "Use Cache").changed();
+    ui.horizontal(|ui| {
+        ui.label("Frame Offset");
+        changed |= ui.add(egui::DragValue::new(&mut edited.frame_offset).speed(0.5)).changed();
+    });
+    ui.horizontal(|ui| {
+        ui.label("Speed");
+        changed |= ui.add(egui::DragValue::new(&mut edited.speed).speed(0.01).range(0.01..=20.0)).changed();
+    });
+    ui.weak("The object's mesh follows the cache while the timeline plays (like Blender's Mesh Sequence Cache). To send to Blender: File → Export → USD ASCII (.usda).");
+    if ui.button("Remove Cache").clicked() {
+        physics_commit(doc);
+        doc.scene.mesh_caches.remove(&object_id);
+    } else if changed {
+        physics_commit(doc);
+        doc.scene.mesh_caches.insert(object_id, edited);
+    }
+}
+
+fn draw_fluid_props(ui: &mut egui::Ui, doc: &mut Document, st: &mut UiState, object_id: u64) {
+    use forge_core::{FlowBehavior, FluidObject, FluidType};
+    ui.separator();
+    ui.label(RichText::new("Fluid (Water)").strong());
+    let Some(current) = doc.scene.fluids.get(&object_id).cloned() else {
+        ui.horizontal_wrapped(|ui| {
+            for kind in [FluidType::Domain, FluidType::Flow, FluidType::Effector] {
+                if ui.button(format!("＋ {}", kind.label())).clicked() {
+                    physics_commit(doc);
+                    doc.scene.fluids.insert(object_id, FluidObject::with_kind(kind));
+                    // Domain boxes should look transparent so the water is visible.
+                    if kind == FluidType::Domain {
+                        forge_core::apply_domain_display(&mut doc.scene, object_id);
+                    }
+                }
+            }
+        });
+        ui.weak("Domain: a box that bounds and receives the water (shown transparent). Flow: a mesh that emits water. Effector: a mesh that collides with it.");
+        return;
+    };
+    let mut value = current.clone();
+    let mut remove = false;
+    ui.horizontal(|ui| {
+        ui.label("Type");
+        for kind in [FluidType::Domain, FluidType::Flow, FluidType::Effector] {
+            if ui.selectable_label(value.kind() == kind, kind.label()).clicked() && value.kind() != kind {
+                value = FluidObject::with_kind(kind);
+                if kind == FluidType::Domain {
+                    forge_core::apply_domain_display(&mut doc.scene, object_id);
+                }
+            }
+        }
+        if ui.button("Remove").clicked() {
+            remove = true;
+        }
+    });
+    match &mut value {
+        FluidObject::Domain(d) => {
+            ui.horizontal(|ui| { ui.label("Resolution Divisions"); ui.add(egui::DragValue::new(&mut d.resolution).range(8..=256)); });
+            ui.horizontal(|ui| { ui.label("Particles per Cell"); ui.add(egui::DragValue::new(&mut d.particles_per_cell).range(1..=4)); });
+            ui.horizontal(|ui| { ui.label("Max Particles"); ui.add(egui::DragValue::new(&mut d.max_particles).range(1_000..=2_000_000)); });
+            ui.horizontal(|ui| { ui.label("Viscosity"); ui.add(egui::DragValue::new(&mut d.viscosity).speed(0.005).range(0.0..=1.0)); });
+            ui.horizontal(|ui| { ui.label("Surface Tension"); ui.add(egui::DragValue::new(&mut d.surface_tension).speed(0.01).range(0.0..=1.0)); });
+            ui.horizontal(|ui| { ui.label("Time Scale"); ui.add(egui::DragValue::new(&mut d.time_scale).speed(0.01).range(0.05..=4.0)); });
+            ui.horizontal(|ui| { ui.label("Substeps"); ui.add(egui::DragValue::new(&mut d.substeps).range(1..=16)); });
+            ui.horizontal(|ui| { ui.label("Solver Iterations"); ui.add(egui::DragValue::new(&mut d.solver_iterations).range(1..=16)); });
+            ui.checkbox(&mut d.use_scene_gravity, "Use Scene Gravity");
+            if !d.use_scene_gravity {
+                ui.horizontal(|ui| {
+                    ui.add(egui::DragValue::new(&mut d.gravity.x).speed(0.05).prefix("X "));
+                    ui.add(egui::DragValue::new(&mut d.gravity.y).speed(0.05).prefix("Y "));
+                    ui.add(egui::DragValue::new(&mut d.gravity.z).speed(0.05).prefix("Z "));
+                });
+            }
+            ui.checkbox(&mut d.use_mesh, "Generate Surface Mesh");
+            if d.use_mesh {
+                ui.horizontal(|ui| { ui.label("Mesh Scale"); ui.add(egui::DragValue::new(&mut d.mesh_scale).range(1..=4)); });
+                ui.horizontal(|ui| { ui.label("Smoothing"); ui.add(egui::DragValue::new(&mut d.mesh_smoothing).range(0..=8)); });
+            }
+            ui.collapsing("Border Collisions", |ui| {
+                for (k, label) in ["-X", "+X", "-Y (floor)", "+Y", "-Z", "+Z"].iter().enumerate() {
+                    ui.checkbox(&mut d.border_collisions[k], *label);
+                }
+                ui.weak("An unchecked side is open: water that crosses it is removed.");
+            });
+            ui.horizontal(|ui| {
+                ui.label("Cache Start");
+                ui.add(egui::DragValue::new(&mut d.cache_frame_start).range(-100_000..=100_000));
+                ui.label("End");
+                ui.add(egui::DragValue::new(&mut d.cache_frame_end).range(-100_000..=100_000));
+            });
+            if d.cache_frame_end < d.cache_frame_start {
+                d.cache_frame_end = d.cache_frame_start;
+            }
+        }
+        FluidObject::Flow(f) => {
+            ui.checkbox(&mut f.enabled, "Use Flow");
+            ui.horizontal(|ui| {
+                ui.label("Behavior");
+                for b in [FlowBehavior::Geometry, FlowBehavior::Inflow, FlowBehavior::Outflow] {
+                    ui.selectable_value(&mut f.behavior, b, b.label());
+                }
+            });
+            ui.checkbox(&mut f.is_planar, "Use Plane Initialization");
+            ui.checkbox(&mut f.use_initial_velocity, "Initial Velocity");
+            if f.use_initial_velocity {
+                ui.horizontal(|ui| {
+                    ui.add(egui::DragValue::new(&mut f.initial_velocity.x).speed(0.05).prefix("X "));
+                    ui.add(egui::DragValue::new(&mut f.initial_velocity.y).speed(0.05).prefix("Y "));
+                    ui.add(egui::DragValue::new(&mut f.initial_velocity.z).speed(0.05).prefix("Z "));
+                });
+            }
+            if f.behavior == FlowBehavior::Inflow {
+                ui.horizontal(|ui| {
+                    ui.label("Active from");
+                    ui.add(egui::DragValue::new(&mut f.frame_start));
+                    ui.label("to");
+                    ui.add(egui::DragValue::new(&mut f.frame_end));
+                });
+            }
+            ui.weak("The flow mesh must be closed (or planar). Geometry fills it on the first frame.");
+        }
+        FluidObject::Effector(e) => {
+            ui.checkbox(&mut e.enabled, "Use Effector");
+            ui.horizontal(|ui| { ui.label("Surface Thickness"); ui.add(egui::DragValue::new(&mut e.surface_thickness).speed(0.005).range(0.0..=5.0)); });
+            ui.weak("Moving effectors (keyframes, baked rigid bodies, mesh caches) push the water.");
+        }
+    }
+    if remove {
+        physics_commit(doc);
+        doc.scene.fluids.remove(&object_id);
+        return;
+    }
+    if value != current {
+        physics_commit(doc);
+        doc.scene.fluids.insert(object_id, value.clone());
+        if matches!(value, FluidObject::Domain(_)) {
+            forge_core::apply_domain_display(&mut doc.scene, object_id);
+        }
+    }
+    if matches!(value, FluidObject::Domain(_)) {
+        // Keep the domain visually transparent even if the user changed materials earlier.
+        ui.weak("Domain is shown with a transparent “Fluid Domain” material so the water is visible.");
+        draw_fluid_bake_controls(ui, doc, st, object_id);
+    }
+}
+
+fn draw_fluid_bake_controls(ui: &mut egui::Ui, doc: &mut Document, st: &mut UiState, object_id: u64) {
+    ui.add_space(4.0);
+    let running_here = st.fluid_baker.as_ref().map_or(false, |b| b.domain_id() == object_id);
+    if running_here {
+        let mut finished = false;
+        let mut cancel = false;
+        if let Some(baker) = st.fluid_baker.as_mut() {
+            finished = baker.step(Duration::from_millis(30));
+            let (cur, start, end) = baker.progress();
+            let fraction = ((cur - start) as f32 / (end - start + 1).max(1) as f32).clamp(0.0, 1.0);
+            ui.add(egui::ProgressBar::new(fraction).text(format!(
+                "Baking frame {} / {} · {} particles",
+                cur.min(end),
+                end,
+                baker.last_particle_count()
+            )));
+        }
+        if ui.button("Cancel Bake").clicked() {
+            cancel = true;
+        }
+        if cancel {
+            st.fluid_baker = None;
+            st.fluid_bake_status = "Bake cancelled.".to_string();
+        } else if finished {
+            if let Some(baker) = st.fluid_baker.take() {
+                physics_commit(doc);
+                let frames = baker.finish(&mut doc.scene);
+                st.fluid_bake_status = format!("Baked {frames} frame(s). Scrub or play the timeline to watch the water.");
+            }
+        } else {
+            ui.ctx().request_repaint();
+        }
+        return;
+    }
+    if st.fluid_baker.is_some() {
+        ui.weak("Another domain is baking.");
+        return;
+    }
+    let frames = forge_core::fluid_bake_frames(&doc.scene, object_id);
+    ui.horizontal(|ui| {
+        if ui.button("Bake Water").on_hover_text("Simulate the cache range and store one surface mesh per frame").clicked() {
+            match forge_core::FluidBaker::new(&doc.scene, object_id) {
+                Ok(baker) => {
+                    st.fluid_bake_status = baker.warnings().join(" ");
+                    st.fluid_baker = Some(baker);
+                }
+                Err(e) => st.fluid_bake_status = e,
+            }
+        }
+        if frames > 0 && ui.button("Free Bake").clicked() {
+            physics_commit(doc);
+            forge_core::free_fluid_bake(&mut doc.scene, object_id);
+        }
+    });
+    if frames > 0 {
+        ui.weak(format!("Baked frames: {frames}"));
+    }
+    if !st.fluid_bake_status.is_empty() {
+        ui.weak(st.fluid_bake_status.clone());
+    }
+}
+
+fn draw_physics_props(ui: &mut egui::Ui, doc: &mut Document, st: &mut UiState, object_index: usize) {
     if doc.scene.animation.playing {
         ui.weak("Pause the timeline before changing rigid-body settings.");
         return;
@@ -8534,11 +8790,13 @@ fn draw_physics_props(ui: &mut egui::Ui, doc: &mut Document, object_index: usize
         ui.label("Switch to Object Mode to edit rigid-body settings.");
         return;
     }
+    draw_mesh_cache_props(ui, doc, object_id);
     if doc.scene.objects[object_index].mesh.bounds().is_none() {
-        ui.label("Rigid bodies require an object with mesh geometry.");
+        ui.label("Rigid bodies and fluids require an object with mesh geometry.");
         return;
     }
 
+    draw_fluid_props(ui, doc, st, object_id);
     draw_object_simulation_props(ui, doc, object_id);
 
     let Some(mut body) = doc.scene.rigid_bodies.get(&object_id).cloned() else {
@@ -8680,7 +8938,7 @@ fn properties(ui: &mut egui::Ui, doc: &mut Document, st: &mut UiState, actions: 
     if st.properties_tab == PropertiesTab::Physics {
         egui::ScrollArea::vertical().show(ui, |ui| {
             if let Some(i) = doc.active_index() {
-                draw_physics_props(ui, doc, i);
+                draw_physics_props(ui, doc, st, i);
             } else {
                 ui.weak("Select a mesh to add rigid-body, cloth, soft-body, fluid or particle components.");
             }

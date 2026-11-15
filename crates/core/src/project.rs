@@ -9,7 +9,8 @@ use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
 use std::sync::Arc;
 
-const MAGIC: &[u8; 4] = b"FRG8";
+const MAGIC: &[u8; 4] = b"FRG9";
+const V8_MAGIC: &[u8; 4] = b"FRG8";
 const V7_MAGIC: &[u8; 4] = b"FRG7";
 const V6_MAGIC: &[u8; 4] = b"FRG6";
 const V5_MAGIC: &[u8; 4] = b"FRG5";
@@ -17,6 +18,31 @@ const V4_MAGIC: &[u8; 4] = b"FRG4";
 const LEGACY_MAGIC: &[u8; 4] = b"FRG3";
 
 
+
+/// Previous current layout (FRG8), before water physics and mesh sequence caches.
+#[derive(Serialize, Deserialize)]
+struct Version8Scene {
+    objects: Vec<Object>, materials: Vec<Material>, textures: Arc<Vec<TextureData>>,
+    collections: Vec<Collection>, cursor: Vec3, next_id: u64, animation: AnimationData,
+    compositor_graph: CompositorGraph,
+    rigid_bodies: std::collections::HashMap<u64, crate::RigidBody>,
+    physics_world: crate::PhysicsWorldSettings,
+    rigid_body_constraints: Vec<crate::RigidBodyConstraint>,
+    physics_cache: Option<crate::PhysicsCache>,
+    simulations: crate::SimulationSettings,
+    object_simulations: std::collections::HashMap<u64, crate::ObjectSimulation>,
+}
+impl From<Version8Scene> for Scene {
+    fn from(scene: Version8Scene) -> Self {
+        Self { objects: scene.objects, materials: scene.materials, textures: scene.textures,
+            collections: scene.collections, cursor: scene.cursor, next_id: scene.next_id,
+            animation: scene.animation, compositor_graph: scene.compositor_graph,
+            rigid_bodies: scene.rigid_bodies, physics_world: scene.physics_world,
+            rigid_body_constraints: scene.rigid_body_constraints, physics_cache: scene.physics_cache,
+            simulations: scene.simulations, object_simulations: scene.object_simulations,
+            fluids: Default::default(), mesh_caches: Default::default() }
+    }
+}
 
 /// Previous current layout (FRG7), before per-object simulation components.
 #[derive(Serialize, Deserialize)]
@@ -37,7 +63,7 @@ impl From<Version7Scene> for Scene {
             animation: scene.animation, compositor_graph: scene.compositor_graph,
             rigid_bodies: scene.rigid_bodies, physics_world: scene.physics_world,
             rigid_body_constraints: scene.rigid_body_constraints, physics_cache: scene.physics_cache,
-            simulations: scene.simulations, object_simulations: Default::default() }
+            simulations: scene.simulations, object_simulations: Default::default(), fluids: Default::default(), mesh_caches: Default::default() }
     }
 }
 
@@ -59,7 +85,7 @@ impl From<Version6Scene> for Scene {
             animation: scene.animation, compositor_graph: scene.compositor_graph,
             rigid_bodies: scene.rigid_bodies, physics_world: scene.physics_world,
             rigid_body_constraints: scene.rigid_body_constraints, physics_cache: scene.physics_cache,
-            simulations: Default::default(), object_simulations: Default::default() }
+            simulations: Default::default(), object_simulations: Default::default(), fluids: Default::default(), mesh_caches: Default::default() }
     }
 }
 
@@ -100,7 +126,7 @@ impl From<Version5Scene> for Scene {
                 friction: b.friction, restitution: b.restitution, linear_damping: b.linear_damping,
                 enabled: b.enabled, ..RigidBody::default()
             })).collect(), physics_world: Default::default(),
-            rigid_body_constraints: Vec::new(), physics_cache: None, simulations: Default::default(), object_simulations: Default::default(),
+            rigid_body_constraints: Vec::new(), physics_cache: None, simulations: Default::default(), object_simulations: Default::default(), fluids: Default::default(), mesh_caches: Default::default(),
         }
     }
 }
@@ -124,7 +150,7 @@ impl From<Version4Scene> for Scene {
             collections: scene.collections, cursor: scene.cursor, next_id: scene.next_id,
             animation: scene.animation, compositor_graph: scene.compositor_graph,
             rigid_bodies: Default::default(), physics_world: Default::default(),
-            rigid_body_constraints: Vec::new(), physics_cache: None, simulations: Default::default(), object_simulations: Default::default(),
+            rigid_body_constraints: Vec::new(), physics_cache: None, simulations: Default::default(), object_simulations: Default::default(), fluids: Default::default(), mesh_caches: Default::default(),
         }
     }
 }
@@ -241,7 +267,7 @@ impl From<Version3Scene> for Scene {
             animation: scene.animation,
             compositor_graph: Default::default(),
             rigid_bodies: Default::default(), physics_world: Default::default(),
-            rigid_body_constraints: Vec::new(), physics_cache: None, simulations: Default::default(), object_simulations: Default::default(),
+            rigid_body_constraints: Vec::new(), physics_cache: None, simulations: Default::default(), object_simulations: Default::default(), fluids: Default::default(), mesh_caches: Default::default(),
         }
     }
 }
@@ -358,7 +384,7 @@ impl From<LegacyScene> for Scene {
             animation: scene.animation,
             compositor_graph: Default::default(),
             rigid_bodies: Default::default(), physics_world: Default::default(),
-            rigid_body_constraints: Vec::new(), physics_cache: None, simulations: Default::default(), object_simulations: Default::default(),
+            rigid_body_constraints: Vec::new(), physics_cache: None, simulations: Default::default(), object_simulations: Default::default(), fluids: Default::default(), mesh_caches: Default::default(),
         }
     }
 }
@@ -373,17 +399,24 @@ pub fn to_bytes(scene: &Scene) -> Result<Vec<u8>> {
 }
 
 pub fn from_bytes(bytes: &[u8]) -> Result<Scene> {
-    if bytes.len() < 4 || (&bytes[..4] != MAGIC && &bytes[..4] != V7_MAGIC && &bytes[..4] != V6_MAGIC && &bytes[..4] != V5_MAGIC && &bytes[..4] != V4_MAGIC && &bytes[..4] != LEGACY_MAGIC) {
+    if bytes.len() < 4 || (&bytes[..4] != MAGIC && &bytes[..4] != V8_MAGIC && &bytes[..4] != V7_MAGIC && &bytes[..4] != V6_MAGIC && &bytes[..4] != V5_MAGIC && &bytes[..4] != V4_MAGIC && &bytes[..4] != LEGACY_MAGIC) {
         bail!("not a Forge3D project file");
     }
-    let is_v8 = &bytes[..4] == MAGIC;
+    let is_v9 = &bytes[..4] == MAGIC;
+    let is_v8 = &bytes[..4] == V8_MAGIC;
     let is_v7 = &bytes[..4] == V7_MAGIC;
     let is_v6 = &bytes[..4] == V6_MAGIC;
     let is_v5 = &bytes[..4] == V5_MAGIC;
     let is_v4 = &bytes[..4] == V4_MAGIC;
     let mut raw = Vec::new();
     flate2::read::ZlibDecoder::new(&bytes[4..]).read_to_end(&mut raw)?;
-    if is_v8 { return Ok(bincode::deserialize(&raw)?); }
+    if is_v9 { return Ok(bincode::deserialize(&raw)?); }
+    if is_v8 {
+        let scene: Version8Scene = bincode::deserialize(&raw)?;
+        let mut scene = Scene::from(scene);
+        crate::fluid::migrate_legacy_fluids(&mut scene);
+        return Ok(scene);
+    }
     if is_v7 {
         let scene: Version7Scene = bincode::deserialize(&raw)?;
         return Ok(Scene::from(scene));
@@ -729,5 +762,20 @@ mod tests {
         assert_eq!(node.id, 8);
         assert_eq!(node.ui_size, [190.0, 230.0]);
         assert_eq!(node.ramp_stops.len(), 1);
+    }
+
+    #[test]
+    fn fluids_and_mesh_caches_survive_project_roundtrip() {
+        let mut d = Document::new();
+        let id = d.scene.objects[0].id;
+        d.scene.fluids.insert(id, crate::FluidObject::Domain(crate::FluidDomain { resolution: 48, ..Default::default() }));
+        let frames = vec![d.scene.objects[0].mesh.clone(), d.scene.objects[0].mesh.clone()];
+        d.scene.mesh_caches.insert(id, crate::MeshSequence::new("test", frames, 1.0, 24.0));
+        let loaded = from_bytes(&to_bytes(&d.scene).unwrap()).unwrap();
+        match loaded.fluids.get(&id) {
+            Some(crate::FluidObject::Domain(domain)) => assert_eq!(domain.resolution, 48),
+            _ => panic!("fluid domain lost"),
+        }
+        assert_eq!(loaded.mesh_caches.get(&id).unwrap().len(), 2);
     }
 }

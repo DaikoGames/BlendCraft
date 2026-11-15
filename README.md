@@ -1,5 +1,5 @@
 # BlendCraft
-This project was made with the Help of Grok, Github Copilot, Claude and ChatGPT. 
+This project was made with the Help of Grok and Claude
 BlendCraft is an open-source clone of Blender, written from scratch in Rust.
 It is an independent project: it contains no Blender source code or artwork, and it is
 not affiliated with or endorsed by the Blender Foundation. "Blender" is a trademark of
@@ -102,9 +102,38 @@ solver frame-by-frame, including catch-up frames, and baked frames are used when
 
 This is a functional rigid-body foundation, not full Blender physics parity. It does not yet
 implement Bullet-identical simulation, Blender's full rigid-body constraint catalog (including
-piston, generic spring and motor variants), cloth/soft-body or fluid solvers, force fields,
+piston, generic spring and motor variants), cloth/soft-body solvers, force fields,
 fracture, or a complete Blender-compatible physics API. Physics behavior and cross-platform
 builds still need testing on each target OS and architecture.
+
+## Water physics (Fluid)
+Select a mesh, open **Physics > Fluid** and choose a role, as in Blender:
+
+- **Domain** - a box that bounds the simulation. Settings: resolution divisions, particles per cell,
+  viscosity, surface tension, gravity (scene or custom), time scale, substeps, solver iterations,
+  particle budget, surface-mesh generation (scale, smoothing), open/closed walls and the cache range.
+- **Flow** - emits water from a closed mesh: *Geometry* (initial volume), *Inflow* (continuous, with a
+  frame range) or *Outflow* (sink). Optional initial velocity and plane initialization (fill below an open plane).
+- **Effector** - a collision mesh. Keyframed, rigid-body-baked or mesh-cached effectors push the water.
+
+**Bake Water** simulates the cache range (a little each UI frame, with a progress bar and Cancel) and stores one
+surface mesh per frame on a "Fluid Mesh" object. It plays back on the timeline and exports with Alembic.
+The solver is a local CPU Position Based Fluids implementation (parallelised with std threads), not Mantaflow/FLIP:
+the workflow matches Blender, the exact motion does not. Spray/foam/bubble particles, viscosity presets, guides,
+obstacles with surface friction and gas/smoke are not implemented. The old settings-only Fluid component is converted
+to a Domain when an older project is opened.
+
+## Alembic (.abc)
+File > Import accepts `.abc` (also by drag and drop); File > Export > Alembic writes the scene or the selection.
+Import reads PolyMesh/SubD objects and Xform hierarchies, including per-frame meshes whose topology changes
+(water surfaces). Animated meshes become a **Mesh Sequence Cache** on the object (Physics tab: offset, speed, remove)
+and the timeline range is set to the cache. Animated transforms become keyframes. Polygons are triangulated; normals
+are recomputed; UVs, cameras, curves, points and custom attributes are skipped. Export samples animation, rigid-body
+bakes and mesh sequences over the timeline range (static scenes are written as one sample). The Ogawa container and
+Alembic layer are implemented in pure Rust (`crates/io/src/alembic.rs`). Property headers now respect the official
+variable-width integer encoding (size hint), so files written by Blender and other Alembic 1.7/1.8 tools import
+correctly. HDF5-based archives from very old Alembic versions are not supported. Large water caches are held in
+memory, one mesh per frame.
 
 ## Scripting
 The **Scripting** workspace runs Python in an embedded **RustPython** interpreter from a

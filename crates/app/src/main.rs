@@ -2147,10 +2147,61 @@ impl App {
         }
     }
 
+    /// Import an Alembic cache: meshes (with per-frame sequences) and animated transforms.
+    fn import_alembic(&mut self, path: &Path) {
+        let fps = self.doc.scene.animation.fps as f32;
+        match forge_io::load_alembic(path, fps, 1.0) {
+            Ok(imp) => {
+                let count = imp.objects.len();
+                let mut scene = forge_core::Scene::default();
+                let mut extras = Vec::new();
+                for item in imp.objects {
+                    extras.push((item.sequence, item.keys));
+                    scene.objects.push(item.object);
+                }
+                self.doc.import_scene(scene);
+                let total = self.doc.scene.objects.len();
+                let mut frames = 0usize;
+                for (k, (sequence, keys)) in extras.into_iter().enumerate() {
+                    let id = self.doc.scene.objects[total - count + k].id;
+                    if let Some(seq) = sequence {
+                        frames = frames.max(seq.len());
+                        self.doc.scene.mesh_caches.insert(id, seq);
+                    }
+                    if !keys.is_empty() {
+                        let mut anim = forge_core::ObjectAnimation::default();
+                        anim.keys = keys;
+                        anim.sort();
+                        self.doc.scene.animation.objects.insert(id, anim);
+                    }
+                }
+                if imp.end_frame > imp.start_frame {
+                    self.doc.scene.animation.frame_start = imp.start_frame;
+                    self.doc.scene.animation.frame_end = imp.end_frame;
+                    let current = self.doc.scene.animation.frame_current;
+                    self.doc.scene.animation.set_frame(current);
+                }
+                self.doc.touch();
+                self.apply_animation_frame();
+                self.frame(false);
+                let notes = if imp.notes.is_empty() { String::new() } else { format!(" · {}", imp.notes.join("; ")) };
+                self.status(format!(
+                    "Imported {count} object(s) from {} ({frames} cached frame(s)){notes}",
+                    path.display()
+                ));
+            }
+            Err(e) => self.status(format!("Alembic import failed: {e:#}")),
+        }
+    }
+
     fn import_path(&mut self, path: &Path) {
         let ext = ext_of(path);
         if ext == "unitypackage" {
             self.import_unitypackage(path);
+            return;
+        }
+        if ext == "abc" {
+            self.import_alembic(path);
             return;
         }
         let res = match ext.as_str() {
@@ -2252,6 +2303,8 @@ impl App {
             let (filter, ext, default) = match format {
                 "glb" => ("glTF Binary", "glb", "model.glb"),
                 "fbx" => ("Autodesk FBX", "fbx", "model.fbx"),
+                "abc" => ("Alembic", "abc", "scene.abc"),
+                "usda" => ("USD ASCII", "usda", "scene.usda"),
                 _ => ("Wavefront OBJ", "obj", "model.obj"),
             };
             let Some(mut p) = rfd::FileDialog::new()
@@ -2268,6 +2321,8 @@ impl App {
             let res = match format {
                 "glb" => forge_io::export_glb(&self.doc.scene, &p, only),
                 "fbx" => forge_io::export_fbx(&self.doc.scene, &p, only),
+                "abc" => forge_io::export_alembic(&self.doc.scene, &p, only),
+                "usda" => forge_io::export_usda(&self.doc.scene, &p, only),
                 _ => forge_io::export_obj(&self.doc.scene, &p, only),
             };
             match res {
@@ -2333,7 +2388,7 @@ impl App {
                 #[cfg(not(target_arch = "wasm32"))]
                 {
                     if let Some(p) = rfd::FileDialog::new()
-                        .add_filter("3D models", &["glb", "gltf", "obj", "fbx", "unitypackage"])
+                        .add_filter("3D models", &["glb", "gltf", "obj", "fbx", "abc", "unitypackage"])
                         .pick_file()
                     {
                         self.import_path(&p);
@@ -2346,6 +2401,10 @@ impl App {
             A::ExportObjSelected => self.export("obj", true),
             A::ExportFbx => self.export("fbx", false),
             A::ExportFbxSelected => self.export("fbx", true),
+            A::ExportAlembic => self.export("abc", false),
+            A::ExportAlembicSelected => self.export("abc", true),
+            A::ExportUsda => self.export("usda", false),
+            A::ExportUsdaSelected => self.export("usda", true),
             A::Quit => {
                 if self.confirm_discard() {
                     el.exit();
@@ -3561,6 +3620,15 @@ impl App {
             }
             if let Some(v) = scl {
                 o.scale = v;
+            }
+        }
+        // Mesh sequence caches (fluid bakes, Alembic): swap in the mesh for this frame.
+        if forge_core::apply_mesh_caches(&mut self.doc.scene, frame) {
+            let runtime_in_sync = self.physics_runtime.is_some()
+                && self.physics_runtime_doc_version == self.doc.version;
+            self.doc.version += 1;
+            if runtime_in_sync {
+                self.physics_runtime_doc_version = self.doc.version;
             }
         }
     }

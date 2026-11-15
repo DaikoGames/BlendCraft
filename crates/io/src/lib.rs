@@ -8,14 +8,21 @@ use glam::Mat4;
 use std::path::Path;
 use std::sync::Arc;
 
+mod alembic;
 mod export;
 mod fbx;
 mod obj;
+mod usd;
 #[cfg(not(target_arch = "wasm32"))]
 mod unity;
+pub use alembic::{
+    build_alembic_bytes, export_alembic, load_alembic, parse_alembic_bytes, AlembicImport,
+    ImportedObject,
+};
 pub use export::{export_glb, export_obj};
 pub use fbx::{export_fbx, load_fbx, load_fbx_bytes};
 pub use obj::load_obj;
+pub use usd::{build_usda_string, export_usda};
 #[cfg(not(target_arch = "wasm32"))]
 pub use unity::load_unitypackage;
 

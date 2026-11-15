@@ -7,6 +7,8 @@ use crate::material::{Material, TextureData};
 use crate::mesh::{Aabb, MeshData};
 use crate::primitives::Primitive;
 use crate::physics::{PhysicsCache, PhysicsWorldSettings, RigidBody, RigidBodyConstraint};
+use crate::fluid::FluidObject;
+use crate::meshcache::MeshSequence;
 use crate::simulation::{ObjectSimulation, SimulationSettings};
 use glam::{Mat4, Quat, Vec3};
 use serde::{Deserialize, Serialize};
@@ -116,6 +118,12 @@ pub struct Scene {
     /// Per-object non-rigid simulation components (Blender-style Physics assignments).
     #[serde(default)]
     pub object_simulations: HashMap<u64, ObjectSimulation>,
+    /// Water physics: Domain / Flow / Effector role per object (Physics > Fluid).
+    #[serde(default)]
+    pub fluids: HashMap<u64, FluidObject>,
+    /// Per-frame mesh sequences (fluid bakes, imported Alembic caches), keyed by object id.
+    #[serde(default)]
+    pub mesh_caches: HashMap<u64, MeshSequence>,
 }
 
 struct Eval<'a> {
