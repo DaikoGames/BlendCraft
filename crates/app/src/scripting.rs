@@ -62,14 +62,45 @@ pub struct ScriptObject {
     /// Read-only mesh vertex positions (not written back as topology edits).
     #[serde(default)]
     pub vertices: Vec<[f32; 3]>,
+    // --- Physics / simulations (Blender-style) ---
+    /// "ACTIVE" | "PASSIVE" | None
+    #[serde(default)]
+    pub rigid_body_type: Option<String>,
+    #[serde(default)]
+    pub rigid_mass: Option<f32>,
+    #[serde(default)]
+    pub rigid_friction: Option<f32>,
+    #[serde(default)]
+    pub rigid_restitution: Option<f32>,
+    #[serde(default)]
+    pub rigid_collision_shape: Option<String>,
+    /// "DOMAIN" | "FLOW" | "EFFECTOR" | None
+    #[serde(default)]
+    pub fluid_type: Option<String>,
+    #[serde(default)]
+    pub cloth: Option<bool>,
+    #[serde(default)]
+    pub soft_body: Option<bool>,
+    #[serde(default)]
+    pub particles: Option<bool>,
+    #[serde(default)]
+    pub particle_count: Option<u32>,
 }
 
 fn default_true() -> bool {
     true
 }
 
-fn default_frame() -> i32 {
+pub fn default_true_wire() -> bool {
+    true
+}
+
+pub fn default_frame() -> i32 {
     1
+}
+
+pub fn default_gravity() -> [f32; 3] {
+    [0.0, -9.81, 0.0]
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -114,6 +145,11 @@ pub struct ScriptSnapshot {
     #[serde(default)]
     pub frame_current: i32,
     pub active: Option<usize>,
+    /// Scene rigid-body world gravity (xyz).
+    #[serde(default = "default_gravity")]
+    pub gravity: [f32; 3],
+    #[serde(default = "default_true")]
+    pub physics_enabled: bool,
 }
 
 #[derive(Debug)]
@@ -125,6 +161,8 @@ pub struct ScriptResult {
     pub frame_current: i32,
     pub active: Option<usize>,
     pub output: String,
+    pub gravity: [f32; 3],
+    pub physics_enabled: bool,
 }
 
 #[derive(Debug)]
@@ -205,6 +243,50 @@ impl ScriptSnapshot {
                     .map(|v| v.position)
                     .collect();
                 let material_slots = vec![object.material];
+                let (rigid_body_type, rigid_mass, rigid_friction, rigid_restitution, rigid_collision_shape) =
+                    if let Some(rb) = doc.scene.rigid_bodies.get(&object.id) {
+                        (
+                            Some(match rb.body_type {
+                                forge_core::RigidBodyType::Active => "ACTIVE".into(),
+                                forge_core::RigidBodyType::Passive => "PASSIVE".into(),
+                            }),
+                            Some(rb.mass),
+                            Some(rb.friction),
+                            Some(rb.restitution),
+                            Some(match rb.collision_shape {
+                                forge_core::CollisionShape::ConvexHull => "CONVEX_HULL".into(),
+                                forge_core::CollisionShape::Box => "BOX".into(),
+                                forge_core::CollisionShape::Sphere => "SPHERE".into(),
+                                forge_core::CollisionShape::Capsule => "CAPSULE".into(),
+                                forge_core::CollisionShape::Cylinder => "CYLINDER".into(),
+                                forge_core::CollisionShape::Cone => "CONE".into(),
+                                forge_core::CollisionShape::Mesh => "MESH".into(),
+                            }),
+                        )
+                    } else {
+                        (None, None, None, None, None)
+                    };
+                let fluid_type = doc.scene.fluids.get(&object.id).map(|f| {
+                    match f {
+                        forge_core::FluidObject::Domain(_) => "DOMAIN".into(),
+                        forge_core::FluidObject::Flow(_) => "FLOW".into(),
+                        forge_core::FluidObject::Effector(_) => "EFFECTOR".into(),
+                    }
+                });
+                let (cloth, soft_body, particles, particle_count) =
+                    match doc.scene.object_simulations.get(&object.id) {
+                        Some(forge_core::ObjectSimulation::Cloth(s)) => {
+                            (Some(s.enabled), None, None, None)
+                        }
+                        Some(forge_core::ObjectSimulation::SoftBody(s)) => {
+                            (None, Some(s.enabled), None, None)
+                        }
+                        Some(forge_core::ObjectSimulation::Particles(s)) => {
+                            (None, None, Some(s.enabled), Some(s.count))
+                        }
+                        Some(forge_core::ObjectSimulation::Fluid(_)) => (None, None, None, None),
+                        None => (None, None, None, None),
+                    };
                 ScriptObject {
                     id: Some(object.id),
                     name: object.name.clone(),
@@ -235,6 +317,16 @@ impl ScriptSnapshot {
                     empty_shape,
                     empty_size,
                     vertices,
+                    rigid_body_type,
+                    rigid_mass,
+                    rigid_friction,
+                    rigid_restitution,
+                    rigid_collision_shape,
+                    fluid_type,
+                    cloth,
+                    soft_body,
+                    particles,
+                    particle_count,
                 }
             })
             .collect();
@@ -332,6 +424,8 @@ impl ScriptSnapshot {
             keyframes,
             frame_current: doc.scene.animation.frame_current,
             active,
+            gravity: doc.scene.physics_world.gravity.to_array(),
+            physics_enabled: doc.scene.physics_world.enabled,
         }
     }
 }
@@ -439,8 +533,35 @@ mod embedded {
                 Some(f) => py_f32(f),
                 None => "None".to_owned(),
             };
+            let rb_type = match &o.rigid_body_type {
+                Some(s) => py_str(s),
+                None => "None".to_owned(),
+            };
+            let fluid = match &o.fluid_type {
+                Some(s) => py_str(s),
+                None => "None".to_owned(),
+            };
+            let cloth = match o.cloth {
+                Some(true) => "True",
+                Some(false) => "False",
+                None => "None",
+            };
+            let soft = match o.soft_body {
+                Some(true) => "True",
+                Some(false) => "False",
+                None => "None",
+            };
+            let particles = match o.particles {
+                Some(true) => "True",
+                Some(false) => "False",
+                None => "None",
+            };
+            let pcount = match o.particle_count {
+                Some(n) => n.to_string(),
+                None => "None".to_owned(),
+            };
             objects.push_str(&format!(
-                "{{'id':{id},'name':{name},'type':{ty},'primitive':{prim},'primitive_params':[{params}],'material':{mat},'location':[{lx},{ly},{lz}],'rotation_euler':[{rx},{ry},{rz}],'scale':[{sx},{sy},{sz}],'selected':{sel},'visible':{vis},'parent':{parent},'light_type':{light_type},'light_energy':{light_energy},'light_color':{light_color},'camera_fov':{camera_fov}}}",
+                "{{'id':{id},'name':{name},'type':{ty},'primitive':{prim},'primitive_params':[{params}],'material':{mat},'location':[{lx},{ly},{lz}],'rotation_euler':[{rx},{ry},{rz}],'scale':[{sx},{sy},{sz}],'selected':{sel},'visible':{vis},'parent':{parent},'light_type':{light_type},'light_energy':{light_energy},'light_color':{light_color},'camera_fov':{camera_fov},'rigid_body_type':{rb_type},'rigid_mass':{rmass},'rigid_friction':{rfric},'rigid_restitution':{rrest},'fluid_type':{fluid},'cloth':{cloth},'soft_body':{soft},'particles':{particles},'particle_count':{pcount}}}",
                 name = py_str(&o.name),
                 ty = py_str(&o.object_type),
                 prim = py_str(&o.primitive),
@@ -461,6 +582,12 @@ mod embedded {
                 sz = py_f32(o.scale[2]),
                 sel = if o.selected { "True" } else { "False" },
                 vis = if o.visible { "True" } else { "False" },
+                rmass = o.rigid_mass.map(py_f32).unwrap_or_else(|| "None".into()),
+                rfric = o.rigid_friction.map(py_f32).unwrap_or_else(|| "None".into()),
+                rrest = o
+                    .rigid_restitution
+                    .map(py_f32)
+                    .unwrap_or_else(|| "None".into()),
             ));
         }
         objects.push(']');
@@ -490,7 +617,18 @@ mod embedded {
             Some(a) => a.to_string(),
             None => "None".to_owned(),
         };
-        format!("{{'objects':{objects},'materials':{materials},'active':{active}}}")
+        format!(
+            "{{'objects':{objects},'materials':{materials},'active':{active},'frame_current':{frame},'gravity':[{gx},{gy},{gz}],'physics_enabled':{phys},'collections':[],'keyframes':[]}}",
+            frame = snapshot.frame_current,
+            gx = py_f32(snapshot.gravity[0]),
+            gy = py_f32(snapshot.gravity[1]),
+            gz = py_f32(snapshot.gravity[2]),
+            phys = if snapshot.physics_enabled {
+                "True"
+            } else {
+                "False"
+            },
+        )
     }
 
     pub fn execute(source: String, snapshot: ScriptSnapshot) -> Result<ScriptResult, ScriptError> {
@@ -580,6 +718,8 @@ _RESULT = _dumps({{
     "keyframes": _BC.get("keyframes") or [],
     "frame_current": int(_BC.get("frame_current") or 1),
     "active": _BC.get("active"),
+    "gravity": list(_BC.get("gravity") or [0.0, -9.81, 0.0]),
+    "physics_enabled": bool(_BC.get("physics_enabled", True)),
     "stdout": _stdout.getvalue(),
     "stderr": _stderr.getvalue(),
     "exc": _EXC,
@@ -660,6 +800,10 @@ _RESULT = _dumps({{
                 #[serde(default = "crate::scripting::default_frame")]
                 frame_current: i32,
                 active: Option<usize>,
+                #[serde(default = "crate::scripting::default_gravity")]
+                gravity: [f32; 3],
+                #[serde(default = "crate::scripting::default_true_wire")]
+                physics_enabled: bool,
                 #[serde(default)]
                 stdout: String,
                 #[serde(default)]
@@ -695,6 +839,8 @@ _RESULT = _dumps({{
                 frame_current: wire.frame_current,
                 active: wire.active,
                 output,
+                gravity: wire.gravity,
+                physics_enabled: wire.physics_enabled,
             })
         })
     }

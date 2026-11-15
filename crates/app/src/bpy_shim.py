@@ -831,6 +831,22 @@ class _Scene(object):
     @frame_current.setter
     def frame_current(self, v):
         _BC["frame_current"] = int(v)
+    @property
+    def gravity(self):
+        g = _BC.get("gravity") or [0.0, -9.81, 0.0]
+        return Vector(g)
+    @gravity.setter
+    def gravity(self, v):
+        vals = [float(x) for x in list(v)[:3]]
+        while len(vals) < 3:
+            vals.append(0.0)
+        _BC["gravity"] = vals
+    @property
+    def use_gravity(self):
+        return bool(_BC.get("physics_enabled", True))
+    @use_gravity.setter
+    def use_gravity(self, v):
+        _BC["physics_enabled"] = bool(v)
 
 class _ViewLayerObjects(object):
     def __iter__(self):
@@ -891,6 +907,17 @@ def _add_mesh(name, prim, params, location=None, rotation=None):
         "light_energy": None,
         "light_color": None,
         "camera_fov": None,
+        "rigid_body_type": None,
+        "rigid_mass": None,
+        "rigid_friction": None,
+        "rigid_restitution": None,
+        "rigid_collision_shape": None,
+        "fluid_type": None,
+        "cloth": None,
+        "soft_body": None,
+        "particles": None,
+        "particle_count": None,
+        "vertices": [],
     })
     _BC["active"] = len(_BC["objects"]) - 1
     return {"FINISHED"}
@@ -1100,9 +1127,112 @@ class _ObjectOps(object):
         _BC["active"] = len(_BC["objects"]) - 1
         return {"FINISHED"}
 
+class _RigidBodyOps(object):
+    def object_add(self, type="ACTIVE", **kw):
+        """Add a rigid body to selected mesh objects. type: ACTIVE or PASSIVE."""
+        ty = str(type).upper()
+        if ty not in ("ACTIVE", "PASSIVE"):
+            ty = "ACTIVE"
+        n = 0
+        for o in _BC["objects"]:
+            if o.get("selected") and o.get("type") == "MESH":
+                o["rigid_body_type"] = ty
+                o["rigid_mass"] = float(kw.get("mass", 1.0))
+                o["rigid_friction"] = float(kw.get("friction", 0.5))
+                o["rigid_restitution"] = float(kw.get("restitution", 0.0))
+                o["rigid_collision_shape"] = str(kw.get("collision_shape", "CONVEX_HULL")).upper()
+                n += 1
+        return {"FINISHED"} if n else {"CANCELLED"}
+    def object_remove(self, **kw):
+        for o in _BC["objects"]:
+            if o.get("selected"):
+                o["rigid_body_type"] = None
+                o["rigid_mass"] = None
+                o["rigid_friction"] = None
+                o["rigid_restitution"] = None
+                o["rigid_collision_shape"] = None
+        return {"FINISHED"}
+
+class _FluidOps(object):
+    def add_type(self, type="DOMAIN", **kw):
+        """Assign fluid role to selected mesh. type: DOMAIN, FLOW, EFFECTOR."""
+        ty = str(type).upper()
+        if ty not in ("DOMAIN", "FLOW", "EFFECTOR", "INFLOW", "OUTFLOW", "COLLISION"):
+            ty = "DOMAIN"
+        if ty in ("INFLOW", "OUTFLOW"):
+            ty = "FLOW"
+        if ty == "COLLISION":
+            ty = "EFFECTOR"
+        n = 0
+        for o in _BC["objects"]:
+            if o.get("selected") and o.get("type") == "MESH":
+                o["fluid_type"] = ty
+                n += 1
+        return {"FINISHED"} if n else {"CANCELLED"}
+    def remove_type(self, **kw):
+        for o in _BC["objects"]:
+            if o.get("selected"):
+                o["fluid_type"] = None
+        return {"FINISHED"}
+
+class _ClothOps(object):
+    def add(self, **kw):
+        n = 0
+        for o in _BC["objects"]:
+            if o.get("selected") and o.get("type") == "MESH":
+                o["cloth"] = True
+                o["soft_body"] = None
+                o["particles"] = None
+                n += 1
+        return {"FINISHED"} if n else {"CANCELLED"}
+    def remove(self, **kw):
+        for o in _BC["objects"]:
+            if o.get("selected"):
+                o["cloth"] = False
+        return {"FINISHED"}
+
+class _SoftBodyOps(object):
+    def add(self, **kw):
+        n = 0
+        for o in _BC["objects"]:
+            if o.get("selected") and o.get("type") == "MESH":
+                o["soft_body"] = True
+                o["cloth"] = None
+                o["particles"] = None
+                n += 1
+        return {"FINISHED"} if n else {"CANCELLED"}
+    def remove(self, **kw):
+        for o in _BC["objects"]:
+            if o.get("selected"):
+                o["soft_body"] = False
+        return {"FINISHED"}
+
+class _ParticleOps(object):
+    def new(self, count=1000, **kw):
+        n = 0
+        for o in _BC["objects"]:
+            if o.get("selected") and o.get("type") == "MESH":
+                o["particles"] = True
+                o["particle_count"] = int(count)
+                o["cloth"] = None
+                o["soft_body"] = None
+                n += 1
+        return {"FINISHED"} if n else {"CANCELLED"}
+    def remove(self, **kw):
+        for o in _BC["objects"]:
+            if o.get("selected"):
+                o["particles"] = False
+                o["particle_count"] = None
+        return {"FINISHED"}
+
 class _Ops(object):
     mesh = _MeshOps()
     object = _ObjectOps()
+    rigidbody = _RigidBodyOps()
+    fluid = _FluidOps()
+    cloth = _ClothOps()
+    softbody = _SoftBodyOps()
+    particle = _ParticleOps()
 
 class _BpyModule(object):
     data = _Data()

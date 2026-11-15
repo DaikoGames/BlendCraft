@@ -4738,6 +4738,8 @@ fn apply_script_result(doc: &mut Document, result: &ScriptResult) -> Result<bool
         && initial.keyframes == result.keyframes
         && initial.frame_current == result.frame_current
         && initial.active == result.active
+        && initial.gravity == result.gravity
+        && initial.physics_enabled == result.physics_enabled
     {
         return Ok(false);
     }
@@ -5123,6 +5125,94 @@ fn apply_script_result(doc: &mut Document, result: &ScriptResult) -> Result<bool
     doc.active = result
         .active
         .and_then(|index| result_ids.get(index).copied());
+
+    // Physics world
+    doc.scene.physics_world.gravity = Vec3::from_array(result.gravity);
+    doc.scene.physics_world.enabled = result.physics_enabled;
+
+    // Per-object rigid body / fluid / cloth / soft body / particles
+    for (scripted, id) in result.objects.iter().zip(result_ids.iter().copied()) {
+        if let Some(ty) = scripted.rigid_body_type.as_deref() {
+            let mut rb = doc
+                .scene
+                .rigid_bodies
+                .get(&id)
+                .cloned()
+                .unwrap_or_default();
+            rb.enabled = true;
+            rb.body_type = match ty.to_uppercase().as_str() {
+                "PASSIVE" | "STATIC" => forge_core::RigidBodyType::Passive,
+                _ => forge_core::RigidBodyType::Active,
+            };
+            if let Some(m) = scripted.rigid_mass {
+                rb.mass = m.max(0.001);
+            }
+            if let Some(f) = scripted.rigid_friction {
+                rb.friction = f.clamp(0.0, 10.0);
+            }
+            if let Some(r) = scripted.rigid_restitution {
+                rb.restitution = r.clamp(0.0, 1.0);
+            }
+            if let Some(shape) = scripted.rigid_collision_shape.as_deref() {
+                rb.collision_shape = match shape.to_uppercase().as_str() {
+                    "BOX" => forge_core::CollisionShape::Box,
+                    "SPHERE" => forge_core::CollisionShape::Sphere,
+                    "CAPSULE" => forge_core::CollisionShape::Capsule,
+                    "CYLINDER" => forge_core::CollisionShape::Cylinder,
+                    "CONE" => forge_core::CollisionShape::Cone,
+                    "MESH" => forge_core::CollisionShape::Mesh,
+                    _ => forge_core::CollisionShape::ConvexHull,
+                };
+            }
+            doc.scene.rigid_bodies.insert(id, rb);
+        } else {
+            doc.scene.rigid_bodies.remove(&id);
+        }
+
+        if let Some(ft) = scripted.fluid_type.as_deref() {
+            let kind = match ft.to_uppercase().as_str() {
+                "DOMAIN" => forge_core::FluidType::Domain,
+                "FLOW" | "INFLOW" | "OUTFLOW" => forge_core::FluidType::Flow,
+                "EFFECTOR" | "COLLISION" => forge_core::FluidType::Effector,
+                _ => forge_core::FluidType::Domain,
+            };
+            doc.scene
+                .fluids
+                .insert(id, forge_core::FluidObject::with_kind(kind));
+        } else {
+            doc.scene.fluids.remove(&id);
+        }
+
+        if scripted.cloth == Some(true) {
+            let mut s = forge_core::ClothSettings::default();
+            s.enabled = true;
+            doc.scene
+                .object_simulations
+                .insert(id, forge_core::ObjectSimulation::Cloth(s));
+        } else if scripted.soft_body == Some(true) {
+            let mut s = forge_core::SoftBodySettings::default();
+            s.enabled = true;
+            doc.scene
+                .object_simulations
+                .insert(id, forge_core::ObjectSimulation::SoftBody(s));
+        } else if scripted.particles == Some(true) {
+            let mut s = forge_core::ParticleSettings::default();
+            s.enabled = true;
+            if let Some(c) = scripted.particle_count {
+                s.count = c.max(1);
+            }
+            doc.scene
+                .object_simulations
+                .insert(id, forge_core::ObjectSimulation::Particles(s));
+        } else if scripted.cloth == Some(false)
+            || scripted.soft_body == Some(false)
+            || scripted.particles == Some(false)
+        {
+            // Explicit disable removes the component.
+            doc.scene.object_simulations.remove(&id);
+        }
+    }
+
     doc.touch();
     Ok(true)
 }
