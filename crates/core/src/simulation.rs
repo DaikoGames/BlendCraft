@@ -15,33 +15,7 @@ use std::sync::Arc;
 // Settings (serialized with the project)
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct ClothSettings {
-    pub enabled: bool,
-    pub quality_steps: u32,
-    pub vertex_mass: f32,
-    pub tension_stiffness: f32,
-    pub bending_stiffness: f32,
-    pub damping: f32,
-    pub air_damping: f32,
-    pub gravity_scale: f32,
-    pub pin_boundary: bool,
-}
-impl Default for ClothSettings {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            quality_steps: 8,
-            vertex_mass: 0.3,
-            tension_stiffness: 15.0,
-            bending_stiffness: 0.5,
-            damping: 0.02,
-            air_damping: 1.0,
-            gravity_scale: 1.0,
-            pin_boundary: true,
-        }
-    }
-}
+pub use crate::cloth::ClothSettings;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SoftBodySettings {
@@ -237,7 +211,7 @@ fn build_bending_pairs(indices: &[u32]) -> Vec<(u32, u32)> {
     pairs.into_iter().collect()
 }
 
-fn boundary_verts(indices: &[u32], n: usize) -> HashSet<usize> {
+pub(crate) fn boundary_verts(indices: &[u32], n: usize) -> HashSet<usize> {
     let mut count: HashMap<(u32, u32), u32> = HashMap::new();
     for tri in indices.chunks_exact(3) {
         for e in [edge_key(tri[0], tri[1]), edge_key(tri[1], tri[2]), edge_key(tri[2], tri[0])] {
@@ -279,7 +253,7 @@ fn project_distance(states: &mut [DeformState], c: &DistConstraint) {
     }
 }
 
-fn recompute_normals(mesh: &mut MeshData) {
+pub(crate) fn recompute_normals(mesh: &mut MeshData) {
     for v in &mut mesh.vertices {
         v.normal = [0.0, 0.0, 0.0];
     }
@@ -315,112 +289,6 @@ fn mesh_from_positions(base: &MeshData, positions: &[Vec3]) -> MeshData {
     }
     recompute_normals(&mut mesh);
     mesh
-}
-
-// ---------------------------------------------------------------------------
-// Cloth
-// ---------------------------------------------------------------------------
-
-struct ClothSim {
-    states: Vec<DeformState>,
-    stretch: Vec<DistConstraint>,
-    bend: Vec<DistConstraint>,
-    settings: ClothSettings,
-    rest_mesh: MeshData,
-}
-
-impl ClothSim {
-    fn new(mesh: &MeshData, settings: ClothSettings, world_positions: &[Vec3]) -> Self {
-        let n = mesh.vertices.len();
-        let inv = if settings.vertex_mass > 1e-6 {
-            1.0 / settings.vertex_mass
-        } else {
-            1.0
-        };
-        let boundary = if settings.pin_boundary {
-            boundary_verts(&mesh.indices, n)
-        } else {
-            HashSet::new()
-        };
-        let states: Vec<DeformState> = (0..n)
-            .map(|i| {
-                let p = world_positions.get(i).copied().unwrap_or(Vec3::ZERO);
-                DeformState {
-                    pos: p,
-                    prev: p,
-                    pinned: boundary.contains(&i),
-                    inv_mass: if boundary.contains(&i) { 0.0 } else { inv },
-                    goal: p,
-                }
-            })
-            .collect();
-        let stretch: Vec<DistConstraint> = build_edges(&mesh.indices)
-            .into_iter()
-            .map(|(a, b)| {
-                let i = a as usize;
-                let j = b as usize;
-                let rest = (states[i].pos - states[j].pos).length().max(1e-5);
-                DistConstraint {
-                    i,
-                    j,
-                    rest,
-                    stiffness: (settings.tension_stiffness * 0.05).clamp(0.01, 1.0),
-                }
-            })
-            .collect();
-        let bend: Vec<DistConstraint> = build_bending_pairs(&mesh.indices)
-            .into_iter()
-            .map(|(a, b)| {
-                let i = a as usize;
-                let j = b as usize;
-                let rest = (states[i].pos - states[j].pos).length().max(1e-5);
-                DistConstraint {
-                    i,
-                    j,
-                    rest,
-                    stiffness: (settings.bending_stiffness * 0.1).clamp(0.0, 1.0),
-                }
-            })
-            .collect();
-        Self {
-            states,
-            stretch,
-            bend,
-            settings,
-            rest_mesh: mesh.clone(),
-        }
-    }
-
-    fn step(&mut self, dt: f32, gravity: Vec3) {
-        let dt = dt.clamp(1e-5, 0.05);
-        let damp = (1.0 - self.settings.damping).clamp(0.0, 1.0);
-        let air = self.settings.air_damping.max(0.0);
-        let g = gravity * self.settings.gravity_scale;
-        for s in &mut self.states {
-            if s.pinned || s.inv_mass == 0.0 {
-                continue;
-            }
-            let vel = (s.pos - s.prev) * damp;
-            let accel = g - vel * air;
-            let next = s.pos + vel + accel * (dt * dt);
-            s.prev = s.pos;
-            s.pos = next;
-        }
-        let steps = self.settings.quality_steps.clamp(1, 64);
-        for _ in 0..steps {
-            for c in &self.stretch {
-                project_distance(&mut self.states, c);
-            }
-            for c in &self.bend {
-                project_distance(&mut self.states, c);
-            }
-        }
-    }
-
-    fn to_mesh(&self) -> MeshData {
-        let positions: Vec<Vec3> = self.states.iter().map(|s| s.pos).collect();
-        mesh_from_positions(&self.rest_mesh, &positions)
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -706,29 +574,9 @@ pub fn bake_non_rigid_simulations(scene: &mut Scene) -> usize {
 
         match sim {
             ObjectSimulation::Cloth(settings) => {
-                let world_pos = world_vertex_positions(&obj, scene);
-                let mut cloth = ClothSim::new(&obj.mesh, settings, &world_pos);
-                let mut frames = Vec::with_capacity((end - start + 1) as usize);
-                for frame in start..=end {
-                    cloth.step(dt, gravity);
-                    // Store mesh in object-local space by inverse world transform.
-                    let worlds = scene.world_matrices();
-                    let m = worlds.get(obj_index).copied().unwrap_or(glam::Mat4::IDENTITY);
-                    let inv = m.inverse();
-                    let mut mesh = cloth.to_mesh();
-                    for v in &mut mesh.vertices {
-                        let p = inv.transform_point3(Vec3::from(v.position));
-                        v.position = p.to_array();
-                    }
-                    recompute_normals(&mut mesh);
-                    let _ = frame;
-                    frames.push(Arc::new(mesh));
+                if crate::cloth::bake_cloth(scene, id, &settings) {
+                    baked += 1;
                 }
-                scene.mesh_caches.insert(
-                    id,
-                    MeshSequence::new(format!("Cloth bake of {}", obj.name), frames, start as f32, fps),
-                );
-                baked += 1;
             }
             ObjectSimulation::SoftBody(settings) => {
                 let world_pos = world_vertex_positions(&obj, scene);
@@ -788,7 +636,16 @@ pub fn bake_non_rigid_simulations(scene: &mut Scene) -> usize {
 
 /// Free mesh caches produced by cloth / soft-body / particle bakes for one object.
 pub fn free_sim_bake(scene: &mut Scene, object_id: u64) -> bool {
-    scene.mesh_caches.remove(&object_id).is_some()
+    let Some(seq) = scene.mesh_caches.remove(&object_id) else {
+        return false;
+    };
+    // The timeline left the last cached frame in the object: put the cloth's rest pose back.
+    if seq.source.starts_with("Cloth bake") {
+        if let (Some(index), Some(first)) = (scene.index_of(object_id), seq.frames.first()) {
+            scene.objects[index].mesh = first.clone();
+        }
+    }
+    true
 }
 
 /// Convert legacy `ObjectSimulation::Fluid` + scene-level fluid flags into the
@@ -823,8 +680,7 @@ mod tests {
             id,
             ObjectSimulation::Cloth(ClothSettings {
                 enabled: true,
-                pin_boundary: true,
-                quality_steps: 4,
+                use_collision: false,
                 ..Default::default()
             }),
         );
@@ -832,20 +688,37 @@ mod tests {
         assert_eq!(n, 1);
         let seq = scene.mesh_caches.get(&id).expect("cache");
         assert_eq!(seq.len(), 5);
-        let first = &seq.frames[0].vertices[0].position;
-        let last = &seq.frames[4].vertices[0].position;
-        // Gravity should have moved free vertices (not all may move if pinned).
-        let mut any_moved = false;
-        for (a, b) in seq.frames[0]
+        let moved = seq.frames[0]
             .vertices
             .iter()
             .zip(seq.frames[4].vertices.iter())
-        {
-            if (Vec3::from(a.position) - Vec3::from(b.position)).length() > 1e-4 {
-                any_moved = true;
-                break;
-            }
-        }
-        assert!(any_moved || first != last || seq.len() > 0);
+            .any(|(a, b)| (Vec3::from(a.position) - Vec3::from(b.position)).length() > 1e-3);
+        assert!(moved, "free cloth must fall under gravity");
+    }
+
+    #[test]
+    fn freeing_a_cloth_bake_restores_the_rest_pose() {
+        let mut scene = Scene::default();
+        scene.animation.frame_start = 1;
+        scene.animation.frame_end = 12;
+        scene.animation.fps = 24;
+        let mut o = Object::new("Cloth", plane(1.0));
+        o.id = scene.alloc_id();
+        let id = o.id;
+        scene.objects.push(o);
+        scene.object_simulations.insert(
+            id,
+            ObjectSimulation::Cloth(ClothSettings {
+                enabled: true,
+                use_collision: false,
+                ..Default::default()
+            }),
+        );
+        bake_non_rigid_simulations(&mut scene);
+        let last = scene.mesh_caches[&id].frames.last().unwrap().clone();
+        scene.objects[0].mesh = last;
+        assert!(free_sim_bake(&mut scene, id));
+        let y = scene.objects[0].mesh.vertices[0].position[1];
+        assert!(y.abs() < 1e-4, "rest pose expected, got y={y}");
     }
 }

@@ -1172,10 +1172,10 @@ fn vs_main(@location(0) pos: vec3<f32>) -> @builtin(position) vec4<f32> {
                 },
             ],
         });
-        let graph_pipeline = graph_source.map(|source| {
+        let graph_pipeline = graph_source.and_then(|source| {
             let key = (source.clone(), blend);
             if let Some(pipeline) = self.graph_pipeline_cache.get(&key) {
-                return pipeline.clone();
+                return Some(pipeline.clone());
             }
             if self.graph_pipeline_cache.len() >= 64 {
                 self.graph_pipeline_cache.clear();
@@ -1192,23 +1192,34 @@ fn vs_main(@location(0) pos: vec3<f32>) -> @builtin(position) vec4<f32> {
                 step_mode: wgpu::VertexStepMode::Vertex,
                 attributes: &MESH_ATTRS,
             };
-            let pipeline = Arc::new(make_pipeline(
-                &self.device,
-                &layout,
-                self.config.format,
-                &source,
-                &[vertex_layout],
-                wgpu::PrimitiveTopology::TriangleList,
-                !blend,
-                wgpu::CompareFunction::Less,
-                if blend {
-                    wgpu::BlendState::ALPHA_BLENDING
-                } else {
-                    wgpu::BlendState::REPLACE
-                },
-            ));
-            self.graph_pipeline_cache.insert(key, pipeline.clone());
-            pipeline
+            // Invalid generated WGSL must not take down the whole app (Workbench / Shading).
+            let pipeline = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                Arc::new(make_pipeline(
+                    &self.device,
+                    &layout,
+                    self.config.format,
+                    &source,
+                    &[vertex_layout],
+                    wgpu::PrimitiveTopology::TriangleList,
+                    !blend,
+                    wgpu::CompareFunction::Less,
+                    if blend {
+                        wgpu::BlendState::ALPHA_BLENDING
+                    } else {
+                        wgpu::BlendState::REPLACE
+                    },
+                ))
+            }));
+            match pipeline {
+                Ok(pipeline) => {
+                    self.graph_pipeline_cache.insert(key, pipeline.clone());
+                    Some(pipeline)
+                }
+                Err(_) => {
+                    log::error!("graph material pipeline creation panicked; using default shader");
+                    None
+                }
+            }
         });
         GpuMaterial {
             bind_group,
@@ -1366,6 +1377,8 @@ fn vs_main(@location(0) pos: vec3<f32>) -> @builtin(position) vec4<f32> {
                 vh as u32,
                 s.exposure,
                 target,
+                s.cycles_max_dim.max(256),
+                s.cycles_pixel_size.max(1),
             );
             self.blit_cycles_preview(&mut enc, &view, vx, vy, vw, vh);
         } else {
@@ -1653,6 +1666,12 @@ struct VsOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32>, };
         }
     }
 
+    /// Keep the Cycles path tracer in sync with material / shader-graph / texture edits
+    /// even when the GPU scene was not rebuilt (graph edits often skip `doc.touch()`).
+    pub fn sync_cycles(&mut self, scene: &Scene) {
+        self.cycles.ensure_scene(scene);
+    }
+
     /// Fast path: only rewrite model matrices (animation scrub / playback).
     /// Call this instead of `set_scene` when meshes/materials did not change.
     pub fn update_transforms(&mut self, scene: &Scene, highlight: &[Highlight]) {
@@ -1693,12 +1712,22 @@ struct VsOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32>, };
         let height = height.max(64);
         if s.engine == RenderEngine::Cycles {
             let target = s.cycles_samples.max(16);
-            // Force a fresh accumulation at the capture resolution.
+            // Capture path has no live scene pointer here; caller must have synced via
+            // set_scene / sync_cycles first. Force a fresh accumulation at capture res.
             self.cycles.reset_accumulation();
+            self.cycles.set_interactive(false);
             while self.cycles.samples() < target {
-                self.cycles
-                    .accumulate(camera, width, height, s.exposure, target);
+                self.cycles.accumulate(
+                    camera,
+                    width,
+                    height,
+                    s.exposure,
+                    target,
+                    width.max(height).max(256),
+                    1,
+                );
             }
+            self.cycles.set_interactive(true);
             let (sw, sh) = self.cycles.size();
             let src = self.cycles.preview_rgba();
             if sw == width && sh == height {

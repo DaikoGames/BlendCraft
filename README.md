@@ -73,8 +73,8 @@ off the UI thread. The initial graph passes Render Layers to Composite and Viewe
 are Brightness/Contrast, Exposure, Blur, Glare, and Invert; render results can be previewed and
 saved as PNG. Nodes can be added, moved, connected by dragging their sockets, and deleted; pan the
 canvas by dragging empty space or middle-drag, zoom with the wheel, and right-click a wire to remove
-it. The graph is stored in `.forge` projects. New projects use FRG6; existing FRG5, FRG4 and FRG3 projects
-remain readable.
+it. The graph is stored in `.forge` projects. Projects are stored as FRGA; older formats (FRG3-FRG9) remain readable, and cloth settings from
+FRG7-FRG9 files are migrated.
 
 This is a functional starter compositor, not full Blender compositor parity. It currently uses
 8-bit RGBA CPU image operations and does not implement Blender's full node catalog, multi-input
@@ -102,9 +102,43 @@ solver frame-by-frame, including catch-up frames, and baked frames are used when
 
 This is a functional rigid-body foundation, not full Blender physics parity. It does not yet
 implement Bullet-identical simulation, Blender's full rigid-body constraint catalog (including
-piston, generic spring and motor variants), cloth/soft-body solvers, force fields,
+piston, generic spring and motor variants), soft-body fidelity,
 fracture, or a complete Blender-compatible physics API. Physics behavior and cross-platform
 builds still need testing on each target OS and architecture.
+
+## Cloth
+Select a mesh, open **Physics**, add **＋ Cloth** and press **Bake**. Pick a **Fabric** to set every
+physical value at once; any value can still be edited afterwards (the fabric then switches to
+*Custom*).
+
+| Fabric  | Mass kg/m² | Tension N/m | Bending mN·m | Notes |
+|---------|-----------:|------------:|-------------:|-------|
+| Silk    | 0.06 | 600  | 0.05 | floats, flutters, tiny wrinkles |
+| Cotton  | 0.20 | 800  | 1    | everyday fabric |
+| Linen   | 0.25 | 1500 | 5    | crisper folds |
+| Wool    | 0.35 | 400  | 3    | heavy, stretchy, grippy |
+| Denim   | 0.40 | 2000 | 15   | stiff, wide folds |
+| Leather | 0.80 | 3000 | 200  | very stiff, barely stretches |
+| Rubber  | 1.20 | 120  | 60   | elastic, high friction |
+
+The solver is XPBD with sub-stepping: resolution-independent stretch/compression stiffness,
+dihedral-angle bending driven by a real bending rigidity, aerodynamic drag (light fabrics float,
+heavy ones fall fast) and a hard strain limit. Cloth collides with every other visible mesh
+(floors, spheres, characters), supports optional self collision, and reacts to **Wind, Force,
+Vortex and Turbulence** force-field objects (Add > Force Field). Pin the **Boundary**, **Top Edge**
+or **Top Corners**; raise **Pin Depth** to clamp several rows so stiff fabrics stick out of their pins.
+
+Low-poly meshes (like the default plane) are refined automatically while baking (**Sim Edge
+Length**, default 4 cm; 0 disables it), so cloth drapes without manual subdividing. The baked cache
+holds the refined mesh; **Free Bake** restores the rest pose. Colliders are taken at the current
+frame (animated colliders are not followed yet) and pins do not follow animated transforms.
+
+## Cycles viewport
+The Cycles engine is a progressive CPU path tracer: a binned-SAH BVH, all CPU cores, up to 1920 px
+on the long side, a quick low-resolution preview while the camera moves (the resolution adapts to
+the machine speed), smooth shading normals, GGX specular with correct roughness/metallic, soft
+shadows, spot cones, emissive surfaces and per-group materials. Image textures and
+transparency/refraction are not traced yet.
 
 ## Water physics (Fluid)
 Select a mesh, open **Physics > Fluid** and choose a role, as in Blender:

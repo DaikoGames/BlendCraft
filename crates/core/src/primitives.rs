@@ -404,34 +404,87 @@ pub fn plane(size: f32) -> MeshData {
 }
 
 pub fn cube(size: f32) -> MeshData {
-    // 8 shared corner vertices (not 24 split verts) so each edge is truly 2 points
+    // 24 split verts (4 per face) so each face has unique normals and UVs for texturing.
     let h = size * 0.5;
-    let p = [
-        Vec3::new(-h, -h, -h), // 0
-        Vec3::new(h, -h, -h),  // 1
-        Vec3::new(h, h, -h),   // 2
-        Vec3::new(-h, h, -h),  // 3
-        Vec3::new(-h, -h, h),  // 4
-        Vec3::new(h, -h, h),   // 5
-        Vec3::new(h, h, h),    // 6
-        Vec3::new(-h, h, h),   // 7
+    let faces: [(Vec3, [[f32; 3]; 4]); 6] = [
+        // -Z
+        (
+            Vec3::NEG_Z,
+            [
+                [-h, -h, -h],
+                [h, -h, -h],
+                [h, h, -h],
+                [-h, h, -h],
+            ],
+        ),
+        // +Z
+        (
+            Vec3::Z,
+            [
+                [h, -h, h],
+                [-h, -h, h],
+                [-h, h, h],
+                [h, h, h],
+            ],
+        ),
+        // -Y
+        (
+            Vec3::NEG_Y,
+            [
+                [-h, -h, h],
+                [h, -h, h],
+                [h, -h, -h],
+                [-h, -h, -h],
+            ],
+        ),
+        // +Y
+        (
+            Vec3::Y,
+            [
+                [-h, h, -h],
+                [h, h, -h],
+                [h, h, h],
+                [-h, h, h],
+            ],
+        ),
+        // -X
+        (
+            Vec3::NEG_X,
+            [
+                [-h, -h, h],
+                [-h, -h, -h],
+                [-h, h, -h],
+                [-h, h, h],
+            ],
+        ),
+        // +X
+        (
+            Vec3::X,
+            [
+                [h, -h, -h],
+                [h, -h, h],
+                [h, h, h],
+                [h, h, -h],
+            ],
+        ),
     ];
-    let n = Vec3::ZERO; // filled by compute_normals
+    let uvs = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
+    let mut vertices = Vec::with_capacity(24);
+    let mut indices = Vec::with_capacity(36);
+    for (normal, corners) in &faces {
+        let base = vertices.len() as u32;
+        for (i, c) in corners.iter().enumerate() {
+            vertices.push(v(Vec3::from_array(*c), *normal, uvs[i]));
+        }
+        indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+    }
     let mut m = MeshData {
         name: "Cube".into(),
-        vertices: p.iter().map(|q| v(*q, n, [0.0, 0.0])).collect(),
-        // 6 faces × 2 tris, CCW outward
-        indices: vec![
-            0, 2, 1, 0, 3, 2, // -Z
-            4, 5, 6, 4, 6, 7, // +Z
-            0, 1, 5, 0, 5, 4, // -Y
-            3, 7, 6, 3, 6, 2, // +Y
-            0, 4, 7, 0, 7, 3, // -X
-            1, 2, 6, 1, 6, 5, // +X
-        ],
+        vertices,
+        indices,
         ..Default::default()
     };
-    m.compute_normals();
+    fix_winding(&mut m);
     m
 }
 

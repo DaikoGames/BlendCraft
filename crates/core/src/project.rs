@@ -9,7 +9,8 @@ use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
 use std::sync::Arc;
 
-const MAGIC: &[u8; 4] = b"FRG9";
+const MAGIC: &[u8; 4] = b"FRGA";
+const V9_MAGIC: &[u8; 4] = b"FRG9";
 const V8_MAGIC: &[u8; 4] = b"FRG8";
 const V7_MAGIC: &[u8; 4] = b"FRG7";
 const V6_MAGIC: &[u8; 4] = b"FRG6";
@@ -18,6 +19,90 @@ const V4_MAGIC: &[u8; 4] = b"FRG4";
 const LEGACY_MAGIC: &[u8; 4] = b"FRG3";
 
 
+
+/// Cloth settings as stored by FRG7-FRG9 (before fabrics, collisions and XPBD).
+#[derive(Serialize, Deserialize)]
+struct V9ClothSettings {
+    enabled: bool, quality_steps: u32, vertex_mass: f32, tension_stiffness: f32,
+    bending_stiffness: f32, damping: f32, air_damping: f32, gravity_scale: f32, pin_boundary: bool,
+}
+impl From<V9ClothSettings> for crate::ClothSettings {
+    fn from(old: V9ClothSettings) -> Self {
+        // The old unit-less stiffness values do not map onto the physical ones, so migrated
+        // cloth keeps the default (cotton) material marked as Custom and the old behaviour flags.
+        let mut s = crate::ClothSettings::default();
+        s.enabled = old.enabled;
+        s.quality_steps = old.quality_steps.clamp(1, 64);
+        s.damping = old.damping.clamp(0.0, 1.0);
+        s.air_damping = old.air_damping.max(0.0);
+        s.gravity_scale = old.gravity_scale;
+        s.pin = if old.pin_boundary { crate::ClothPin::Boundary } else { crate::ClothPin::None };
+        s.fabric = crate::FabricType::Custom;
+        s
+    }
+}
+#[derive(Serialize, Deserialize)]
+struct V9SimulationSettings {
+    cloth: V9ClothSettings,
+    soft_body: crate::SoftBodySettings,
+    fluid: crate::FluidSettings,
+    particles: crate::ParticleSettings,
+}
+impl From<V9SimulationSettings> for crate::SimulationSettings {
+    fn from(old: V9SimulationSettings) -> Self {
+        Self { cloth: old.cloth.into(), soft_body: old.soft_body, fluid: old.fluid, particles: old.particles }
+    }
+}
+#[derive(Serialize, Deserialize)]
+enum V9ObjectSimulation {
+    Cloth(V9ClothSettings),
+    SoftBody(crate::SoftBodySettings),
+    Fluid(crate::FluidSettings),
+    Particles(crate::ParticleSettings),
+}
+impl From<V9ObjectSimulation> for crate::ObjectSimulation {
+    fn from(old: V9ObjectSimulation) -> Self {
+        match old {
+            V9ObjectSimulation::Cloth(c) => crate::ObjectSimulation::Cloth(c.into()),
+            V9ObjectSimulation::SoftBody(c) => crate::ObjectSimulation::SoftBody(c),
+            V9ObjectSimulation::Fluid(c) => crate::ObjectSimulation::Fluid(c),
+            V9ObjectSimulation::Particles(c) => crate::ObjectSimulation::Particles(c),
+        }
+    }
+}
+fn upgrade_object_sims(
+    old: std::collections::HashMap<u64, V9ObjectSimulation>,
+) -> std::collections::HashMap<u64, crate::ObjectSimulation> {
+    old.into_iter().map(|(k, v)| (k, v.into())).collect()
+}
+
+/// Previous current layout (FRG9), before fabric presets / XPBD cloth settings.
+#[derive(Serialize, Deserialize)]
+struct Version9Scene {
+    objects: Vec<Object>, materials: Vec<Material>, textures: Arc<Vec<TextureData>>,
+    collections: Vec<Collection>, cursor: Vec3, next_id: u64, animation: AnimationData,
+    compositor_graph: CompositorGraph,
+    rigid_bodies: std::collections::HashMap<u64, crate::RigidBody>,
+    physics_world: crate::PhysicsWorldSettings,
+    rigid_body_constraints: Vec<crate::RigidBodyConstraint>,
+    physics_cache: Option<crate::PhysicsCache>,
+    simulations: V9SimulationSettings,
+    object_simulations: std::collections::HashMap<u64, V9ObjectSimulation>,
+    fluids: std::collections::HashMap<u64, crate::FluidObject>,
+    mesh_caches: std::collections::HashMap<u64, crate::MeshSequence>,
+}
+impl From<Version9Scene> for Scene {
+    fn from(scene: Version9Scene) -> Self {
+        Self { objects: scene.objects, materials: scene.materials, textures: scene.textures,
+            collections: scene.collections, cursor: scene.cursor, next_id: scene.next_id,
+            animation: scene.animation, compositor_graph: scene.compositor_graph,
+            rigid_bodies: scene.rigid_bodies, physics_world: scene.physics_world,
+            rigid_body_constraints: scene.rigid_body_constraints, physics_cache: scene.physics_cache,
+            simulations: scene.simulations.into(),
+            object_simulations: upgrade_object_sims(scene.object_simulations),
+            fluids: scene.fluids, mesh_caches: scene.mesh_caches }
+    }
+}
 
 /// Previous current layout (FRG8), before water physics and mesh sequence caches.
 #[derive(Serialize, Deserialize)]
@@ -29,8 +114,8 @@ struct Version8Scene {
     physics_world: crate::PhysicsWorldSettings,
     rigid_body_constraints: Vec<crate::RigidBodyConstraint>,
     physics_cache: Option<crate::PhysicsCache>,
-    simulations: crate::SimulationSettings,
-    object_simulations: std::collections::HashMap<u64, crate::ObjectSimulation>,
+    simulations: V9SimulationSettings,
+    object_simulations: std::collections::HashMap<u64, V9ObjectSimulation>,
 }
 impl From<Version8Scene> for Scene {
     fn from(scene: Version8Scene) -> Self {
@@ -39,7 +124,7 @@ impl From<Version8Scene> for Scene {
             animation: scene.animation, compositor_graph: scene.compositor_graph,
             rigid_bodies: scene.rigid_bodies, physics_world: scene.physics_world,
             rigid_body_constraints: scene.rigid_body_constraints, physics_cache: scene.physics_cache,
-            simulations: scene.simulations, object_simulations: scene.object_simulations,
+            simulations: scene.simulations.into(), object_simulations: upgrade_object_sims(scene.object_simulations),
             fluids: Default::default(), mesh_caches: Default::default() }
     }
 }
@@ -54,7 +139,7 @@ struct Version7Scene {
     physics_world: crate::PhysicsWorldSettings,
     rigid_body_constraints: Vec<crate::RigidBodyConstraint>,
     physics_cache: Option<crate::PhysicsCache>,
-    simulations: crate::SimulationSettings,
+    simulations: V9SimulationSettings,
 }
 impl From<Version7Scene> for Scene {
     fn from(scene: Version7Scene) -> Self {
@@ -63,7 +148,7 @@ impl From<Version7Scene> for Scene {
             animation: scene.animation, compositor_graph: scene.compositor_graph,
             rigid_bodies: scene.rigid_bodies, physics_world: scene.physics_world,
             rigid_body_constraints: scene.rigid_body_constraints, physics_cache: scene.physics_cache,
-            simulations: scene.simulations, object_simulations: Default::default(), fluids: Default::default(), mesh_caches: Default::default() }
+            simulations: scene.simulations.into(), object_simulations: Default::default(), fluids: Default::default(), mesh_caches: Default::default() }
     }
 }
 
@@ -399,10 +484,11 @@ pub fn to_bytes(scene: &Scene) -> Result<Vec<u8>> {
 }
 
 pub fn from_bytes(bytes: &[u8]) -> Result<Scene> {
-    if bytes.len() < 4 || (&bytes[..4] != MAGIC && &bytes[..4] != V8_MAGIC && &bytes[..4] != V7_MAGIC && &bytes[..4] != V6_MAGIC && &bytes[..4] != V5_MAGIC && &bytes[..4] != V4_MAGIC && &bytes[..4] != LEGACY_MAGIC) {
+    if bytes.len() < 4 || (&bytes[..4] != MAGIC && &bytes[..4] != V9_MAGIC && &bytes[..4] != V8_MAGIC && &bytes[..4] != V7_MAGIC && &bytes[..4] != V6_MAGIC && &bytes[..4] != V5_MAGIC && &bytes[..4] != V4_MAGIC && &bytes[..4] != LEGACY_MAGIC) {
         bail!("not a Forge3D project file");
     }
-    let is_v9 = &bytes[..4] == MAGIC;
+    let is_current = &bytes[..4] == MAGIC;
+    let is_v9 = &bytes[..4] == V9_MAGIC;
     let is_v8 = &bytes[..4] == V8_MAGIC;
     let is_v7 = &bytes[..4] == V7_MAGIC;
     let is_v6 = &bytes[..4] == V6_MAGIC;
@@ -410,7 +496,11 @@ pub fn from_bytes(bytes: &[u8]) -> Result<Scene> {
     let is_v4 = &bytes[..4] == V4_MAGIC;
     let mut raw = Vec::new();
     flate2::read::ZlibDecoder::new(&bytes[4..]).read_to_end(&mut raw)?;
-    if is_v9 { return Ok(bincode::deserialize(&raw)?); }
+    if is_current { return Ok(bincode::deserialize(&raw)?); }
+    if is_v9 {
+        let scene: Version9Scene = bincode::deserialize(&raw)?;
+        return Ok(Scene::from(scene));
+    }
     if is_v8 {
         let scene: Version8Scene = bincode::deserialize(&raw)?;
         let mut scene = Scene::from(scene);
@@ -491,6 +581,50 @@ mod tests {
         assert!(tex.rgba8[center] > 240);
         assert!(tex.rgba8[center + 1] < 20);
         assert!(tex.rgba8[center + 2] < 20);
+    }
+
+    #[test]
+    fn frg9_projects_with_old_cloth_settings_still_load() {
+        let mut d = Document::new();
+        let id = 7;
+        // Hand-build an FRG9 file: the old cloth layout lives inside Scene.
+        let v9 = Version9Scene {
+            objects: d.scene.objects.clone(), materials: d.scene.materials.clone(),
+            textures: d.scene.textures.clone(), collections: d.scene.collections.clone(),
+            cursor: d.scene.cursor, next_id: d.scene.next_id, animation: d.scene.animation.clone(),
+            compositor_graph: d.scene.compositor_graph.clone(),
+            rigid_bodies: Default::default(), physics_world: d.scene.physics_world.clone(),
+            rigid_body_constraints: Vec::new(), physics_cache: None,
+            simulations: V9SimulationSettings {
+                cloth: V9ClothSettings { enabled: true, quality_steps: 9, vertex_mass: 0.3,
+                    tension_stiffness: 15.0, bending_stiffness: 0.4, damping: 0.02,
+                    air_damping: 0.1, gravity_scale: 1.0, pin_boundary: true },
+                soft_body: Default::default(), fluid: Default::default(), particles: Default::default(),
+            },
+            object_simulations: std::iter::once((id, V9ObjectSimulation::Cloth(V9ClothSettings {
+                enabled: true, quality_steps: 13, vertex_mass: 0.3, tension_stiffness: 15.0,
+                bending_stiffness: 0.4, damping: 0.02, air_damping: 0.1, gravity_scale: 1.0,
+                pin_boundary: false }))).collect(),
+            fluids: Default::default(), mesh_caches: Default::default(),
+        };
+        let raw = bincode::serialize(&v9).unwrap();
+        let mut enc = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
+        enc.write_all(&raw).unwrap();
+        let mut bytes = V9_MAGIC.to_vec();
+        bytes.extend(enc.finish().unwrap());
+        let loaded = from_bytes(&bytes).unwrap();
+        assert!(loaded.simulations.cloth.enabled);
+        assert_eq!(loaded.simulations.cloth.quality_steps, 9);
+        assert_eq!(loaded.simulations.cloth.pin, crate::ClothPin::Boundary);
+        match loaded.object_simulations.get(&id).unwrap() {
+            crate::ObjectSimulation::Cloth(c) => {
+                assert_eq!(c.quality_steps, 13);
+                assert_eq!(c.pin, crate::ClothPin::None);
+                assert_eq!(c.fabric, crate::FabricType::Custom);
+            }
+            _ => panic!("wrong simulation component type"),
+        }
+        let _ = &mut d;
     }
 
     #[test]

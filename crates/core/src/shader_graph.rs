@@ -4100,7 +4100,28 @@ fn evaluate_graph_point(
     v: f32,
     cache: &mut HashMap<(u64, u8), SocketVal>,
 ) -> GraphPoint {
+    // Default vector for unconnected procedural inputs: prefer a 3D position so meshes
+    // without usable UVs (e.g. the default cube) still get patterned shading, matching
+    // the realtime GPU path which uses object-space positions.
+    evaluate_graph_point_ex(
+        graph, links, order, node_map, textures, material, u, v, [u, v, 0.0], cache,
+    )
+}
+
+fn evaluate_graph_point_ex(
+    graph: &ShaderGraph,
+    links: &HashMap<(u64, u8), (u64, u8)>,
+    order: &[u64],
+    node_map: &HashMap<u64, &ShaderNode>,
+    textures: &[TextureData],
+    material: &Material,
+    u: f32,
+    v: f32,
+    position: [f32; 3],
+    cache: &mut HashMap<(u64, u8), SocketVal>,
+) -> GraphPoint {
     let mut point = GraphPoint::from_material(material);
+    let pos_vec = SocketVal::Vector(position);
     cache.clear();
     for &id in order {
         let Some(node) = node_map.get(&id) else {
@@ -4115,10 +4136,13 @@ fn evaluate_graph_point(
                 cache.insert((id, 0), SocketVal::Color(node.color));
             }
             ShaderNodeKind::TexCoord | ShaderNodeKind::UvMap => {
+                // Generated / object: use position; UV map: use mesh UVs.
                 cache.insert((id, 0), SocketVal::Vector([u, v, 0.0]));
+                cache.insert((id, 1), pos_vec); // Object
+                cache.insert((id, 2), pos_vec); // Generated
             }
             ShaderNodeKind::Mapping => {
-                let p = inp(0, SocketVal::Vector([u, v, 0.0])).as_vector();
+                let p = inp(0, pos_vec).as_vector();
                 let loc = inp(1, SocketVal::Vector([0.0; 3])).as_vector();
                 let rot = inp(2, SocketVal::Vector([0.0; 3])).as_vector();
                 let legacy_scale = [
@@ -4156,7 +4180,7 @@ fn evaluate_graph_point(
                 cache.insert((id, 1), SocketVal::Scalar(color[3]));
             }
             ShaderNodeKind::Noise => {
-                let p = inp(0, SocketVal::Vector([u, v, 0.0])).as_vector();
+                let p = inp(0, pos_vec).as_vector();
                 let w = inp(1, SocketVal::Scalar(0.0)).as_scalar();
                 let scale = inp(2, SocketVal::Scalar(tex_scale(node))).as_scalar();
                 let detail = inp(3, SocketVal::Scalar(2.0)).as_scalar();
@@ -4170,7 +4194,7 @@ fn evaluate_graph_point(
                 cache.insert((id, 1), SocketVal::Color(color));
             }
             ShaderNodeKind::Voronoi => {
-                let p = inp(0, SocketVal::Vector([u, v, 0.0])).as_vector();
+                let p = inp(0, pos_vec).as_vector();
                 let scale = inp(2, SocketVal::Scalar(tex_scale(node))).as_scalar();
                 let randomness = inp(7, SocketVal::Scalar(1.0)).as_scalar();
                 let smoothness = inp(6, SocketVal::Scalar(0.5)).as_scalar();
@@ -4188,7 +4212,7 @@ fn evaluate_graph_point(
                 cache.insert((id, 4), SocketVal::Scalar(radius));
             }
             ShaderNodeKind::Brick => {
-                let p = inp(0, SocketVal::Vector([u, v, 0.0])).as_vector();
+                let p = inp(0, pos_vec).as_vector();
                 let c1 = inp(1, SocketVal::Color([0.8, 0.8, 0.8, 1.0])).as_color();
                 let c2 = inp(2, SocketVal::Color([0.2, 0.2, 0.2, 1.0])).as_color();
                 let mortar = inp(3, SocketVal::Color([0.0, 0.0, 0.0, 1.0])).as_color();
@@ -4221,7 +4245,7 @@ fn evaluate_graph_point(
                 cache.insert((id, 1), SocketVal::Scalar(mortar_factor));
             }
             ShaderNodeKind::Checker => {
-                let p = inp(0, SocketVal::Vector([u, v, 0.0])).as_vector();
+                let p = inp(0, pos_vec).as_vector();
                 let c1 = inp(1, SocketVal::Color([1.0; 4])).as_color();
                 let c2 = inp(2, SocketVal::Color([0.0, 0.0, 0.0, 1.0])).as_color();
                 let scale = inp(3, SocketVal::Scalar(tex_scale(node))).as_scalar();
@@ -4237,13 +4261,13 @@ fn evaluate_graph_point(
                 cache.insert((id, 1), SocketVal::Scalar(fac));
             }
             ShaderNodeKind::Gradient => {
-                let p = inp(0, SocketVal::Vector([u, v, 0.0])).as_vector();
+                let p = inp(0, pos_vec).as_vector();
                 let fac = gradient_value(p[0], p[1], node.mode);
                 cache.insert((id, 0), SocketVal::Scalar(fac));
                 cache.insert((id, 1), SocketVal::Color([fac, fac, fac, 1.0]));
             }
             ShaderNodeKind::Wave => {
-                let p = inp(0, SocketVal::Vector([u, v, 0.0])).as_vector();
+                let p = inp(0, pos_vec).as_vector();
                 let scale = inp(1, SocketVal::Scalar(tex_scale(node))).as_scalar();
                 let distortion = inp(2, SocketVal::Scalar(0.0)).as_scalar();
                 let detail = inp(3, SocketVal::Scalar(2.0)).as_scalar();
@@ -4267,7 +4291,7 @@ fn evaluate_graph_point(
                 cache.insert((id, 1), SocketVal::Color([fac, fac, fac, 1.0]));
             }
             ShaderNodeKind::Magic => {
-                let p = inp(0, SocketVal::Vector([u, v, 0.0])).as_vector();
+                let p = inp(0, pos_vec).as_vector();
                 let scale = inp(1, SocketVal::Scalar(tex_scale(node))).as_scalar();
                 let distortion = inp(2, SocketVal::Scalar(1.0)).as_scalar();
                 let (color, fac) = magic_texture(p, scale, distortion, magic_depth(node));
@@ -4275,7 +4299,7 @@ fn evaluate_graph_point(
                 cache.insert((id, 1), SocketVal::Color(color));
             }
             ShaderNodeKind::Gabor => {
-                let p = inp(0, SocketVal::Vector([u, v, 0.0])).as_vector();
+                let p = inp(0, pos_vec).as_vector();
                 let scale = inp(1, SocketVal::Scalar(5.0)).as_scalar();
                 let frequency = inp(2, SocketVal::Scalar(2.0)).as_scalar();
                 let anisotropy = inp(3, SocketVal::Scalar(1.0)).as_scalar();
@@ -4293,7 +4317,7 @@ fn evaluate_graph_point(
                 cache.insert((id, 1), SocketVal::Color([fac, fac, fac, 1.0]));
             }
             ShaderNodeKind::WhiteNoise => {
-                let p = inp(0, SocketVal::Vector([u, v, 0.0])).as_vector();
+                let p = inp(0, pos_vec).as_vector();
                 let w = inp(1, SocketVal::Scalar(0.0)).as_scalar();
                 let (fac, color) = white_noise_texture(p, w, node.mode);
                 cache.insert((id, 0), SocketVal::Scalar(fac));
@@ -4522,6 +4546,40 @@ fn evaluate_graph_point(
         }
     }
     point
+}
+
+/// Evaluate a shader graph at a surface point for path tracers / offline engines.
+/// `uv` is mesh UV; `position` is object- or world-space position used for unconnected
+/// procedural vector inputs (matches the realtime GPU path).
+pub fn evaluate_surface_shading(
+    graph: &ShaderGraph,
+    material: &Material,
+    textures: &[TextureData],
+    uv: [f32; 2],
+    position: [f32; 3],
+) -> ([f32; 4], f32, f32, [f32; 3]) {
+    let node_map: HashMap<u64, &ShaderNode> = graph.nodes.iter().map(|n| (n.id, n)).collect();
+    let order = topo_order(graph);
+    let links = input_link_map(graph);
+    let mut cache = HashMap::with_capacity(graph.nodes.len() * 3);
+    let point = evaluate_graph_point_ex(
+        graph,
+        &links,
+        &order,
+        &node_map,
+        textures,
+        material,
+        uv[0],
+        uv[1],
+        position,
+        &mut cache,
+    );
+    (
+        point.base_color,
+        point.metallic,
+        point.roughness,
+        point.emissive,
+    )
 }
 
 pub fn evaluate_graph_ex(

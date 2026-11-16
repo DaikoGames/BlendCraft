@@ -103,8 +103,12 @@ pub struct ViewSettings {
     pub shadow_softness: f32,
     /// Active render engine (Workbench / EEVEE / Cycles).
     pub engine: RenderEngine,
-    /// Cycles path-trace sample count used for offline / progressive quality.
+    /// Cycles path-trace sample target for the interactive viewport.
     pub cycles_samples: u32,
+    /// Cap on the long edge of the Cycles viewport buffer (pixels). Higher = sharper, slower.
+    pub cycles_max_dim: u32,
+    /// Viewport pixel size (1 = full resolution, 2 = half, 4 = quarter). Like Blender's pixel size.
+    pub cycles_pixel_size: u32,
 }
 
 impl Default for ViewSettings {
@@ -121,6 +125,8 @@ impl Default for ViewSettings {
             shadow_softness: 1.5,
             engine: RenderEngine::Eevee,
             cycles_samples: 64,
+            cycles_max_dim: 2560,
+            cycles_pixel_size: 1,
         }
     }
 }

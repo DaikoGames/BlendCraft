@@ -2,6 +2,7 @@
 pub mod animation;
 pub mod armature;
 pub mod camera;
+pub mod cloth;
 pub mod command;
 pub mod compositor;
 pub mod constraints;
@@ -26,6 +27,7 @@ pub mod uv;
 pub use animation::{AnimationData, ObjectAnimation, TransformKey};
 pub use armature::{ArmatureData, Bone, SkinBinding};
 pub use camera::{FixedView, OrbitCamera};
+pub use cloth::{ClothBaker, ClothPin, FabricPreset, FabricType};
 pub use command::{Command, History};
 pub use compositor::{CompositorGraph, CompositorLink, CompositorNode, CompositorNodeKind};
 pub use constraints::{Constraint, ConstraintKind};
@@ -62,9 +64,9 @@ pub use simulation::{
 pub use sculpt::{apply_brush, dyntopo_refine, raycast_mesh, SculptBrush, SculptSettings};
 pub use shader_graph::{
     apply_eval_to_material, bake_graph_texture, color_ramp_eval_stops, color_ramp_from_node,
-    evaluate_graph, evaluate_graph_ex, ramp_get_stops, ramp_hue_interpolation, ramp_set_stops,
-    ramp_stop_count, ColorRampStop, ShaderGraph, ShaderLink, ShaderNode, ShaderNodeKind, SocketDef,
-    SocketType, COLOR_RAMP_MAX_STOPS,
+    evaluate_graph, evaluate_graph_ex, evaluate_surface_shading, ramp_get_stops,
+    ramp_hue_interpolation, ramp_set_stops, ramp_stop_count, ColorRampStop, ShaderGraph, ShaderLink,
+    ShaderNode, ShaderNodeKind, SocketDef, SocketType, COLOR_RAMP_MAX_STOPS,
 };
 pub use uv::{
     normalize_uvs, pack_islands, pick_uv, unwrap_cube, unwrap_planar, unwrap_reset, unwrap_smart,

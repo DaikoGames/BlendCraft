@@ -4757,9 +4757,13 @@ impl App {
         // Sync Blender-style render engine from the Render properties panel.
         self.settings.engine = RenderEngine::from_u8(self.ui.render_engine);
         if self.settings.engine == RenderEngine::Cycles {
-            self.settings.cycles_samples = self.ui.render_samples.max(1);
-            // Soft shadows look closer to a path-traced result.
-            self.settings.shadow_softness = self.settings.shadow_softness.max(2.0);
+            // Viewport progressive quality only — do NOT touch EEVEE shadow settings here.
+            self.settings.cycles_samples = self.ui.render_samples_viewport.max(1);
+            self.settings.cycles_max_dim = self.ui.cycles_max_dim.clamp(256, 4096);
+            self.settings.cycles_pixel_size = match self.ui.cycles_pixel_size {
+                1 | 2 | 4 | 8 => self.ui.cycles_pixel_size,
+                _ => 1,
+            };
         } else if self.settings.engine == RenderEngine::Workbench {
             // Solid mode: keep shadows off for a pure studio look unless user enables them.
             // (Leave settings.shadows as user set; shader ignores mapped shadows in Workbench.)
@@ -4777,6 +4781,11 @@ impl App {
             let hl = highlights(&self.doc);
             g.renderer.update_transforms(&self.doc.scene, &hl);
             self.anim_gpu_dirty = false;
+        }
+        // Shader-graph edits often write materials without bumping doc.version.
+        // When Cycles is active, rebuild path-tracer data if shading inputs changed.
+        if self.settings.engine == RenderEngine::Cycles {
+            g.renderer.sync_cycles(&self.doc.scene);
         }
 
         // 5) render 3D + egui overlay

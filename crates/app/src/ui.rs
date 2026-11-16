@@ -74,6 +74,9 @@ pub struct UiState {
     /// Running water-physics bake (stepped a little every UI frame).
     pub fluid_baker: Option<forge_core::FluidBaker>,
     pub fluid_bake_status: String,
+    /// Running cloth bake (stepped a little every UI frame so the app does not freeze).
+    pub cloth_baker: Option<forge_core::ClothBaker>,
+    pub cloth_bake_status: String,
     pub shortcut_filter: String,
     pub outliner_filter: String,
     pub renaming: Option<Rename>,
@@ -141,6 +144,10 @@ pub struct UiState {
     pub render_engine: u8, // 0 Workbench, 1 EEVEE, 2 Cycles (UI only where unsupported)
     pub render_samples_viewport: u32,
     pub render_samples: u32,
+    /// Cycles viewport long-edge resolution cap (pixels). Change this and the view updates.
+    pub cycles_max_dim: u32,
+    /// Cycles viewport pixel size: 1 = full, 2 = half, 4 = quarter, 8 = eighth.
+    pub cycles_pixel_size: u32,
     pub render_temporal_reprojection: bool,
     pub render_jittered_shadows: bool,
     pub render_shadows: bool,
@@ -1589,8 +1596,16 @@ fn draw_shading_editor(
     sync_graph_live(ctx, doc, mi, st);
     sync_graph_bake(ctx, doc, mi, st);
 
-    // Persist graph continuously so project save keeps it.
-    doc.scene.materials[mi].shader_graph = Some(graph_from_ui(st));
+    // Persist graph continuously so project save keeps it. Touch when it actually
+    // changes so Cycles (and other consumers) rebuild shading.
+    {
+        let graph = graph_from_ui(st);
+        let changed = doc.scene.materials[mi].shader_graph.as_ref() != Some(&graph);
+        doc.scene.materials[mi].shader_graph = Some(graph);
+        if changed {
+            doc.touch();
+        }
+    }
 
     // ---- Shader node editor (Blender-like look + movement) ----
     if st.shader_zoom < 0.2 {
@@ -4385,10 +4400,16 @@ fn draw_rendering_properties(
         st.render_percent = 100;
     }
     if st.render_samples_viewport == 0 {
-        st.render_samples_viewport = 16;
+        st.render_samples_viewport = 64;
     }
     if st.render_samples == 0 {
-        st.render_samples = 64;
+        st.render_samples = 128;
+    }
+    if st.cycles_max_dim < 256 {
+        st.cycles_max_dim = 2560;
+    }
+    if !matches!(st.cycles_pixel_size, 1 | 2 | 4 | 8) {
+        st.cycles_pixel_size = 1;
     }
 
     ui.horizontal(|ui| {
@@ -4446,6 +4467,25 @@ fn draw_rendering_properties(
                             egui::DragValue::new(&mut st.render_samples_viewport).range(1..=4096),
                         );
                     });
+                    if st.render_engine == 2 {
+                        ui.horizontal(|ui| {
+                            ui.label("Max Size");
+                            ui.add(
+                                egui::DragValue::new(&mut st.cycles_max_dim)
+                                    .range(480..=4096)
+                                    .speed(16)
+                                    .suffix(" px"),
+                            );
+                        });
+                        ui.weak("Long edge of the Cycles viewport buffer. Raise this for sharper view.");
+                        ui.horizontal(|ui| {
+                            ui.label("Pixel Size");
+                            for (label, val) in [("1×", 1u32), ("2×", 2), ("4×", 4), ("8×", 8)] {
+                                ui.selectable_value(&mut st.cycles_pixel_size, val, label);
+                            }
+                        });
+                        ui.weak("1× = full resolution (matches Max Size). 2×/4× = faster, softer.");
+                    }
                     ui.checkbox(
                         &mut st.render_temporal_reprojection,
                         "Temporal Reprojection",
@@ -8457,6 +8497,91 @@ fn draw_physics_world_props(ui: &mut egui::Ui, doc: &mut Document) {
     ui.separator();
 }
 
+/// Cloth panel shared by the scene defaults and the per-object component.
+fn draw_cloth_settings(ui: &mut egui::Ui, v: &mut forge_core::ClothSettings) {
+    use forge_core::{ClothPin, ClothSettings, FabricType};
+
+    fn physical(v: &ClothSettings) -> [f32; 9] {
+        [
+            v.mass,
+            v.tension_stiffness,
+            v.compression_ratio,
+            v.bending_stiffness,
+            v.damping,
+            v.air_damping,
+            v.friction,
+            v.max_stretch,
+            v.collision_distance,
+        ]
+    }
+
+    ui.checkbox(&mut v.enabled, "Enabled");
+    ui.horizontal(|ui| {
+        ui.label("Fabric");
+        let mut chosen = v.fabric;
+        egui::ComboBox::from_id_salt("cloth_fabric")
+            .selected_text(chosen.name())
+            .show_ui(ui, |ui| {
+                for f in FabricType::ALL {
+                    ui.selectable_value(&mut chosen, f, f.name());
+                }
+            });
+        if chosen != v.fabric {
+            v.apply_fabric(chosen);
+        }
+    });
+    ui.weak(v.fabric.description());
+
+    ui.separator();
+    ui.label(RichText::new("Material").strong());
+    let before = physical(v);
+    ui.horizontal(|ui| { ui.label("Mass"); ui.add(egui::DragValue::new(&mut v.mass).speed(0.005).range(0.005..=20.0).suffix(" kg/m²")); });
+    ui.horizontal(|ui| { ui.label("Tension"); ui.add(egui::DragValue::new(&mut v.tension_stiffness).speed(5.0).range(1.0..=20000.0).suffix(" N/m")); });
+    ui.horizontal(|ui| { ui.label("Compression"); ui.add(egui::DragValue::new(&mut v.compression_ratio).speed(0.005).range(0.001..=1.0)); });
+    ui.horizontal(|ui| { ui.label("Bending"); ui.add(egui::DragValue::new(&mut v.bending_stiffness).speed(0.05).range(0.0001..=5000.0).suffix(" mN·m")); });
+    ui.horizontal(|ui| { ui.label("Max Stretch"); ui.add(egui::DragValue::new(&mut v.max_stretch).speed(0.002).range(0.0..=2.0)); });
+    ui.horizontal(|ui| { ui.label("Damping"); ui.add(egui::DragValue::new(&mut v.damping).speed(0.001).range(0.0..=1.0)); });
+    ui.horizontal(|ui| { ui.label("Air Drag"); ui.add(egui::DragValue::new(&mut v.air_damping).speed(0.01).range(0.0..=10.0)); });
+    ui.horizontal(|ui| { ui.label("Friction"); ui.add(egui::DragValue::new(&mut v.friction).speed(0.01).range(0.0..=1.0)); });
+    if physical(v) != before && v.fabric != FabricType::Custom {
+        v.fabric = FabricType::Custom;
+    }
+
+    ui.separator();
+    ui.label(RichText::new("Pinning").strong());
+    ui.horizontal(|ui| {
+        ui.label("Pin");
+        egui::ComboBox::from_id_salt("cloth_pin")
+            .selected_text(v.pin.name())
+            .show_ui(ui, |ui| {
+                for p in ClothPin::ALL {
+                    ui.selectable_value(&mut v.pin, p, p.name());
+                }
+            });
+    });
+    ui.horizontal(|ui| { ui.label("Pin Depth"); ui.add(egui::DragValue::new(&mut v.pin_depth).range(1..=8)); });
+    ui.weak("Pin Depth > 1 also clamps neighbouring rows, so stiff fabric can stick out of its pins.");
+
+    ui.separator();
+    ui.label(RichText::new("Collisions & Forces").strong());
+    ui.checkbox(&mut v.use_collision, "Collide with scene objects");
+    if v.use_collision {
+        ui.horizontal(|ui| { ui.label("Distance"); ui.add(egui::DragValue::new(&mut v.collision_distance).speed(0.0005).range(0.001..=0.2).suffix(" m")); });
+    }
+    ui.checkbox(&mut v.use_self_collision, "Self collision");
+    if v.use_self_collision {
+        ui.horizontal(|ui| { ui.label("Self Distance"); ui.add(egui::DragValue::new(&mut v.self_distance).speed(0.0005).range(0.002..=0.2).suffix(" m")); });
+    }
+    ui.checkbox(&mut v.use_force_fields, "React to force fields (Wind, Force, Vortex, Turbulence)");
+
+    ui.separator();
+    ui.label(RichText::new("Solver").strong());
+    ui.horizontal(|ui| { ui.label("Quality Steps"); ui.add(egui::DragValue::new(&mut v.quality_steps).range(1..=64)); });
+    ui.horizontal(|ui| { ui.label("Gravity Scale"); ui.add(egui::DragValue::new(&mut v.gravity_scale).speed(0.01).range(-10.0..=10.0)); });
+    ui.horizontal(|ui| { ui.label("Sim Edge Length"); ui.add(egui::DragValue::new(&mut v.target_edge_length).speed(0.002).range(0.0..=1.0).suffix(" m")); });
+    ui.weak("Sim Edge Length > 0 subdivides low-poly meshes automatically while baking (0 = use the mesh as is). The baked cache holds the refined mesh.");
+}
+
 fn draw_simulation_systems_props(ui: &mut egui::Ui, doc: &mut Document) {
     ui.add_space(8.0);
     ui.separator();
@@ -8464,7 +8589,13 @@ fn draw_simulation_systems_props(ui: &mut egui::Ui, doc: &mut Document) {
     ui.weak("Scene-level defaults. Assign Cloth / Soft Body / Particles on objects (Physics tab), then bake.");
 
     ui.horizontal(|ui| {
-        if ui.button("Bake All Cloth / Soft Body / Particles").clicked() {
+        if ui
+            .button("Bake All Cloth / Soft Body / Particles")
+            .on_hover_text(
+                "Synchronous bake of every enabled component. For cloth, prefer the progressive Bake on the object (Physics tab) so the UI stays responsive.",
+            )
+            .clicked()
+        {
             physics_commit(doc);
             let n = forge_core::bake_non_rigid_simulations(&mut doc.scene);
             ui.label(format!("Baked {n} simulation(s). Scrub the timeline to play."));
@@ -8479,15 +8610,7 @@ fn draw_simulation_systems_props(ui: &mut egui::Ui, doc: &mut Document) {
     let mut settings = doc.scene.simulations.clone();
     let original = settings.clone();
     ui.collapsing("Cloth (defaults)", |ui| {
-        ui.checkbox(&mut settings.cloth.enabled, "Enable Cloth");
-        ui.horizontal(|ui| { ui.label("Quality Steps"); ui.add(egui::DragValue::new(&mut settings.cloth.quality_steps).range(1..=64)); });
-        ui.horizontal(|ui| { ui.label("Vertex Mass"); ui.add(egui::DragValue::new(&mut settings.cloth.vertex_mass).speed(0.01).range(0.001..=100.0)); });
-        ui.horizontal(|ui| { ui.label("Tension"); ui.add(egui::DragValue::new(&mut settings.cloth.tension_stiffness).speed(0.1).range(0.0..=1000.0)); });
-        ui.horizontal(|ui| { ui.label("Bending"); ui.add(egui::DragValue::new(&mut settings.cloth.bending_stiffness).speed(0.01).range(0.0..=100.0)); });
-        ui.horizontal(|ui| { ui.label("Damping"); ui.add(egui::DragValue::new(&mut settings.cloth.damping).speed(0.001).range(0.0..=1.0)); });
-        ui.horizontal(|ui| { ui.label("Air Damping"); ui.add(egui::DragValue::new(&mut settings.cloth.air_damping).speed(0.01).range(0.0..=10.0)); });
-        ui.horizontal(|ui| { ui.label("Gravity Scale"); ui.add(egui::DragValue::new(&mut settings.cloth.gravity_scale).speed(0.01).range(-10.0..=10.0)); });
-        ui.checkbox(&mut settings.cloth.pin_boundary, "Pin Boundary Vertices");
+        draw_cloth_settings(ui, &mut settings.cloth);
         ui.weak("Fabric, flags, hanging surfaces. Assign ＋ Cloth on the object, then Bake.");
     });
     ui.collapsing("Soft Body (defaults)", |ui| {
@@ -8625,8 +8748,9 @@ fn draw_rigid_body_constraints(ui: &mut egui::Ui, doc: &mut Document, object_id:
     });
 }
 
-fn draw_object_simulation_props(ui: &mut egui::Ui, doc: &mut Document, object_id: u64) {
+fn draw_object_simulation_props(ui: &mut egui::Ui, doc: &mut Document, st: &mut UiState, object_id: u64) {
     use forge_core::ObjectSimulation;
+    use std::time::Duration;
     ui.separator();
     ui.label(RichText::new("Non-Rigid Simulations").strong());
     ui.weak("Cloth / Soft Body / Particles bake into a mesh sequence on this object (same as fluid). Scrub the timeline after baking.");
@@ -8667,42 +8791,105 @@ fn draw_object_simulation_props(ui: &mut egui::Ui, doc: &mut Document, object_id
             physics_commit(doc);
             doc.scene.object_simulations.remove(&object_id);
             forge_core::free_sim_bake(&mut doc.scene, object_id);
+            if st.cloth_baker.as_ref().map_or(false, |b| b.object_id() == object_id) {
+                st.cloth_baker = None;
+            }
         }
     });
-    ui.horizontal(|ui| {
-        if ui.button("Bake").on_hover_text("Simulate this component over the timeline and store a mesh cache").clicked() {
-            physics_commit(doc);
-            // Ensure this object is enabled before a full bake.
-            if let Some(sim) = doc.scene.object_simulations.get_mut(&object_id) {
-                match sim {
-                    ObjectSimulation::Cloth(s) => s.enabled = true,
-                    ObjectSimulation::SoftBody(s) => s.enabled = true,
-                    ObjectSimulation::Particles(s) => s.enabled = true,
-                    ObjectSimulation::Fluid(s) => s.enabled = true,
+
+    // Progressive cloth bake UI (mirrors fluid baker so the app stays responsive).
+    let cloth_running_here = st.cloth_baker.as_ref().map_or(false, |b| b.object_id() == object_id);
+    if cloth_running_here {
+        let mut finished = false;
+        let mut cancel = false;
+        if let Some(baker) = st.cloth_baker.as_mut() {
+            finished = baker.step(Duration::from_millis(30));
+            let (cur, start, end) = baker.progress();
+            let fraction = ((cur - start) as f32 / (end - start + 1).max(1) as f32).clamp(0.0, 1.0);
+            ui.add(egui::ProgressBar::new(fraction).text(format!(
+                "Baking cloth frame {} / {}",
+                cur.min(end),
+                end
+            )));
+        }
+        if ui.button("Cancel Bake").clicked() {
+            cancel = true;
+        }
+        if cancel {
+            st.cloth_baker = None;
+            st.cloth_bake_status = "Cloth bake cancelled.".to_string();
+        } else if finished {
+            if let Some(baker) = st.cloth_baker.take() {
+                physics_commit(doc);
+                let frames = baker.finish(&mut doc.scene);
+                st.cloth_bake_status = format!(
+                    "Baked {frames} cloth frame(s). Scrub the timeline to play."
+                );
+            }
+        } else {
+            ui.ctx().request_repaint();
+        }
+        if !st.cloth_bake_status.is_empty() {
+            ui.weak(st.cloth_bake_status.clone());
+        }
+        // Still show settings below while baking.
+    } else {
+        ui.horizontal(|ui| {
+            let is_cloth = matches!(component, ObjectSimulation::Cloth(_));
+            if ui
+                .button("Bake")
+                .on_hover_text(if is_cloth {
+                    "Simulate cloth over the timeline (progressive — UI stays responsive)"
+                } else {
+                    "Simulate this component over the timeline and store a mesh cache"
+                })
+                .clicked()
+            {
+                physics_commit(doc);
+                if let Some(sim) = doc.scene.object_simulations.get_mut(&object_id) {
+                    match sim {
+                        ObjectSimulation::Cloth(s) => s.enabled = true,
+                        ObjectSimulation::SoftBody(s) => s.enabled = true,
+                        ObjectSimulation::Particles(s) => s.enabled = true,
+                        ObjectSimulation::Fluid(s) => s.enabled = true,
+                    }
+                }
+                if is_cloth {
+                    if st.cloth_baker.is_some() {
+                        st.cloth_bake_status = "Another cloth bake is already running.".into();
+                    } else if let Some(ObjectSimulation::Cloth(settings)) =
+                        doc.scene.object_simulations.get(&object_id).cloned()
+                    {
+                        match forge_core::ClothBaker::new(&doc.scene, object_id, &settings) {
+                            Ok(baker) => {
+                                st.cloth_bake_status = "Baking cloth…".into();
+                                st.cloth_baker = Some(baker);
+                            }
+                            Err(e) => st.cloth_bake_status = e,
+                        }
+                    }
+                } else {
+                    // Soft body / particles remain synchronous for now.
+                    let n = forge_core::bake_non_rigid_simulations(&mut doc.scene);
+                    st.cloth_bake_status = format!("Baked {n} object(s).");
                 }
             }
-            let n = forge_core::bake_non_rigid_simulations(&mut doc.scene);
-            ui.label(format!("Baked {n} object(s)."));
+            if ui.button("Free Bake").clicked() {
+                physics_commit(doc);
+                forge_core::free_sim_bake(&mut doc.scene, object_id);
+                st.cloth_bake_status.clear();
+            }
+        });
+        if let Some(seq) = doc.scene.mesh_caches.get(&object_id) {
+            ui.weak(format!("Cache: {} frames ({})", seq.len(), seq.source));
         }
-        if ui.button("Free Bake").clicked() {
-            physics_commit(doc);
-            forge_core::free_sim_bake(&mut doc.scene, object_id);
+        if !st.cloth_bake_status.is_empty() {
+            ui.weak(st.cloth_bake_status.clone());
         }
-    });
-    if let Some(seq) = doc.scene.mesh_caches.get(&object_id) {
-        ui.weak(format!("Cache: {} frames ({})", seq.len(), seq.source));
     }
     match &mut component {
         ObjectSimulation::Cloth(v) => {
-            ui.checkbox(&mut v.enabled, "Enabled");
-            ui.horizontal(|ui| { ui.label("Quality Steps"); ui.add(egui::DragValue::new(&mut v.quality_steps).range(1..=64)); });
-            ui.horizontal(|ui| { ui.label("Vertex Mass"); ui.add(egui::DragValue::new(&mut v.vertex_mass).speed(0.01).range(0.001..=100.0)); });
-            ui.horizontal(|ui| { ui.label("Tension"); ui.add(egui::DragValue::new(&mut v.tension_stiffness).speed(0.1).range(0.0..=1000.0)); });
-            ui.horizontal(|ui| { ui.label("Bending"); ui.add(egui::DragValue::new(&mut v.bending_stiffness).speed(0.01).range(0.0..=100.0)); });
-            ui.horizontal(|ui| { ui.label("Damping"); ui.add(egui::DragValue::new(&mut v.damping).speed(0.001).range(0.0..=1.0)); });
-            ui.horizontal(|ui| { ui.label("Air Damping"); ui.add(egui::DragValue::new(&mut v.air_damping).speed(0.01).range(0.0..=10.0)); });
-            ui.horizontal(|ui| { ui.label("Gravity Scale"); ui.add(egui::DragValue::new(&mut v.gravity_scale).speed(0.01).range(-10.0..=10.0)); });
-            ui.checkbox(&mut v.pin_boundary, "Pin Boundary Vertices");
+            draw_cloth_settings(ui, v);
         }
         ObjectSimulation::SoftBody(v) => {
             ui.checkbox(&mut v.enabled, "Enabled");
@@ -8992,7 +9179,7 @@ fn draw_physics_props(ui: &mut egui::Ui, doc: &mut Document, st: &mut UiState, o
     }
 
     draw_fluid_props(ui, doc, st, object_id);
-    draw_object_simulation_props(ui, doc, object_id);
+    draw_object_simulation_props(ui, doc, st, object_id);
 
     let Some(mut body) = doc.scene.rigid_bodies.get(&object_id).cloned() else {
         ui.label("No rigid body is assigned to this object.");
