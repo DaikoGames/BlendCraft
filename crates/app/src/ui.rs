@@ -960,7 +960,7 @@ pub fn draw(
             .show(ctx, |ui| {
                 draw_rendering_properties(ui, doc, st, &mut actions);
             });
-    } else if !doc.uv_mode && !doc.paint_mode && !st.compositing_mode && !st.scripting_mode {
+    } else if !doc.uv_mode && !doc.paint_mode && !st.compositing_mode {
         egui::SidePanel::right("right_panel")
             .default_width(300.0)
             .width_range(220.0..=480.0)
@@ -4927,152 +4927,437 @@ fn draw_rendering_properties(
         });
 }
 
-/// Center editor: Blender Image / Render Result (no 3D viewport).
-fn draw_scripting_workspace(ui: &mut egui::Ui, st: &mut UiState, actions: &mut Vec<Action>) {
-    // Toolbar
-    ui.horizontal(|ui| {
-        ui.label(RichText::new("Scripting").strong().size(14.0));
-        ui.separator();
-        if ui
-            .add_enabled(
-                !st.python_script_running,
-                egui::Button::new("▶  Run  (Alt+P)"),
-            )
-            .on_hover_text("Execute the script against the current scene")
-            .clicked()
-        {
-            actions.push(Action::RunPythonScript);
-        }
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            if ui.button("Open…").clicked() {
-                actions.push(Action::OpenPythonScript);
-            }
-            if ui.button("Save").clicked() {
-                actions.push(Action::SavePythonScript);
-            }
-            if ui.button("Save As…").clicked() {
-                actions.push(Action::SavePythonScript);
-            }
-        }
-        if ui.button("New").on_hover_text("Clear editor to a starter script").clicked() {
-            st.python_script = SCRIPT_TEMPLATE_STARTER.to_owned();
-            st.python_script_path = None;
-            st.python_script_output.clear();
-        }
-        if ui.button("Clear Output").clicked() {
-            st.python_script_output.clear();
-        }
-        ui.separator();
-        ui.menu_button("Templates", |ui| {
-            for (name, body) in SCRIPT_TEMPLATES {
-                if ui.button(*name).clicked() {
-                    if st.python_script.trim().is_empty() {
-                        st.python_script = (*body).to_owned();
-                    } else {
-                        st.python_script.push_str("\n\n");
-                        st.python_script.push_str(body);
-                    }
-                    ui.close_menu();
-                }
-            }
-        });
-        ui.menu_button("Insert API", |ui| {
-            for (name, snippet) in SCRIPT_SNIPPETS {
-                if ui.button(*name).clicked() {
-                    if !st.python_script.ends_with('\n') && !st.python_script.is_empty() {
-                        st.python_script.push('\n');
-                    }
-                    st.python_script.push_str(snippet);
-                    st.python_script.push('\n');
-                    ui.close_menu();
-                }
-            }
-        });
-        if ui.button("API Help").on_hover_text("Append bc_api_help() call").clicked() {
-            st.python_script.push_str("\n\nimport bpy\nbc_api_help()\n");
-        }
-        if let Some(path) = st.python_script_path.as_ref() {
-            ui.weak(path.display().to_string());
-        }
-        if st.python_script_running {
-            ui.spinner();
-            ui.colored_label(egui::Color32::LIGHT_BLUE, "Running…");
-        }
-    });
-    ui.separator();
+// ---------------------------------------------------------------- Scripting workspace
+// Blender "Scripting" workspace look: a Text Editor area (header with menus, line-number
+// gutter, Python syntax colours, status footer), a Python Console / Info area underneath
+// and an API sidebar (like the editor's N-panel). Outliner + Properties stay on the right.
+const SCRIPT_BG_EDITOR: egui::Color32 = egui::Color32::from_rgb(0x1d, 0x1d, 0x1d);
+const SCRIPT_BG_HEADER: egui::Color32 = egui::Color32::from_rgb(0x30, 0x30, 0x30);
+const SCRIPT_BG_SIDEBAR: egui::Color32 = egui::Color32::from_rgb(0x28, 0x28, 0x28);
+const SCRIPT_BG_GUTTER: egui::Color32 = egui::Color32::from_rgb(0x25, 0x25, 0x25);
+const SCRIPT_ACCENT: egui::Color32 = egui::Color32::from_rgb(0x47, 0x72, 0xb3);
+const SCRIPT_COL_TEXT: egui::Color32 = egui::Color32::from_rgb(0xe6, 0xe6, 0xe6);
+const SCRIPT_COL_COMMENT: egui::Color32 = egui::Color32::from_rgb(0x7f, 0x8c, 0x7a);
+const SCRIPT_COL_STRING: egui::Color32 = egui::Color32::from_rgb(0xe6, 0xc2, 0x6b);
+const SCRIPT_COL_NUMBER: egui::Color32 = egui::Color32::from_rgb(0x6f, 0xb4, 0xe6);
+const SCRIPT_COL_KEYWORD: egui::Color32 = egui::Color32::from_rgb(0xe0, 0x7a, 0x4f);
+const SCRIPT_COL_BUILTIN: egui::Color32 = egui::Color32::from_rgb(0xb4, 0x8e, 0xe0);
+const SCRIPT_COL_API: egui::Color32 = egui::Color32::from_rgb(0x8f, 0xd0, 0x7a);
+const SCRIPT_COL_DECORATOR: egui::Color32 = egui::Color32::from_rgb(0xd0, 0xa0, 0x50);
 
-    let full = ui.available_size();
-    let api_w = 280.0_f32;
-    ui.horizontal(|ui| {
-        // ---- Editor + console ----
-        ui.vertical(|ui| {
-            ui.set_min_width((full.x - api_w - 12.0).max(320.0));
-            ui.set_max_width((full.x - api_w - 8.0).max(320.0));
-            let editor_h = (ui.available_height() * 0.62).max(200.0);
-            ui.label(RichText::new("Text Editor").weak().size(11.0));
-            egui::ScrollArea::vertical()
-                .id_salt("script_editor_scroll")
-                .max_height(editor_h)
-                .show(ui, |ui| {
-                    ui.add_sized(
-                        [ui.available_width(), editor_h - 8.0],
-                        egui::TextEdit::multiline(&mut st.python_script)
-                            .font(egui::TextStyle::Monospace)
-                            .code_editor()
-                            .desired_width(f32::INFINITY)
-                            .desired_rows(24),
-                    );
-                });
-            ui.separator();
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("Console").strong());
-                ui.weak("stdout / stderr · embedded RustPython");
-            });
-            egui::ScrollArea::vertical()
-                .id_salt("script_console_scroll")
-                .stick_to_bottom(true)
-                .max_height(ui.available_height().max(80.0))
-                .show(ui, |ui| {
-                    if st.python_script_output.is_empty() {
-                        ui.weak("Run a script to see output here.");
+const PY_KEYWORDS: &[&str] = &[
+    "and", "as", "assert", "async", "await", "break", "class", "continue", "def", "del", "elif",
+    "else", "except", "finally", "for", "from", "global", "if", "import", "in", "is", "lambda",
+    "nonlocal", "not", "or", "pass", "raise", "return", "try", "while", "with", "yield",
+];
+const PY_BUILTINS: &[&str] = &[
+    "True", "False", "None", "self", "print", "len", "range", "enumerate", "zip", "map", "filter",
+    "list", "dict", "set", "tuple", "str", "int", "float", "bool", "abs", "min", "max", "sum",
+    "sorted", "reversed", "round", "isinstance", "hasattr", "getattr", "setattr", "open", "type",
+    "any", "all", "super", "iter", "next",
+];
+const PY_API_NAMES: &[&str] = &["bpy", "mathutils", "bc_api_help", "Vector", "Euler", "Quaternion", "Matrix", "Color"];
+
+/// Builds a coloured text layout for the script editor (simple Python tokenizer).
+fn python_layout_job(text: &str, font: egui::FontId, highlight: bool) -> egui::text::LayoutJob {
+    use egui::text::{LayoutJob, TextFormat};
+    let mut job = LayoutJob::default();
+    job.wrap.max_width = f32::INFINITY;
+    if !highlight {
+        job.append(text, 0.0, TextFormat::simple(font, SCRIPT_COL_TEXT));
+        return job;
+    }
+    let bytes = text.as_bytes();
+    let n = bytes.len();
+    let mut i = 0usize;
+    while i < n {
+        let start = i;
+        let b = bytes[i];
+        let color;
+        if b == b'#' {
+            while i < n && bytes[i] != b'\n' {
+                i += 1;
+            }
+            color = SCRIPT_COL_COMMENT;
+        } else if b == b'"' || b == b'\'' {
+            let q = b;
+            let triple = i + 2 < n && bytes[i + 1] == q && bytes[i + 2] == q;
+            if triple {
+                i += 3;
+                while i < n {
+                    if bytes[i] == b'\\' {
+                        i = (i + 2).min(n);
+                        continue;
+                    }
+                    if bytes[i] == q && i + 2 < n && bytes[i + 1] == q && bytes[i + 2] == q {
+                        i += 3;
+                        break;
+                    }
+                    i += 1;
+                }
+            } else {
+                i += 1;
+                while i < n && bytes[i] != q && bytes[i] != b'\n' {
+                    if bytes[i] == b'\\' {
+                        i = (i + 2).min(n);
                     } else {
-                        let err = st.python_script_output.contains("Traceback")
-                            || st.python_script_output.contains("Error")
-                            || st.python_script_output.starts_with("Could not");
-                        ui.label(
-                            RichText::new(&st.python_script_output)
-                                .monospace()
-                                .color(if err {
+                        i += 1;
+                    }
+                }
+                if i < n && bytes[i] == q {
+                    i += 1;
+                }
+            }
+            color = SCRIPT_COL_STRING;
+        } else if b.is_ascii_digit() {
+            while i < n && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'.' || bytes[i] == b'_') {
+                i += 1;
+            }
+            color = SCRIPT_COL_NUMBER;
+        } else if b.is_ascii_alphabetic() || b == b'_' {
+            while i < n && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
+                i += 1;
+            }
+            let word = &text[start..i];
+            color = if PY_KEYWORDS.contains(&word) {
+                SCRIPT_COL_KEYWORD
+            } else if PY_BUILTINS.contains(&word) {
+                SCRIPT_COL_BUILTIN
+            } else if PY_API_NAMES.contains(&word) {
+                SCRIPT_COL_API
+            } else {
+                SCRIPT_COL_TEXT
+            };
+        } else if b == b'@' {
+            i += 1;
+            while i < n && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_' || bytes[i] == b'.') {
+                i += 1;
+            }
+            color = SCRIPT_COL_DECORATOR;
+        } else {
+            // any other character (operators, whitespace, non-ASCII): advance one full char
+            let len = text[i..].chars().next().map(|c| c.len_utf8()).unwrap_or(1);
+            i += len;
+            color = SCRIPT_COL_TEXT;
+        }
+        if i <= start {
+            i = start + 1;
+        }
+        job.append(&text[start..i], 0.0, TextFormat::simple(font.clone(), color));
+    }
+    job
+}
+
+/// Blender-style Scripting workspace (Text Editor + Python Console + API sidebar).
+fn draw_scripting_workspace(ui: &mut egui::Ui, st: &mut UiState, actions: &mut Vec<Action>) {
+    // View options live in egui's temp memory so UiState is untouched.
+    let id_nums = egui::Id::new("script_ui_line_numbers");
+    let id_hl = egui::Id::new("script_ui_highlight");
+    let id_side = egui::Id::new("script_ui_sidebar");
+    let id_console = egui::Id::new("script_ui_console");
+    let mut show_nums = ui.data(|d| d.get_temp::<bool>(id_nums)).unwrap_or(true);
+    let mut highlight = ui.data(|d| d.get_temp::<bool>(id_hl)).unwrap_or(true);
+    let mut show_side = ui.data(|d| d.get_temp::<bool>(id_side)).unwrap_or(true);
+    let mut show_console = ui.data(|d| d.get_temp::<bool>(id_console)).unwrap_or(true);
+
+    let file_name = st
+        .python_script_path
+        .as_ref()
+        .and_then(|p| p.file_name())
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "Text".to_owned());
+
+    // ---- Header (Blender area header) ----
+    egui::TopBottomPanel::top("script_header")
+        .exact_height(28.0)
+        .frame(
+            egui::Frame::none()
+                .fill(SCRIPT_BG_HEADER)
+                .inner_margin(egui::Margin::symmetric(6.0, 2.0)),
+        )
+        .show_inside(ui, |ui| {
+            ui.horizontal_centered(|ui| {
+                ui.label(RichText::new("Text Editor").strong());
+                ui.separator();
+                ui.menu_button("View", |ui| {
+                    ui.checkbox(&mut show_nums, "Line Numbers");
+                    ui.checkbox(&mut highlight, "Syntax Highlighting");
+                    ui.checkbox(&mut show_side, "Sidebar (API Reference)");
+                    ui.checkbox(&mut show_console, "Python Console");
+                });
+                ui.menu_button("Text", |ui| {
+                    if ui.button("New").clicked() {
+                        st.python_script = SCRIPT_TEMPLATE_STARTER.to_owned();
+                        st.python_script_path = None;
+                        st.python_script_output.clear();
+                        ui.close_menu();
+                    }
+                    #[cfg(not(target_arch = "wasm32"))]
+                    {
+                        if ui.button("Open…").clicked() {
+                            actions.push(Action::OpenPythonScript);
+                            ui.close_menu();
+                        }
+                        if ui.button("Save").clicked() {
+                            actions.push(Action::SavePythonScript);
+                            ui.close_menu();
+                        }
+                        if ui.button("Save As…").clicked() {
+                            actions.push(Action::SavePythonScript);
+                            ui.close_menu();
+                        }
+                    }
+                    ui.separator();
+                    if ui
+                        .add_enabled(!st.python_script_running, egui::Button::new("Run Script   Alt+P"))
+                        .clicked()
+                    {
+                        actions.push(Action::RunPythonScript);
+                        ui.close_menu();
+                    }
+                });
+                ui.menu_button("Edit", |ui| {
+                    if ui.button("Clear Console Output").clicked() {
+                        st.python_script_output.clear();
+                        ui.close_menu();
+                    }
+                    if ui.button("Print API Help (bc_api_help)").clicked() {
+                        st.python_script.push_str("\n\nimport bpy\nbc_api_help()\n");
+                        ui.close_menu();
+                    }
+                    ui.menu_button("Insert API", |ui| {
+                        for (name, snippet) in SCRIPT_SNIPPETS {
+                            if ui.button(*name).clicked() {
+                                if !st.python_script.ends_with('\n') && !st.python_script.is_empty() {
+                                    st.python_script.push('\n');
+                                }
+                                st.python_script.push_str(snippet);
+                                st.python_script.push('\n');
+                                ui.close_menu();
+                            }
+                        }
+                    });
+                });
+                ui.menu_button("Templates", |ui| {
+                    for (name, body) in SCRIPT_TEMPLATES {
+                        if ui.button(*name).clicked() {
+                            if st.python_script.trim().is_empty() {
+                                st.python_script = (*body).to_owned();
+                            } else {
+                                st.python_script.push_str("\n\n");
+                                st.python_script.push_str(body);
+                            }
+                            ui.close_menu();
+                        }
+                    }
+                });
+                ui.separator();
+                egui::Frame::none()
+                    .fill(SCRIPT_BG_EDITOR)
+                    .rounding(3.0)
+                    .inner_margin(egui::Margin::symmetric(8.0, 1.0))
+                    .show(ui, |ui| {
+                        ui.label(RichText::new(&file_name).strong());
+                    });
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let run = egui::Button::new(
+                        RichText::new("▶  Run Script").color(egui::Color32::WHITE),
+                    )
+                    .fill(SCRIPT_ACCENT);
+                    if ui
+                        .add_enabled(!st.python_script_running, run)
+                        .on_hover_text("Execute the script against the current scene (Alt+P)")
+                        .clicked()
+                    {
+                        actions.push(Action::RunPythonScript);
+                    }
+                    if st.python_script_running {
+                        ui.spinner();
+                    }
+                });
+            });
+        });
+
+    // ---- Footer (status line) ----
+    let line_count = st.python_script.matches('\n').count() + 1;
+    let char_count = st.python_script.chars().count();
+    egui::TopBottomPanel::bottom("script_footer")
+        .exact_height(20.0)
+        .frame(
+            egui::Frame::none()
+                .fill(SCRIPT_BG_HEADER)
+                .inner_margin(egui::Margin::symmetric(8.0, 1.0)),
+        )
+        .show_inside(ui, |ui| {
+            ui.horizontal_centered(|ui| {
+                ui.label(RichText::new(format!("{line_count} lines")).size(11.0).weak());
+                ui.label(RichText::new(format!("{char_count} chars")).size(11.0).weak());
+                ui.label(RichText::new("Python · RustPython").size(11.0).weak());
+                if st.python_script_running {
+                    ui.colored_label(egui::Color32::LIGHT_BLUE, "Running…");
+                }
+            });
+        });
+
+    // ---- Python Console / Info area ----
+    if show_console {
+        egui::TopBottomPanel::bottom("script_console")
+            .resizable(true)
+            .default_height(170.0)
+            .height_range(70.0..=520.0)
+            .frame(egui::Frame::none().fill(SCRIPT_BG_EDITOR))
+            .show_inside(ui, |ui| {
+                egui::Frame::none()
+                    .fill(SCRIPT_BG_HEADER)
+                    .inner_margin(egui::Margin::symmetric(6.0, 2.0))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new("Python Console").strong());
+                            ui.weak("output of the last run");
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if ui.small_button("Clear").clicked() {
+                                    st.python_script_output.clear();
+                                }
+                            });
+                        });
+                    });
+                egui::ScrollArea::vertical()
+                    .id_salt("script_console_scroll")
+                    .stick_to_bottom(true)
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        ui.add_space(2.0);
+                        if st.python_script_output.is_empty() {
+                            ui.label(
+                                RichText::new("Run a script to see output here.")
+                                    .monospace()
+                                    .weak(),
+                            );
+                        } else {
+                            ui.label(
+                                RichText::new(">>> run script")
+                                    .monospace()
+                                    .color(egui::Color32::from_rgb(0x9d, 0xb4, 0xff)),
+                            );
+                            let mut in_traceback = false;
+                            for line in st.python_script_output.lines() {
+                                if line.starts_with("Traceback") {
+                                    in_traceback = true;
+                                }
+                                let is_err = in_traceback
+                                    || line.contains("Error")
+                                    || line.starts_with("Could not");
+                                let col = if is_err {
                                     egui::Color32::from_rgb(0xff, 0x8a, 0x80)
                                 } else {
-                                    egui::Color32::from_rgb(0xc8, 0xe6, 0xc9)
-                                }),
-                        );
-                    }
-                });
-        });
-
-        ui.separator();
-
-        // ---- API reference side panel ----
-        ui.vertical(|ui| {
-            ui.set_width(api_w);
-            ui.label(RichText::new("API Reference").strong());
-            ui.weak("BlendCraft bpy subset");
-            ui.separator();
-            egui::ScrollArea::vertical()
-                .id_salt("script_api_ref")
-                .show(ui, |ui| {
-                    for (section, lines) in SCRIPT_API_DOCS {
-                        ui.label(RichText::new(*section).strong().color(egui::Color32::from_rgb(0x9a, 0xc8, 0x70)));
-                        for line in *lines {
-                            ui.label(RichText::new(*line).monospace().size(11.0));
+                                    SCRIPT_COL_TEXT
+                                };
+                                ui.label(RichText::new(line).monospace().color(col));
+                            }
                         }
-                        ui.add_space(6.0);
-                    }
+                    });
+            });
+    }
+
+    // ---- Sidebar: API reference (like the editor's N-panel) ----
+    if show_side {
+        egui::SidePanel::right("script_sidebar")
+            .resizable(true)
+            .default_width(240.0)
+            .width_range(170.0..=420.0)
+            .frame(
+                egui::Frame::none()
+                    .fill(SCRIPT_BG_SIDEBAR)
+                    .inner_margin(egui::Margin::same(6.0)),
+            )
+            .show_inside(ui, |ui| {
+                ui.label(RichText::new("API Reference").strong());
+                ui.weak("BlendCraft bpy subset");
+                ui.separator();
+                egui::ScrollArea::vertical()
+                    .id_salt("script_api_ref")
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        for (section, lines) in SCRIPT_API_DOCS {
+                            egui::CollapsingHeader::new(RichText::new(*section).strong())
+                                .default_open(true)
+                                .show(ui, |ui| {
+                                    for line in *lines {
+                                        ui.label(RichText::new(*line).monospace().size(11.0));
+                                    }
+                                });
+                        }
+                    });
+            });
+    }
+
+    // ---- Text editor (line numbers + syntax colours) ----
+    egui::CentralPanel::default()
+        .frame(egui::Frame::none().fill(SCRIPT_BG_EDITOR))
+        .show_inside(ui, |ui| {
+            let font = egui::TextStyle::Monospace.resolve(ui.style());
+            let (glyph_w, row_h) = ui.fonts(|f| (f.glyph_width(&font, '0'), f.row_height(&font)));
+            let digits = line_count.to_string().len().max(3);
+            let gutter_w = if show_nums { glyph_w * digits as f32 + 14.0 } else { 0.0 };
+            let view_w = ui.available_width();
+            let view_h = ui.available_height();
+            let longest = st
+                .python_script
+                .lines()
+                .map(|l| l.chars().count())
+                .max()
+                .unwrap_or(0);
+            let text_w = (view_w - gutter_w).max(glyph_w * (longest as f32 + 8.0));
+            let rows = ((view_h / row_h).floor() as usize).max(8);
+            let mut layouter = |ui: &egui::Ui, text: &str, _wrap: f32| -> Arc<egui::Galley> {
+                let job = python_layout_job(text, font.clone(), highlight);
+                ui.fonts(|f| f.layout_job(job))
+            };
+            egui::ScrollArea::both()
+                .id_salt("script_editor_scroll")
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    ui.horizontal_top(|ui| {
+                        ui.spacing_mut().item_spacing.x = 0.0;
+                        if show_nums {
+                            let mut nums = String::new();
+                            for n in 1..=line_count.max(rows) {
+                                if n > 1 {
+                                    nums.push('\n');
+                                }
+                                if n <= line_count {
+                                    nums.push_str(&format!("{n:>w$}", w = digits));
+                                }
+                            }
+                            egui::Frame::none()
+                                .fill(SCRIPT_BG_GUTTER)
+                                .inner_margin(egui::Margin::symmetric(6.0, 2.0))
+                                .show(ui, |ui| {
+                                    ui.label(
+                                        RichText::new(nums)
+                                            .monospace()
+                                            .color(egui::Color32::from_rgb(0x6e, 0x6e, 0x6e)),
+                                    );
+                                });
+                        }
+                        ui.add(
+                            egui::TextEdit::multiline(&mut st.python_script)
+                                .font(egui::TextStyle::Monospace)
+                                .code_editor()
+                                .frame(false)
+                                .desired_width(text_w)
+                                .desired_rows(rows)
+                                .layouter(&mut layouter),
+                        );
+                    });
                 });
         });
+
+    ui.data_mut(|d| {
+        d.insert_temp(id_nums, show_nums);
+        d.insert_temp(id_hl, highlight);
+        d.insert_temp(id_side, show_side);
+        d.insert_temp(id_console, show_console);
     });
 }
 
