@@ -46,6 +46,9 @@ pub struct Object {
     pub constraints: Vec<Constraint>,
     /// Optional armature skinning binding (mesh objects only).
     pub skin: Option<SkinBinding>,
+    /// Optional Geometry Nodes modifier graph (Blender-style).
+    #[serde(default)]
+    pub geo_nodes: Option<crate::geometry_nodes::GeometryNodeGraph>,
 }
 
 impl Object {
@@ -66,6 +69,7 @@ impl Object {
             link_group: None,
             constraints: Vec::new(),
             skin: None,
+            geo_nodes: None,
         }
     }
 

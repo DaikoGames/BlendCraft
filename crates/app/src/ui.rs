@@ -93,6 +93,8 @@ pub struct UiState {
     pub rendering_mode: bool,
     /// Compositing workspace visibility.
     pub compositing_mode: bool,
+    /// Geometry Nodes workspace.
+    pub geometry_nodes_mode: bool,
     /// Python Scripting workspace visibility.
     pub scripting_mode: bool,
     pub python_script: String,
@@ -181,6 +183,17 @@ pub struct UiState {
     pub compositor_eval_requested_at: Option<std::time::Instant>,
     pub compositor_link_from: Option<u64>,
     pub compositor_last_node_rects: Vec<(u64, egui::Rect)>,
+
+    // Geometry Nodes editor session
+    pub geo_pan: [f32; 2],
+    pub geo_zoom: f32,
+    pub geo_socket_pick: Option<(u64, bool, u8)>,
+    pub geo_drag_from: Option<(u64, bool, u8)>,
+    pub geo_socket_positions: HashMap<(u64, bool, u8), [f32; 2]>,
+    pub geo_last_node_rects: Vec<(u64, egui::Rect)>,
+    pub geo_apply_pending: bool,
+    /// 0 Vertex, 1 Edge, 2 Face
+    pub geo_spreadsheet_domain: u8,
     /// Properties editor context, Blender-like tabs.
     pub properties_tab: PropertiesTab,
 }
@@ -376,6 +389,7 @@ pub fn draw(
                     st.animation_mode = false;
                     st.rendering_mode = false;
                     st.compositing_mode = false;
+                    st.geometry_nodes_mode = false;
                     st.scripting_mode = false;
                     if in_edit {
                         actions.push(Action::ToggleEditMode);
@@ -408,6 +422,7 @@ pub fn draw(
                     st.shading_mode = false;
                     st.rendering_mode = false;
                     st.compositing_mode = false;
+                    st.geometry_nodes_mode = false;
                     st.scripting_mode = false;
                     st.animation_mode = true;
                     if in_edit {
@@ -441,6 +456,7 @@ pub fn draw(
                     st.shading_mode = false;
                     st.animation_mode = false;
                     st.compositing_mode = false;
+                    st.geometry_nodes_mode = false;
                     st.scripting_mode = false;
                     st.rendering_mode = true;
                     st.properties_tab = PropertiesTab::Render;
@@ -472,6 +488,7 @@ pub fn draw(
                     st.animation_mode = false;
                     st.rendering_mode = false;
                     st.compositing_mode = false;
+                    st.geometry_nodes_mode = false;
                     st.scripting_mode = false;
                     if in_sculpt {
                         actions.push(Action::ToggleSculptMode);
@@ -494,6 +511,7 @@ pub fn draw(
                     st.animation_mode = false;
                     st.rendering_mode = false;
                     st.compositing_mode = false;
+                    st.geometry_nodes_mode = false;
                     st.scripting_mode = false;
                     if in_edit && doc.armature_edit {
                         actions.push(Action::TogglePoseMode);
@@ -512,6 +530,7 @@ pub fn draw(
                     st.animation_mode = false;
                     st.rendering_mode = false;
                     st.compositing_mode = false;
+                    st.geometry_nodes_mode = false;
                     st.scripting_mode = false;
                     if in_edit {
                         actions.push(Action::ToggleEditMode);
@@ -535,6 +554,7 @@ pub fn draw(
                     st.animation_mode = false;
                     st.rendering_mode = false;
                     st.compositing_mode = false;
+                    st.geometry_nodes_mode = false;
                     st.scripting_mode = false;
                     if in_edit {
                         actions.push(Action::ToggleEditMode);
@@ -573,6 +593,7 @@ pub fn draw(
                     st.animation_mode = false;
                     st.rendering_mode = false;
                     st.compositing_mode = false;
+                    st.geometry_nodes_mode = false;
                     st.scripting_mode = false;
                 }
 
@@ -584,6 +605,7 @@ pub fn draw(
                     st.animation_mode = false;
                     st.rendering_mode = false;
                     st.compositing_mode = true;
+                    st.geometry_nodes_mode = false;
                     st.scripting_mode = false;
                     if in_edit {
                         actions.push(Action::ToggleEditMode);
@@ -599,6 +621,32 @@ pub fn draw(
                     }
                 }
                 if ui
+                    .selectable_label(st.geometry_nodes_mode, "Geometry Nodes")
+                    .clicked()
+                {
+                    st.shading_mode = false;
+                    st.animation_mode = false;
+                    st.rendering_mode = false;
+                    st.compositing_mode = false;
+                    st.geometry_nodes_mode = true;
+                    st.scripting_mode = false;
+                    if in_edit {
+                        actions.push(Action::ToggleEditMode);
+                    }
+                    if in_sculpt {
+                        actions.push(Action::ToggleSculptMode);
+                    }
+                    if in_uv {
+                        actions.push(Action::ToggleUvMode);
+                    }
+                    if in_paint {
+                        actions.push(Action::TogglePaintMode);
+                    }
+                    if st.geo_zoom < 0.2 {
+                        st.geo_zoom = 1.0;
+                    }
+                }
+                if ui
                     .selectable_label(st.scripting_mode, "Scripting")
                     .clicked()
                 {
@@ -606,6 +654,7 @@ pub fn draw(
                     st.animation_mode = false;
                     st.rendering_mode = false;
                     st.compositing_mode = false;
+                    st.geometry_nodes_mode = false;
                     st.scripting_mode = true;
                     if in_edit {
                         actions.push(Action::ToggleEditMode);
@@ -631,6 +680,7 @@ pub fn draw(
                         st.animation_mode = false;
                         st.rendering_mode = false;
                         st.compositing_mode = false;
+                    st.geometry_nodes_mode = false;
                         st.scripting_mode = false;
                         if in_edit {
                             actions.push(Action::ToggleEditMode);
@@ -939,6 +989,36 @@ pub fn draw(
             .frame(egui::Frame::none().fill(egui::Color32::from_rgb(0x1e, 0x1e, 0x1e)))
             .show(ctx, |ui| {
                 draw_render_result_view(ui, st, &mut actions);
+            });
+    }
+
+    // Geometry Nodes workspace layout (matches Blender / user diagram):
+    //
+    //   ┌─────────────┬──────────────────────┐
+    //   │ Spreadsheet │   3D Viewport        │  ← top
+    //   ├─────────────┴──────────────────────┤
+    //   │         Geometry Nodes             │  ← full width
+    //   └────────────────────────────────────┘
+    //   │            Timeline                │
+    //
+    // Bottom panels first so the node editor spans the full width;
+    // the spreadsheet then only occupies the top-left above it.
+    if st.geometry_nodes_mode && !doc.uv_mode && !doc.paint_mode && !doc.sculpt_mode {
+        egui::TopBottomPanel::bottom("geometry_nodes_editor")
+            .resizable(true)
+            .default_height(240.0)
+            .height_range(140.0..=480.0)
+            .frame(egui::Frame::none().fill(egui::Color32::from_rgb(0x20, 0x20, 0x20)))
+            .show(ctx, |ui| {
+                draw_geometry_nodes_editor(ui, ctx, doc, st, &mut actions);
+            });
+        egui::SidePanel::left("geo_spreadsheet")
+            .resizable(true)
+            .default_width(300.0)
+            .width_range(220.0..=520.0)
+            .frame(egui::Frame::none().fill(egui::Color32::from_rgb(0x1e, 0x1e, 0x1e)))
+            .show(ctx, |ui| {
+                draw_geometry_spreadsheet(ui, doc, st);
             });
     }
 
@@ -2588,7 +2668,7 @@ fn draw_shading_editor(
                                             node.id,
                                             false,
                                             i as u8,
-                                            "●",
+                                            sock.ty,
                                         );
                                         ui.label(sock.name);
                                         match sock.ty {
@@ -2713,7 +2793,7 @@ fn draw_shading_editor(
                                             node.id,
                                             true,
                                             i as u8,
-                                            "◉",
+                                            sock.ty,
                                         );
                                         ui.label(sock.name);
                                     },
@@ -2867,6 +2947,14 @@ fn draw_shading_editor(
             if is_hovered {
                 hovered_wire = Some(link_index);
             }
+            // Wire colour follows the output socket type (Blender-style).
+            let wire_col = st
+                .shader_nodes
+                .iter()
+                .find(|n| n.id == link.from)
+                .and_then(|n| n.kind.outputs().get(link.from_socket as usize))
+                .map(|s| shader_socket_color(s.ty))
+                .unwrap_or(egui::Color32::from_rgb(0xd5, 0xa0, 0x55));
             wire_painter.add(egui::epaint::CubicBezierShape::from_points_stroke(
                 points,
                 false,
@@ -2876,7 +2964,7 @@ fn draw_shading_editor(
                     if is_hovered {
                         egui::Color32::from_rgb(0xff, 0x6a, 0x55)
                     } else {
-                        egui::Color32::from_rgb(0xd5, 0xa0, 0x55)
+                        wire_col
                     },
                 ),
             ));
@@ -3029,20 +3117,52 @@ mod shader_wire_tests {
     }
 }
 
+fn shader_socket_color(ty: forge_core::SocketType) -> egui::Color32 {
+    // Blender node-editor socket colours (approximate).
+    match ty {
+        forge_core::SocketType::Float => egui::Color32::from_rgb(0xa1, 0xa1, 0xa1), // grey value
+        forge_core::SocketType::Color => egui::Color32::from_rgb(0xc7, 0xc7, 0x29), // yellow
+        forge_core::SocketType::Vector => egui::Color32::from_rgb(0x63, 0x63, 0xc7), // blue
+        forge_core::SocketType::Shader => egui::Color32::from_rgb(0x63, 0xc7, 0x63), // green
+        forge_core::SocketType::String => egui::Color32::from_rgb(0x70, 0xb2, 0xff), // light blue
+    }
+}
+
 fn shader_socket_control(
     ui: &mut egui::Ui,
     st: &mut UiState,
     node_id: u64,
     is_output: bool,
     socket: u8,
-    label: &str,
+    ty: forge_core::SocketType,
 ) -> egui::Response {
-    let response = ui.add(egui::Button::new(label).sense(egui::Sense::click_and_drag()));
-    // Wire endpoints: left edge for inputs, right edge for outputs (Blender-accurate)
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(14.0, 14.0),
+        egui::Sense::click_and_drag(),
+    );
+    let col = shader_socket_color(ty);
+    let r = 5.5;
+    // Filled socket circle (Blender style)
+    ui.painter().circle_filled(rect.center(), r, col);
+    // Subtle dark rim so it reads on any header
+    ui.painter().circle_stroke(
+        rect.center(),
+        r,
+        egui::Stroke::new(1.0, egui::Color32::from_black_alpha(160)),
+    );
+    if response.hovered() || st.shader_socket_pick == Some((node_id, is_output, socket)) {
+        ui.painter().circle_stroke(
+            rect.center(),
+            r + 2.0,
+            egui::Stroke::new(1.5, egui::Color32::WHITE),
+        );
+    }
+
+    // Wire endpoints: left edge for inputs, right edge for outputs
     let p = if is_output {
-        [response.rect.right(), response.rect.center().y]
+        [rect.right(), rect.center().y]
     } else {
-        [response.rect.left(), response.rect.center().y]
+        [rect.left(), rect.center().y]
     };
     st.shader_socket_positions
         .insert((node_id, is_output, socket), p);
@@ -6145,6 +6265,967 @@ fn graph_fingerprint(graph: &CompositorGraph) -> u64 {
         link.to_socket.hash(&mut hasher);
     }
     hasher.finish()
+}
+
+
+fn geo_socket_color(ty: forge_core::GeoSocketType) -> egui::Color32 {
+    match ty {
+        forge_core::GeoSocketType::Geometry => egui::Color32::from_rgb(0x00, 0xb5, 0x9f), // teal
+        forge_core::GeoSocketType::Float => egui::Color32::from_rgb(0xa1, 0xa1, 0xa1),
+        forge_core::GeoSocketType::Vector => egui::Color32::from_rgb(0x63, 0x63, 0xc7),
+        forge_core::GeoSocketType::Int => egui::Color32::from_rgb(0x59, 0x8c, 0x5c),
+        forge_core::GeoSocketType::Boolean => egui::Color32::from_rgb(0xcc, 0x66, 0x66),
+    }
+}
+
+fn geo_node_header_color(kind: forge_core::GeoNodeKind) -> egui::Color32 {
+    match kind.category() {
+        "Input/Output" => egui::Color32::from_rgb(0x50, 0x47, 0x29),
+        "Mesh Primitives" => egui::Color32::from_rgb(0x3a, 0x55, 0x70),
+        "Geometry" => egui::Color32::from_rgb(0x2a, 0x6a, 0x5a),
+        "Utilities" => egui::Color32::from_rgb(0x55, 0x45, 0x60),
+        _ => egui::Color32::from_rgb(0x45, 0x45, 0x45),
+    }
+}
+
+fn ensure_geo_nodes(doc: &mut Document) {
+    let Some(id) = doc.active else { return };
+    let Some(idx) = doc.scene.index_of(id) else { return };
+    if doc.scene.objects[idx].geo_nodes.is_none() {
+        doc.scene.objects[idx].geo_nodes = Some(forge_core::GeometryNodeGraph::default());
+        doc.dirty = true;
+    }
+}
+
+fn apply_geo_nodes(doc: &mut Document) {
+    let Some(id) = doc.active else { return };
+    let Some(idx) = doc.scene.index_of(id) else { return };
+    let Some(graph) = doc.scene.objects[idx].geo_nodes.clone() else { return };
+    let base = (*doc.scene.objects[idx].mesh).clone();
+    if let Some(result) = graph.evaluate(&base) {
+        doc.checkpoint();
+        doc.scene.objects[idx].mesh = std::sync::Arc::new(result);
+        doc.scene.objects[idx].primitive = None;
+        doc.touch();
+    }
+}
+
+
+fn draw_geometry_spreadsheet(ui: &mut egui::Ui, doc: &Document, st: &mut UiState) {
+    // Blender Spreadsheet editor — domain tree + attribute columns.
+    let Some(id) = doc.active else {
+        ui.centered_and_justified(|ui| ui.weak("Select an object"));
+        return;
+    };
+    let Some(obj) = doc.scene.objects.iter().find(|o| o.id == id) else {
+        ui.weak("Object not found");
+        return;
+    };
+    let mesh = obj.mesh.as_ref();
+    let n_verts = mesh.vertices.len();
+    let mut edge_set = std::collections::BTreeSet::new();
+    for tri in mesh.indices.chunks_exact(3) {
+        for (a, b) in [(tri[0], tri[1]), (tri[1], tri[2]), (tri[2], tri[0])] {
+            edge_set.insert(if a < b { (a, b) } else { (b, a) });
+        }
+    }
+    let n_edges = edge_set.len();
+    let n_faces = mesh.indices.len() / 3;
+    let n_corners = mesh.indices.len(); // face corners = 3 per tri
+    let edges: Vec<(u32, u32)> = edge_set.into_iter().collect();
+
+    // ---- Header bar ----
+    ui.horizontal(|ui| {
+        ui.label(RichText::new("Spreadsheet").strong().size(13.0));
+        ui.separator();
+        egui::ComboBox::from_id_salt("geo_ss_mode")
+            .selected_text("Evaluated")
+            .width(90.0)
+            .show_ui(ui, |ui| {
+                let _ = ui.selectable_label(true, "Evaluated");
+                let _ = ui.selectable_label(false, "Original");
+            });
+    });
+    ui.add_space(2.0);
+
+    // Object path-like label
+    ui.label(
+        RichText::new(format!("●  {}", obj.name))
+            .size(12.0)
+            .color(egui::Color32::from_rgb(0xe0, 0xe0, 0xe8)),
+    );
+    ui.add_space(4.0);
+
+    let avail = ui.available_size();
+    let domain_w = 110.0_f32;
+    ui.horizontal(|ui| {
+        // ---- Domain tree (Blender left strip) ----
+        ui.allocate_ui_with_layout(
+            egui::vec2(domain_w, avail.y),
+            egui::Layout::top_down(egui::Align::LEFT),
+            |ui| {
+                ui.set_min_width(domain_w - 4.0);
+                ui.label(RichText::new("Geometry").weak().size(10.0));
+                ui.add_space(2.0);
+                ui.label(
+                    RichText::new("▾  Mesh")
+                        .size(11.0)
+                        .color(egui::Color32::from_rgb(0xb0, 0xb0, 0xb8)),
+                );
+                let items: [(&str, u8, usize); 4] = [
+                    ("Vertex", 0, n_verts),
+                    ("Edge", 1, n_edges),
+                    ("Face", 2, n_faces),
+                    ("Face Corner", 3, n_corners),
+                ];
+                for (name, dom, count) in items {
+                    let selected = st.geo_spreadsheet_domain == dom;
+                    let row_h = 20.0;
+                    let (rect, resp) = ui.allocate_exact_size(
+                        egui::vec2(ui.available_width().min(domain_w - 8.0), row_h),
+                        egui::Sense::click(),
+                    );
+                    if selected {
+                        ui.painter().rect_filled(
+                            rect,
+                            2.0,
+                            egui::Color32::from_rgb(0x3a, 0x5a, 0x8a),
+                        );
+                    } else if resp.hovered() {
+                        ui.painter().rect_filled(
+                            rect,
+                            2.0,
+                            egui::Color32::from_rgb(0x30, 0x30, 0x34),
+                        );
+                    }
+                    let label_col = if selected {
+                        egui::Color32::WHITE
+                    } else {
+                        egui::Color32::from_rgb(0xc0, 0xc0, 0xc8)
+                    };
+                    ui.painter().text(
+                        rect.left_center() + egui::vec2(6.0, 0.0),
+                        egui::Align2::LEFT_CENTER,
+                        name,
+                        egui::FontId::proportional(12.0),
+                        label_col,
+                    );
+                    ui.painter().text(
+                        rect.right_center() - egui::vec2(4.0, 0.0),
+                        egui::Align2::RIGHT_CENTER,
+                        format!("{count}"),
+                        egui::FontId::proportional(11.0),
+                        egui::Color32::from_rgb(0x88, 0x88, 0x90),
+                    );
+                    if resp.clicked() {
+                        st.geo_spreadsheet_domain = dom;
+                    }
+                }
+            },
+        );
+
+        ui.add_space(4.0);
+
+        // ---- Attribute table ----
+        ui.vertical(|ui| {
+            ui.set_min_width((avail.x - domain_w - 8.0).max(120.0));
+            let header_h = 22.0;
+            let sub_h = 18.0;
+            let row_h = 18.0;
+
+            match st.geo_spreadsheet_domain {
+                1 => {
+                    // Edge
+                    draw_ss_header(ui, header_h, &[("#", 40.0), ("v0", 64.0), ("v1", 64.0)]);
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            for (i, (a, b)) in edges.iter().take(2048).enumerate() {
+                                draw_ss_row(
+                                    ui,
+                                    i,
+                                    row_h,
+                                    &[
+                                        (format!("{i}"), 40.0),
+                                        (format!("{a}"), 64.0),
+                                        (format!("{b}"), 64.0),
+                                    ],
+                                );
+                            }
+                        });
+                }
+                2 => {
+                    // Face
+                    draw_ss_header(ui, header_h, &[("#", 40.0), ("a", 52.0), ("b", 52.0), ("c", 52.0)]);
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            for (i, tri) in mesh.indices.chunks_exact(3).take(2048).enumerate() {
+                                draw_ss_row(
+                                    ui,
+                                    i,
+                                    row_h,
+                                    &[
+                                        (format!("{i}"), 40.0),
+                                        (format!("{}", tri[0]), 52.0),
+                                        (format!("{}", tri[1]), 52.0),
+                                        (format!("{}", tri[2]), 52.0),
+                                    ],
+                                );
+                            }
+                        });
+                }
+                3 => {
+                    // Face Corner — corner index + vertex ref + uv
+                    draw_ss_header(
+                        ui,
+                        header_h,
+                        &[("#", 40.0), ("Vertex", 56.0), ("u", 64.0), ("v", 64.0)],
+                    );
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            for (i, &vi) in mesh.indices.iter().take(2048).enumerate() {
+                                let uv = mesh
+                                    .vertices
+                                    .get(vi as usize)
+                                    .map(|v| v.uv)
+                                    .unwrap_or([0.0, 0.0]);
+                                draw_ss_row(
+                                    ui,
+                                    i,
+                                    row_h,
+                                    &[
+                                        (format!("{i}"), 40.0),
+                                        (format!("{vi}"), 56.0),
+                                        (format!("{:.3}", uv[0]), 64.0),
+                                        (format!("{:.3}", uv[1]), 64.0),
+                                    ],
+                                );
+                            }
+                        });
+                }
+                _ => {
+                    // Vertex — position attribute (X Y Z subcolumns like Blender)
+                    // Parent header "position"
+                    let (hrect, _) =
+                        ui.allocate_exact_size(egui::vec2(ui.available_width(), header_h), egui::Sense::hover());
+                    ui.painter().rect_filled(hrect, 0.0, egui::Color32::from_rgb(0x2a, 0x2a, 0x2e));
+                    ui.painter().text(
+                        hrect.left_center() + egui::vec2(44.0, 0.0),
+                        egui::Align2::LEFT_CENTER,
+                        "position",
+                        egui::FontId::proportional(12.0),
+                        egui::Color32::from_rgb(0x9a, 0xc8, 0x70),
+                    );
+                    // Sub-headers
+                    let (srect, _) =
+                        ui.allocate_exact_size(egui::vec2(ui.available_width(), sub_h), egui::Sense::hover());
+                    ui.painter().rect_filled(srect, 0.0, egui::Color32::from_rgb(0x26, 0x26, 0x2a));
+                    let labels = [("#", 40.0_f32), ("X", 72.0), ("Y", 72.0), ("Z", 72.0)];
+                    let mut x = srect.left();
+                    for (lab, w) in labels {
+                        ui.painter().text(
+                            egui::pos2(x + 4.0, srect.center().y),
+                            egui::Align2::LEFT_CENTER,
+                            lab,
+                            egui::FontId::proportional(11.0),
+                            egui::Color32::from_rgb(0x90, 0x90, 0x98),
+                        );
+                        x += w;
+                    }
+                    ui.painter().hline(
+                        srect.x_range(),
+                        srect.bottom(),
+                        egui::Stroke::new(1.0, egui::Color32::from_rgb(0x18, 0x18, 0x18)),
+                    );
+
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            let max = n_verts.min(4096);
+                            for i in 0..max {
+                                let p = mesh.vertices[i].position;
+                                draw_ss_row(
+                                    ui,
+                                    i,
+                                    row_h,
+                                    &[
+                                        (format!("{i}"), 40.0),
+                                        (format!("{:.3}", p[0]), 72.0),
+                                        (format!("{:.3}", p[1]), 72.0),
+                                        (format!("{:.3}", p[2]), 72.0),
+                                    ],
+                                );
+                            }
+                            if n_verts > max {
+                                ui.weak(format!("… {} more rows", n_verts - max));
+                            }
+                        });
+                }
+            }
+
+            // Footer status
+            ui.add_space(2.0);
+            let rows = match st.geo_spreadsheet_domain {
+                1 => n_edges,
+                2 => n_faces,
+                3 => n_corners,
+                _ => n_verts,
+            };
+            let cols = match st.geo_spreadsheet_domain {
+                0 => 1, // position
+                3 => 3,
+                2 => 3,
+                1 => 2,
+                _ => 1,
+            };
+            ui.label(
+                RichText::new(format!("Rows: {rows}   Columns: {cols}"))
+                    .size(10.0)
+                    .color(egui::Color32::from_rgb(0x70, 0x70, 0x78)),
+            );
+        });
+    });
+}
+
+fn draw_ss_header(ui: &mut egui::Ui, h: f32, cols: &[(&str, f32)]) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), h), egui::Sense::hover());
+    ui.painter()
+        .rect_filled(rect, 0.0, egui::Color32::from_rgb(0x2a, 0x2a, 0x2e));
+    let mut x = rect.left();
+    for (lab, w) in cols {
+        ui.painter().text(
+            egui::pos2(x + 4.0, rect.center().y),
+            egui::Align2::LEFT_CENTER,
+            *lab,
+            egui::FontId::proportional(11.0),
+            egui::Color32::from_rgb(0xc0, 0xc0, 0xc8),
+        );
+        x += *w;
+    }
+    ui.painter().hline(
+        rect.x_range(),
+        rect.bottom(),
+        egui::Stroke::new(1.0, egui::Color32::from_rgb(0x18, 0x18, 0x18)),
+    );
+}
+
+fn draw_ss_row(ui: &mut egui::Ui, index: usize, h: f32, cols: &[(String, f32)]) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width().max(200.0), h), egui::Sense::hover());
+    let bg = if index % 2 == 0 {
+        egui::Color32::from_rgb(0x24, 0x24, 0x28)
+    } else {
+        egui::Color32::from_rgb(0x1c, 0x1c, 0x20)
+    };
+    ui.painter().rect_filled(rect, 0.0, bg);
+    let mut x = rect.left();
+    for (lab, w) in cols {
+        ui.painter().text(
+            egui::pos2(x + 4.0, rect.center().y),
+            egui::Align2::LEFT_CENTER,
+            lab,
+            egui::FontId::monospace(11.0),
+            egui::Color32::from_rgb(0xd0, 0xd0, 0xd8),
+        );
+        x += *w;
+    }
+}
+
+fn draw_geometry_nodes_editor(
+    ui: &mut egui::Ui,
+    ctx: &egui::Context,
+    doc: &mut Document,
+    st: &mut UiState,
+    _actions: &mut Vec<Action>,
+) {
+    ensure_geo_nodes(doc);
+    let Some(obj_id) = doc.active else {
+        ui.centered_and_justified(|ui| {
+            ui.label("Select a mesh object to edit Geometry Nodes");
+        });
+        return;
+    };
+    let Some(obj_idx) = doc.scene.index_of(obj_id) else { return };
+    if doc.scene.objects[obj_idx].geo_nodes.is_none() {
+        return;
+    }
+
+    // Toolbar row similar to Blender node editor header.
+    ui.horizontal(|ui| {
+        if let Some(obj) = doc.scene.objects.get(obj_idx) {
+            ui.label(RichText::new(format!("{}  ›  Geometry Nodes", obj.name)).weak());
+        }
+        ui.separator();
+        ui.label(RichText::new("Geometry Nodes").strong());
+        ui.separator();
+        ui.menu_button("Add", |ui| {
+            let cats = [
+                (
+                    "Mesh Primitives",
+                    &[
+                        forge_core::GeoNodeKind::Cube,
+                        forge_core::GeoNodeKind::Grid,
+                        forge_core::GeoNodeKind::UVSphere,
+                        forge_core::GeoNodeKind::IcoSphere,
+                        forge_core::GeoNodeKind::Cylinder,
+                        forge_core::GeoNodeKind::Cone,
+                    ][..],
+                ),
+                (
+                    "Geometry",
+                    &[
+                        forge_core::GeoNodeKind::TransformGeometry,
+                        forge_core::GeoNodeKind::JoinGeometry,
+                        forge_core::GeoNodeKind::SetPosition,
+                        forge_core::GeoNodeKind::MergeByDistance,
+                        forge_core::GeoNodeKind::FlipFaces,
+                        forge_core::GeoNodeKind::SubdivisionSurface,
+                    ][..],
+                ),
+                (
+                    "Utilities",
+                    &[
+                        forge_core::GeoNodeKind::Value,
+                        forge_core::GeoNodeKind::Vector,
+                        forge_core::GeoNodeKind::Math,
+                    ][..],
+                ),
+            ];
+            for (cat, kinds) in cats {
+                ui.menu_button(cat, |ui| {
+                    for &kind in kinds {
+                        if ui.button(kind.title()).clicked() {
+                            if let Some(g) = doc.scene.objects[obj_idx].geo_nodes.as_mut() {
+                                let pos = [
+                                    120.0 + (g.nodes.len() as f32 % 5.0) * 30.0,
+                                    80.0 + g.nodes.len() as f32 * 20.0,
+                                ];
+                                g.add_node(kind, pos);
+                                doc.dirty = true;
+                            }
+                            ui.close_menu();
+                        }
+                    }
+                });
+            }
+        });
+        if ui.button("Apply").on_hover_text("Evaluate graph and write mesh to the object").clicked() {
+            apply_geo_nodes(doc);
+        }
+        if let Some(g) = doc.scene.objects[obj_idx].geo_nodes.as_mut() {
+            ui.checkbox(&mut g.enabled, "Enabled");
+        }
+        ui.separator();
+        ui.weak("Same style as Shading · teal = Geometry · grey = Float · blue = Vector");
+    });
+
+    let (canvas, canvas_response) =
+        ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
+    let painter = ui.painter_at(canvas);
+    painter.rect_filled(canvas, 0.0, egui::Color32::from_rgb(0x1b, 0x1b, 0x1b));
+    {
+        let step = 24.0 * st.geo_zoom.clamp(0.35, 2.5);
+        let col = egui::Color32::from_rgb(0x28, 0x28, 0x28);
+        let ox = canvas.min.x + st.geo_pan[0].rem_euclid(step);
+        let oy = canvas.min.y + st.geo_pan[1].rem_euclid(step);
+        let mut x = ox;
+        while x < canvas.max.x {
+            painter.line_segment(
+                [egui::pos2(x, canvas.min.y), egui::pos2(x, canvas.max.y)],
+                egui::Stroke::new(1.0, col),
+            );
+            x += step;
+        }
+        let mut y = oy;
+        while y < canvas.max.y {
+            painter.line_segment(
+                [egui::pos2(canvas.min.x, y), egui::pos2(canvas.max.x, y)],
+                egui::Stroke::new(1.0, col),
+            );
+            y += step;
+        }
+    }
+
+    if st.geo_zoom < 0.2 {
+        st.geo_zoom = 1.0;
+    }
+    if canvas_response.hovered() {
+        let scroll = ctx.input(|i| i.raw_scroll_delta.y);
+        if scroll != 0.0 {
+            let local = ctx
+                .input(|i| i.pointer.hover_pos())
+                .unwrap_or(canvas.center())
+                - canvas.min;
+            let before_zoom = st.geo_zoom;
+            let after_zoom = (before_zoom * (scroll * 0.001).exp()).clamp(0.35, 2.5);
+            let gx = (local.x - st.geo_pan[0]) / before_zoom;
+            let gy = (local.y - st.geo_pan[1]) / before_zoom;
+            st.geo_zoom = after_zoom;
+            st.geo_pan = [local.x - gx * after_zoom, local.y - gy * after_zoom];
+        }
+    }
+    if canvas_response.dragged_by(egui::PointerButton::Middle)
+        || (canvas_response.dragged_by(egui::PointerButton::Primary)
+            && st.geo_drag_from.is_none()
+            && !st
+                .geo_last_node_rects
+                .iter()
+                .any(|(_, r)| r.contains(canvas_response.interact_pointer_pos().unwrap_or_default())))
+    {
+        let d = canvas_response.drag_delta();
+        st.geo_pan[0] += d.x;
+        st.geo_pan[1] += d.y;
+    }
+
+    let zoom = st.geo_zoom.clamp(0.35, 2.5);
+    let pan0 = st.geo_pan[0];
+    let pan1 = st.geo_pan[1];
+
+    // Snapshot nodes for wiring
+    let graph = doc.scene.objects[obj_idx]
+        .geo_nodes
+        .as_ref()
+        .cloned()
+        .unwrap_or_default();
+    let mut socket_pos: HashMap<(u64, bool, u8), egui::Pos2> = HashMap::new();
+    for node in &graph.nodes {
+        let n_in = node.kind.inputs().len() as u8;
+        let n_out = node.kind.outputs().len() as u8;
+        let rows = n_in.max(n_out).max(1) as f32;
+        let extra = geo_extra_rows(node.kind) as f32;
+        let gw = 190.0_f32;
+        let gh = (26.0 + (rows + extra) * 18.0 + 10.0).clamp(56.0, 300.0);
+        let screen = egui::pos2(
+            canvas.min.x + pan0 + node.pos[0] * zoom,
+            canvas.min.y + pan1 + node.pos[1] * zoom,
+        );
+        let sw = (gw * zoom).max(40.0);
+        let title_h = (22.0 * zoom).clamp(14.0, 28.0);
+        for i in 0..n_in {
+            let y = screen.y + title_h + 8.0 * zoom + i as f32 * 18.0 * zoom;
+            socket_pos.insert((node.id, false, i), egui::pos2(screen.x, y));
+        }
+        for i in 0..n_out {
+            let y = screen.y + title_h + 8.0 * zoom + i as f32 * 18.0 * zoom;
+            socket_pos.insert((node.id, true, i), egui::pos2(screen.x + sw, y));
+        }
+    }
+
+    let pointer = ctx.input(|i| i.pointer.interact_pos());
+    let mut wire_to_remove = None;
+    for (index, link) in graph.links.iter().enumerate() {
+        let Some(&a) = socket_pos.get(&(link.from, true, link.from_socket)) else {
+            continue;
+        };
+        let Some(&b) = socket_pos.get(&(link.to, false, link.to_socket)) else {
+            continue;
+        };
+        let points = shader_wire_points(a, b);
+        let hovered = canvas.contains(pointer.unwrap_or_default())
+            && pointer.is_some_and(|pos| shader_wire_hit(pos, points, 7.0));
+        let col = graph
+            .nodes
+            .iter()
+            .find(|n| n.id == link.from)
+            .and_then(|n| n.kind.outputs().get(link.from_socket as usize))
+            .map(|s| geo_socket_color(s.ty))
+            .unwrap_or(egui::Color32::from_rgb(0x00, 0xb5, 0x9f));
+        painter.add(egui::epaint::CubicBezierShape::from_points_stroke(
+            points,
+            false,
+            egui::Color32::TRANSPARENT,
+            egui::Stroke::new(
+                if hovered { 3.5 } else { 2.5 },
+                if hovered {
+                    egui::Color32::LIGHT_BLUE
+                } else {
+                    col
+                },
+            ),
+        ));
+        if hovered && ctx.input(|i| i.pointer.secondary_clicked()) {
+            wire_to_remove = Some(index);
+        }
+    }
+    if let (Some((from_id, is_out, sock)), Some(pointer)) = (st.geo_drag_from, pointer) {
+        if is_out {
+            if let Some(&a) = socket_pos.get(&(from_id, true, sock)) {
+                let points = shader_wire_points(a, pointer);
+                painter.add(egui::epaint::CubicBezierShape::from_points_stroke(
+                    points,
+                    false,
+                    egui::Color32::TRANSPARENT,
+                    egui::Stroke::new(2.0, egui::Color32::LIGHT_BLUE),
+                ));
+            }
+        }
+    }
+    if let Some(index) = wire_to_remove {
+        if let Some(g) = doc.scene.objects[obj_idx].geo_nodes.as_mut() {
+            g.links.remove(index);
+            doc.dirty = true;
+        }
+    }
+
+    // Nodes as Areas
+    let mut node_rects = Vec::new();
+    let mut delete_node: Option<u64> = None;
+    let node_ids: Vec<u64> = graph.nodes.iter().map(|n| n.id).collect();
+
+    for id in node_ids {
+        let Some(node) = doc
+            .scene
+            .objects
+            .get(obj_idx)
+            .and_then(|o| o.geo_nodes.as_ref())
+            .and_then(|g| g.nodes.iter().find(|n| n.id == id))
+            .cloned()
+        else {
+            continue;
+        };
+        let kind = node.kind;
+        let n_in = kind.inputs().len() as u8;
+        let n_out = kind.outputs().len() as u8;
+        let rows = n_in.max(n_out).max(1) as f32;
+        let extra = geo_extra_rows(kind) as f32;
+        let gw = 190.0_f32;
+        let gh = (26.0 + (rows + extra) * 18.0 + 10.0).clamp(56.0, 300.0);
+        let screen_pos = egui::pos2(
+            canvas.min.x + pan0 + node.pos[0] * zoom,
+            canvas.min.y + pan1 + node.pos[1] * zoom,
+        );
+        let sw = (gw * zoom).max(40.0);
+        let sh = (gh * zoom).max(32.0);
+        if !egui::Rect::from_min_size(screen_pos, egui::vec2(sw, sh)).intersects(canvas.expand(8.0))
+        {
+            continue;
+        }
+        let header_col = geo_node_header_color(kind);
+        // Draw inside the panel only — no floating Area (never covers sidebars).
+        let node_rect = egui::Rect::from_min_size(screen_pos, egui::vec2(sw, sh)).intersect(canvas);
+        if node_rect.width() < 8.0 || node_rect.height() < 8.0 {
+            continue;
+        }
+        let mut area_rect = node_rect;
+        ui.allocate_ui_at_rect(node_rect, |ui| {
+                ui.set_clip_rect(canvas);
+                let move_node = ui.interact(
+                    node_rect,
+                    ui.id().with(("geo_move", id)),
+                    egui::Sense::drag(),
+                );
+                {
+                    let mut style = (*ui.ctx().style()).clone();
+                    let z = zoom.clamp(0.35, 2.5);
+                    style.spacing.item_spacing = egui::vec2(4.0 * z, 2.0 * z);
+                    for ts in style.text_styles.values_mut() {
+                        ts.size = (ts.size * z).clamp(7.0, 16.0);
+                    }
+                    ui.set_style(style);
+                }
+                egui::Frame::none()
+                    .fill(egui::Color32::from_rgb(0x2b, 0x2b, 0x2b))
+                    .stroke(egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(0x14, 0x14, 0x14)))
+                    .rounding(egui::Rounding::same((4.0 * zoom).clamp(2.0, 6.0)))
+                    .inner_margin(egui::Margin::same(0.0))
+                    .show(ui, |ui| {
+                        ui.set_width(sw);
+                        ui.set_min_width(sw);
+                        ui.set_max_width(sw);
+                        let title_h = (22.0 * zoom).clamp(14.0, 28.0);
+                        let title_rect = ui
+                            .allocate_exact_size(egui::vec2(sw, title_h), egui::Sense::hover())
+                            .0;
+                        ui.painter().rect_filled(
+                            title_rect,
+                            egui::Rounding {
+                                nw: 4.0,
+                                ne: 4.0,
+                                sw: 0.0,
+                                se: 0.0,
+                            },
+                            header_col,
+                        );
+                        ui.painter().text(
+                            title_rect.left_center() + egui::vec2(8.0, 0.0),
+                            egui::Align2::LEFT_CENTER,
+                            kind.title(),
+                            egui::FontId::proportional((12.0 * zoom).clamp(8.0, 16.0)),
+                            egui::Color32::WHITE,
+                        );
+                        let can_delete = !matches!(
+                            kind,
+                            forge_core::GeoNodeKind::GroupInput | forge_core::GeoNodeKind::GroupOutput
+                        );
+                        if can_delete {
+                            let close_r = egui::Rect::from_center_size(
+                                egui::pos2(title_rect.right() - 11.0, title_rect.center().y),
+                                egui::vec2(14.0, 14.0),
+                            );
+                            let close = ui.interact(close_r, ui.id().with("x"), egui::Sense::click());
+                            ui.painter().circle_filled(
+                                close_r.center(),
+                                6.0,
+                                if close.hovered() {
+                                    egui::Color32::from_rgb(0xc0, 0x40, 0x40)
+                                } else {
+                                    egui::Color32::from_black_alpha(40)
+                                },
+                            );
+                            ui.painter().text(
+                                close_r.center(),
+                                egui::Align2::CENTER_CENTER,
+                                "×",
+                                egui::FontId::proportional(11.0),
+                                egui::Color32::from_gray(230),
+                            );
+                            if close.clicked() {
+                                delete_node = Some(id);
+                            }
+                        }
+                        if move_node.dragged() {
+                            if let Some(g) = doc.scene.objects[obj_idx].geo_nodes.as_mut() {
+                                if let Some(n) = g.nodes.iter_mut().find(|n| n.id == id) {
+                                    let d = ui.input(|i| i.pointer.delta());
+                                    n.pos[0] += d.x / zoom;
+                                    n.pos[1] += d.y / zoom;
+                                    // Keep the node body overlapping the editor canvas.
+                                    let max_x = ((canvas.width() - 40.0) / zoom).max(20.0);
+                                    let max_y = ((canvas.height() - 40.0) / zoom).max(20.0);
+                                    n.pos[0] = n.pos[0].clamp(-20.0, max_x);
+                                    n.pos[1] = n.pos[1].clamp(-20.0, max_y);
+                                }
+                            }
+                            ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+                        } else if move_node.hovered() {
+                            ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
+                        }
+
+                        ui.add_space(4.0);
+                        ui.horizontal(|ui| {
+                            ui.add_space(6.0);
+                            ui.vertical(|ui| {
+                                ui.set_width((sw - 12.0).max(40.0));
+                                // inputs
+                                for (i, sock) in kind.inputs().iter().enumerate() {
+                                    ui.horizontal(|ui| {
+                                        let (rect, resp) = ui.allocate_exact_size(
+                                            egui::vec2(14.0, 14.0),
+                                            egui::Sense::click_and_drag(),
+                                        );
+                                        let col = geo_socket_color(sock.ty);
+                                        ui.painter().circle_filled(rect.center(), 5.5, col);
+                                        ui.painter().circle_stroke(
+                                            rect.center(),
+                                            5.5,
+                                            egui::Stroke::new(
+                                                1.0,
+                                                egui::Color32::from_black_alpha(160),
+                                            ),
+                                        );
+                                        if resp.clicked()
+                                            || (resp.hovered()
+                                                && ctx.input(|i| i.pointer.any_released())
+                                                && st.geo_drag_from.is_some())
+                                        {
+                                            if let Some((from, is_out, fs)) = st.geo_drag_from.take()
+                                            {
+                                                if is_out {
+                                                    if let Some(g) = doc.scene.objects[obj_idx]
+                                                        .geo_nodes
+                                                        .as_mut()
+                                                    {
+                                                        if g.connect(from, fs, id, i as u8) {
+                                                            doc.dirty = true;
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        ui.label(
+                                            RichText::new(sock.name)
+                                                .size((11.0 * zoom).clamp(8.0, 13.0)),
+                                        );
+                                    });
+                                }
+                                // params
+                                if zoom >= 0.55 {
+                                    geo_node_params(ui, doc, obj_idx, id, kind);
+                                }
+                                // outputs
+                                for (i, sock) in kind.outputs().iter().enumerate() {
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            let (rect, resp) = ui.allocate_exact_size(
+                                                egui::vec2(14.0, 14.0),
+                                                egui::Sense::click_and_drag(),
+                                            );
+                                            let col = geo_socket_color(sock.ty);
+                                            ui.painter().circle_filled(rect.center(), 5.5, col);
+                                            ui.painter().circle_stroke(
+                                                rect.center(),
+                                                5.5,
+                                                egui::Stroke::new(
+                                                    1.0,
+                                                    egui::Color32::from_black_alpha(160),
+                                                ),
+                                            );
+                                            if resp.clicked() || resp.drag_started() {
+                                                st.geo_drag_from = Some((id, true, i as u8));
+                                            }
+                                            ui.label(
+                                                RichText::new(sock.name)
+                                                    .size((11.0 * zoom).clamp(8.0, 13.0)),
+                                            );
+                                        },
+                                    );
+                                }
+                            });
+                        });
+                    });
+            });
+        area_rect = node_rect;
+        node_rects.push((id, area_rect));
+    }
+
+    if let Some(id) = delete_node {
+        if let Some(g) = doc.scene.objects[obj_idx].geo_nodes.as_mut() {
+            g.remove_node(id);
+            doc.dirty = true;
+        }
+        st.geo_drag_from = None;
+    }
+    st.geo_last_node_rects = node_rects;
+    if canvas_response.clicked() && st.geo_drag_from.is_some() {
+        if !st
+            .geo_last_node_rects
+            .iter()
+            .any(|(_, r)| r.contains(canvas_response.interact_pointer_pos().unwrap_or_default()))
+        {
+            st.geo_drag_from = None;
+        }
+    }
+}
+
+fn geo_extra_rows(kind: forge_core::GeoNodeKind) -> usize {
+    match kind {
+        forge_core::GeoNodeKind::Cube => 1,
+        forge_core::GeoNodeKind::Grid
+        | forge_core::GeoNodeKind::UVSphere
+        | forge_core::GeoNodeKind::Cylinder
+        | forge_core::GeoNodeKind::Cone
+        | forge_core::GeoNodeKind::TransformGeometry
+        | forge_core::GeoNodeKind::Vector => 3,
+        forge_core::GeoNodeKind::IcoSphere
+        | forge_core::GeoNodeKind::SetPosition
+        | forge_core::GeoNodeKind::MergeByDistance
+        | forge_core::GeoNodeKind::SubdivisionSurface
+        | forge_core::GeoNodeKind::Value
+        | forge_core::GeoNodeKind::Math => 1,
+        _ => 0,
+    }
+}
+
+fn geo_node_params(
+    ui: &mut egui::Ui,
+    doc: &mut Document,
+    obj_idx: usize,
+    id: u64,
+    kind: forge_core::GeoNodeKind,
+) {
+    let Some(g) = doc.scene.objects[obj_idx].geo_nodes.as_mut() else {
+        return;
+    };
+    let Some(index) = g.nodes.iter().position(|n| n.id == id) else {
+        return;
+    };
+    match kind {
+        forge_core::GeoNodeKind::Cube => {
+            ui.add(egui::Slider::new(&mut g.nodes[index].value, 0.01..=10.0).text("Size"));
+        }
+        forge_core::GeoNodeKind::Grid => {
+            ui.add(egui::Slider::new(&mut g.nodes[index].value, 0.01..=20.0).text("Size"));
+            ui.add(egui::Slider::new(&mut g.nodes[index].secondary, 1.0..=64.0).text("X Div"));
+            ui.add(egui::Slider::new(&mut g.nodes[index].tertiary, 1.0..=64.0).text("Y Div"));
+        }
+        forge_core::GeoNodeKind::UVSphere => {
+            ui.add(egui::Slider::new(&mut g.nodes[index].value, 0.01..=5.0).text("Radius"));
+            ui.add(egui::Slider::new(&mut g.nodes[index].secondary, 3.0..=64.0).text("Segments"));
+            ui.add(egui::Slider::new(&mut g.nodes[index].tertiary, 2.0..=64.0).text("Rings"));
+        }
+        forge_core::GeoNodeKind::IcoSphere => {
+            ui.add(egui::Slider::new(&mut g.nodes[index].value, 0.01..=5.0).text("Radius"));
+            ui.add(egui::Slider::new(&mut g.nodes[index].secondary, 0.0..=5.0).text("Subdiv"));
+        }
+        forge_core::GeoNodeKind::Cylinder | forge_core::GeoNodeKind::Cone => {
+            ui.add(egui::Slider::new(&mut g.nodes[index].value, 0.01..=5.0).text("Radius"));
+            ui.add(egui::Slider::new(&mut g.nodes[index].secondary, 0.01..=10.0).text("Height"));
+            ui.add(egui::Slider::new(&mut g.nodes[index].tertiary, 3.0..=64.0).text("Segments"));
+        }
+        forge_core::GeoNodeKind::TransformGeometry => {
+            ui.label("Translation");
+            ui.horizontal(|ui| {
+                ui.add(egui::DragValue::new(&mut g.nodes[index].vec[0]).speed(0.05));
+                ui.add(egui::DragValue::new(&mut g.nodes[index].vec[1]).speed(0.05));
+                ui.add(egui::DragValue::new(&mut g.nodes[index].vec[2]).speed(0.05));
+            });
+            ui.label("Scale");
+            ui.horizontal(|ui| {
+                ui.add(egui::DragValue::new(&mut g.nodes[index].vec2[0]).speed(0.05));
+                ui.add(egui::DragValue::new(&mut g.nodes[index].vec2[1]).speed(0.05));
+                ui.add(egui::DragValue::new(&mut g.nodes[index].vec2[2]).speed(0.05));
+            });
+        }
+        forge_core::GeoNodeKind::SetPosition => {
+            ui.label("Offset");
+            ui.horizontal(|ui| {
+                ui.add(egui::DragValue::new(&mut g.nodes[index].vec[0]).speed(0.05));
+                ui.add(egui::DragValue::new(&mut g.nodes[index].vec[1]).speed(0.05));
+                ui.add(egui::DragValue::new(&mut g.nodes[index].vec[2]).speed(0.05));
+            });
+        }
+        forge_core::GeoNodeKind::MergeByDistance => {
+            ui.add(egui::Slider::new(&mut g.nodes[index].value, 0.0..=0.5).text("Distance"));
+        }
+        forge_core::GeoNodeKind::SubdivisionSurface => {
+            ui.add(egui::Slider::new(&mut g.nodes[index].value, 0.0..=2.0).text("Levels"));
+        }
+        forge_core::GeoNodeKind::Value => {
+            ui.add(egui::DragValue::new(&mut g.nodes[index].value).speed(0.05).prefix("V "));
+        }
+        forge_core::GeoNodeKind::Vector => {
+            ui.horizontal(|ui| {
+                ui.add(egui::DragValue::new(&mut g.nodes[index].vec[0]).speed(0.05));
+                ui.add(egui::DragValue::new(&mut g.nodes[index].vec[1]).speed(0.05));
+                ui.add(egui::DragValue::new(&mut g.nodes[index].vec[2]).speed(0.05));
+            });
+        }
+        forge_core::GeoNodeKind::Math => {
+            ui.add(egui::DragValue::new(&mut g.nodes[index].value).speed(0.05).prefix("A "));
+            ui.add(egui::DragValue::new(&mut g.nodes[index].secondary).speed(0.05).prefix("B "));
+            let ops = ["Add", "Sub", "Mul", "Div"];
+            let mut op = g.nodes[index].tertiary.round().clamp(0.0, 3.0) as usize;
+            egui::ComboBox::from_id_salt(("geo_math", id))
+                .selected_text(ops[op])
+                .show_ui(ui, |ui| {
+                    for (i, label) in ops.iter().enumerate() {
+                        if ui.selectable_label(op == i, *label).clicked() {
+                            op = i;
+                        }
+                    }
+                });
+            g.nodes[index].tertiary = op as f32;
+        }
+        forge_core::GeoNodeKind::GroupInput => {
+            ui.weak("Object mesh");
+        }
+        forge_core::GeoNodeKind::GroupOutput => {
+            ui.weak("Result");
+        }
+        _ => {}
+    }
 }
 
 fn draw_compositing_editor(

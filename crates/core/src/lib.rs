@@ -5,6 +5,7 @@ pub mod camera;
 pub mod cloth;
 pub mod command;
 pub mod compositor;
+pub mod geometry_nodes;
 pub mod constraints;
 pub mod document;
 mod edit;
@@ -30,6 +31,9 @@ pub use camera::{FixedView, OrbitCamera};
 pub use cloth::{ClothBaker, ClothPin, FabricPreset, FabricType};
 pub use command::{Command, History};
 pub use compositor::{CompositorGraph, CompositorLink, CompositorNode, CompositorNodeKind};
+pub use geometry_nodes::{
+    GeoLink, GeoNode, GeoNodeKind, GeoSocketType, GeometryNodeGraph,
+};
 pub use constraints::{Constraint, ConstraintKind};
 pub use document::{AlignMode, AlignTo, Document, OriginMode, SameKind};
 pub use edit::{edge_key, world_positions, EditDomain, EditPick, EditSelection, EditSession};
