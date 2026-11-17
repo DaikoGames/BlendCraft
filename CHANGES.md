@@ -25,3 +25,13 @@ Please run:
 - crates/core/src/lib.rs        – exports ClothBaker, FabricType, ClothPin, FabricPreset
 - crates/app/src/ui.rs          – progressive cloth bake UI + shared cloth panel
 - README.md                     – documentation
+
+## One resolution for the 3D view and renders
+- **Resolution X / Y / %** (Output → Resolution) is now the single size setting.
+  - **Render Image** and **Render Animation** always use it (they no longer force the panel size).
+  - **Cycles 3D view** is path-traced at that size (exactly in camera view, same pixel density
+    outside camera view). **Pixel Size** (1×/2×/4×/8×) only divides it for a faster view.
+  - **Camera view** letterboxes to the same aspect, so what you see is what F12 renders.
+- Removed **Max Size** and **Match viewport size** (they were a second, conflicting resolution).
+- Fixed: viewport samples / pixel size defaults were only set once the Render panel had been
+  drawn, so the Cycles view was noisy/low-res until you opened it.

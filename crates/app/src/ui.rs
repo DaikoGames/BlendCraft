@@ -163,6 +163,13 @@ pub struct UiState {
     pub compositor_render_height: u32,
     pub compositor_render_rgba: Vec<u8>,
     pub compositor_render_serial: u64,
+    /// GPU texture for the last F12 / Render Result (kept across workspace switches).
+    pub render_result_texture: Option<egui::TextureHandle>,
+    pub render_result_texture_serial: u64,
+    /// Modal shown when an image/animation render finishes (dismiss with OK).
+    pub render_done_message: Option<String>,
+    /// Live progress while an offline render is running (0.0 ..= 1.0).
+    pub render_progress: Option<RenderProgressUi>,
     pub compositor_output_rgba: Vec<u8>,
     pub compositor_output_texture: Option<egui::TextureHandle>,
     pub compositor_output_key: Option<(u64, u64)>,
@@ -176,6 +183,14 @@ pub struct UiState {
     pub compositor_last_node_rects: Vec<(u64, egui::Rect)>,
     /// Properties editor context, Blender-like tabs.
     pub properties_tab: PropertiesTab,
+}
+
+/// Shown as a centered overlay while F12 / animation is baking.
+#[derive(Clone, Debug)]
+pub struct RenderProgressUi {
+    pub title: String,
+    pub detail: String,
+    pub fraction: f32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -1010,7 +1025,159 @@ pub fn draw(
     });
     st.show_about = about;
 
+    draw_render_overlays(ctx, st);
+
     (actions, ctx.available_rect())
+}
+
+/// Progress + completion modals.
+/// Dimmer is Foreground; the card is Tooltip (above) so OK is always clickable.
+pub fn draw_render_overlays(ctx: &egui::Context, st: &mut UiState) {
+    let blocking = st.render_progress.is_some() || st.render_done_message.is_some();
+    if !blocking {
+        return;
+    }
+
+    let screen = ctx.screen_rect();
+
+    // Dimmer only — lower layer, blocks clicks to the scene behind.
+    egui::Area::new(egui::Id::new("render_modal_dim"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(screen.min)
+        .show(ctx, |ui| {
+            let _ = ui.allocate_rect(screen, egui::Sense::click());
+            ui.painter().rect_filled(
+                screen,
+                0.0,
+                egui::Color32::from_rgba_unmultiplied(0, 0, 0, 150),
+            );
+        });
+
+    let card_frame = egui::Frame::none()
+        .fill(egui::Color32::from_rgb(0x2c, 0x2c, 0x30))
+        .stroke(egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(0x5a, 0x5a, 0x62)))
+        .inner_margin(egui::Margin::symmetric(14.0, 12.0))
+        .rounding(6.0);
+
+    if let Some(p) = st.render_progress.as_ref() {
+        let frac = p.fraction.clamp(0.0, 1.0);
+        let pct = (frac * 100.0).round() as i32;
+        egui::Window::new("Rendering…")
+            .id(egui::Id::new("render_progress_window"))
+            .title_bar(false)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .order(egui::Order::Tooltip)
+            .frame(card_frame)
+            .show(ctx, |ui| {
+                ui.set_width(280.0);
+                ui.label(
+                    RichText::new(&p.title)
+                        .strong()
+                        .size(14.0)
+                        .color(egui::Color32::from_rgb(0xf0, 0xf0, 0xf2)),
+                );
+                ui.add_space(2.0);
+                ui.label(
+                    RichText::new(&p.detail)
+                        .size(11.5)
+                        .color(egui::Color32::from_rgb(0xa8, 0xa8, 0xb0)),
+                );
+                ui.add_space(8.0);
+                ui.add(
+                    egui::ProgressBar::new(frac)
+                        .show_percentage()
+                        .desired_width(ui.available_width()),
+                );
+                ui.label(
+                    RichText::new(format!("{pct}%"))
+                        .monospace()
+                        .size(11.0)
+                        .color(egui::Color32::from_rgb(0x88, 0xcc, 0xff)),
+                );
+            });
+    }
+
+    if let Some(msg) = st.render_done_message.clone() {
+        let summary = compact_render_message(&msg);
+        let mut dismiss = false;
+        egui::Window::new("Render complete")
+            .id(egui::Id::new("render_done_window"))
+            .title_bar(false)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .order(egui::Order::Tooltip)
+            .frame(card_frame)
+            .show(ctx, |ui| {
+                ui.set_width(280.0);
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new("✓")
+                            .size(16.0)
+                            .color(egui::Color32::from_rgb(0x6d, 0xc2, 0x8a)),
+                    );
+                    ui.label(
+                        RichText::new("Render complete")
+                            .strong()
+                            .size(13.5)
+                            .color(egui::Color32::from_rgb(0xf0, 0xf0, 0xf2)),
+                    );
+                });
+                ui.add_space(6.0);
+                ui.label(
+                    RichText::new(summary)
+                        .size(11.5)
+                        .color(egui::Color32::from_rgb(0xc0, 0xc0, 0xc8)),
+                );
+                ui.add_space(10.0);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui
+                        .add_sized(
+                            [72.0, 24.0],
+                            egui::Button::new(RichText::new("OK").size(12.5).strong())
+                                .fill(egui::Color32::from_rgb(0x3d, 0x7e, 0xc7)),
+                        )
+                        .clicked()
+                    {
+                        dismiss = true;
+                    }
+                });
+            });
+        if dismiss {
+            st.render_done_message = None;
+            st.render_progress = None;
+        }
+    }
+}
+
+fn compact_render_message(msg: &str) -> String {
+    let mut lines: Vec<&str> = msg.lines().filter(|l| !l.trim().is_empty()).collect();
+    // Drop a redundant leading "… finished." if a stats line follows.
+    if lines.len() > 1 && lines[0].to_ascii_lowercase().contains("finished") {
+        lines.remove(0);
+    }
+    let mut out = String::new();
+    for (i, line) in lines.iter().take(4).enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        // Shorten absolute paths: keep filename only when it looks like a path.
+        if line.contains('/') && line.len() > 42 {
+            if let Some(name) = line.rsplit('/').next() {
+                out.push_str("…/");
+                out.push_str(name);
+                continue;
+            }
+        }
+        out.push_str(line);
+    }
+    if out.is_empty() {
+        msg.chars().take(120).collect()
+    } else {
+        out
+    }
 }
 
 // Helper: draw a Blender-ish tool icon into a rect using egui shapes.
@@ -4406,7 +4573,7 @@ fn draw_rendering_properties(
         st.render_samples = 128;
     }
     if st.cycles_max_dim < 256 {
-        st.cycles_max_dim = 2560;
+        st.cycles_max_dim = 1280;
     }
     if !matches!(st.cycles_pixel_size, 1 | 2 | 4 | 8) {
         st.cycles_pixel_size = 1;
@@ -4469,22 +4636,19 @@ fn draw_rendering_properties(
                     });
                     if st.render_engine == 2 {
                         ui.horizontal(|ui| {
-                            ui.label("Max Size");
-                            ui.add(
-                                egui::DragValue::new(&mut st.cycles_max_dim)
-                                    .range(480..=4096)
-                                    .speed(16)
-                                    .suffix(" px"),
-                            );
-                        });
-                        ui.weak("Long edge of the Cycles viewport buffer. Raise this for sharper view.");
-                        ui.horizontal(|ui| {
-                            ui.label("Pixel Size");
+                            ui.label("Viewport Pixel Size");
                             for (label, val) in [("1×", 1u32), ("2×", 2), ("4×", 4), ("8×", 8)] {
                                 ui.selectable_value(&mut st.cycles_pixel_size, val, label);
                             }
                         });
-                        ui.weak("1× = full resolution (matches Max Size). 2×/4× = faster, softer.");
+                        let (ew, eh) = effective_render_size(st);
+                        let d = st.cycles_pixel_size.max(1);
+                        ui.weak(format!(
+                            "The Cycles view uses the Output resolution below ({ew} × {eh}), \
+                             divided by Pixel Size → {} × {} px. 1× = exactly what Render Image makes.",
+                            (ew + d - 1) / d,
+                            (eh + d - 1) / d
+                        ));
                     }
                     ui.checkbox(
                         &mut st.render_temporal_reprojection,
@@ -4515,7 +4679,6 @@ fn draw_rendering_properties(
                 .default_open(true)
                 .show(ui, |ui| {
                     ui.checkbox(&mut st.render_film_transparent, "Transparent");
-                    ui.checkbox(&mut st.render_use_viewport, "Match viewport size");
                 });
 
             egui::CollapsingHeader::new("Depth of Field")
@@ -4540,7 +4703,7 @@ fn draw_rendering_properties(
             ui.label(RichText::new("Output").strong().size(14.0));
             ui.add_space(2.0);
 
-            egui::CollapsingHeader::new(RichText::new("Format").strong())
+            egui::CollapsingHeader::new(RichText::new("Resolution").strong())
                 .default_open(true)
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
@@ -5648,21 +5811,37 @@ fn draw_render_result_view(ui: &mut egui::Ui, st: &mut UiState, actions: &mut Ve
             if ui.button("Render Image").on_hover_text("F12").clicked() {
                 actions.push(Action::RenderImage);
             }
-            let (ew, eh) = effective_render_size(st);
-            ui.weak(format!("{ew} × {eh}"));
+            if st.compositor_render_serial > 0
+                && !st.compositor_render_rgba.is_empty()
+                && st.compositor_render_width > 0
+            {
+                ui.weak(format!(
+                    "{} × {}  (last render)",
+                    st.compositor_render_width, st.compositor_render_height
+                ));
+            } else {
+                let (ew, eh) = effective_render_size(st);
+                ui.weak(format!("{ew} × {eh}"));
+            }
         });
     });
     ui.add_space(4.0);
 
-    // Fill remaining space with checkerboard "empty render"
     let avail = ui.available_size();
     let (rect, _resp) = ui.allocate_exact_size(avail, egui::Sense::hover());
     let painter = ui.painter_at(rect);
-
     painter.rect_filled(rect, 0.0, egui::Color32::from_rgb(0x18, 0x18, 0x18));
 
-    // Aspect-correct frame for output resolution
-    let (ew, eh) = effective_render_size(st);
+    // Prefer the actual last rendered buffer size for the frame aspect.
+    let (ew, eh) = if st.compositor_render_serial > 0
+        && st.compositor_render_width > 0
+        && st.compositor_render_height > 0
+        && !st.compositor_render_rgba.is_empty()
+    {
+        (st.compositor_render_width, st.compositor_render_height)
+    } else {
+        effective_render_size(st)
+    };
     let aspect = ew as f32 / eh.max(1) as f32;
     let pad = 24.0;
     let max_w = (rect.width() - pad * 2.0).max(32.0);
@@ -5674,7 +5853,7 @@ fn draw_render_result_view(ui: &mut egui::Ui, st: &mut UiState, actions: &mut Ve
     };
     let frame = egui::Rect::from_center_size(rect.center(), egui::vec2(fw, fh));
 
-    // Checkerboard inside frame
+    // Checkerboard under the image
     let cell = 16.0;
     let light = egui::Color32::from_rgb(0x3a, 0x3a, 0x3a);
     let dark = egui::Color32::from_rgb(0x2c, 0x2c, 0x2c);
@@ -5692,17 +5871,58 @@ fn draw_render_result_view(ui: &mut egui::Ui, st: &mut UiState, actions: &mut Ve
             }
         }
     }
+
+    // Keep / show the last rendered image even after leaving and re-entering this workspace.
+    let has_image = st.compositor_render_serial > 0
+        && !st.compositor_render_rgba.is_empty()
+        && st.compositor_render_width > 0
+        && st.compositor_render_height > 0
+        && st.compositor_render_rgba.len()
+            >= (st.compositor_render_width as usize)
+                .saturating_mul(st.compositor_render_height as usize)
+                .saturating_mul(4);
+
+    if has_image {
+        if st.render_result_texture_serial != st.compositor_render_serial
+            || st.render_result_texture.is_none()
+        {
+            let image = egui::ColorImage::from_rgba_unmultiplied(
+                [
+                    st.compositor_render_width as usize,
+                    st.compositor_render_height as usize,
+                ],
+                &st.compositor_render_rgba,
+            );
+            if let Some(tex) = st.render_result_texture.as_mut() {
+                tex.set(image, egui::TextureOptions::LINEAR);
+            } else {
+                st.render_result_texture = Some(ui.ctx().load_texture(
+                    "render_result",
+                    image,
+                    egui::TextureOptions::LINEAR,
+                ));
+            }
+            st.render_result_texture_serial = st.compositor_render_serial;
+        }
+        if let Some(tex) = st.render_result_texture.as_ref() {
+            egui::Image::new(tex)
+                .fit_to_exact_size(frame.size())
+                .paint_at(ui, frame);
+        }
+    } else {
+        painter.text(
+            frame.center(),
+            egui::Align2::CENTER_CENTER,
+            "Render Result\n(empty — press Render Image / F12)",
+            egui::FontId::proportional(14.0),
+            egui::Color32::from_gray(170),
+        );
+    }
+
     painter.rect_stroke(
         frame,
         2.0,
         egui::Stroke::new(1.5_f32, egui::Color32::from_gray(70)),
-    );
-    painter.text(
-        frame.center(),
-        egui::Align2::CENTER_CENTER,
-        "Render Result\n(empty — press Render Image)",
-        egui::FontId::proportional(14.0),
-        egui::Color32::from_gray(170),
     );
 }
 
@@ -8247,23 +8467,41 @@ fn draw_render_output_props(
                     ui.weak("Real-time PBR with shadows and optional HDRI.");
                 }
                 2 => {
-                    ui.weak("Multi-sampled environment + soft lighting.");
+                    ui.weak("CPU path tracer (viewport + F12).");
                 }
                 _ => {}
             }
             ui.separator();
             ui.label(RichText::new("Sampling").strong());
             ui.horizontal(|ui| {
+                ui.label("Viewport samples");
+                ui.add(
+                    egui::DragValue::new(&mut st.render_samples_viewport).range(1..=4096),
+                );
+            });
+            ui.horizontal(|ui| {
                 ui.label("Render samples");
                 ui.add(egui::DragValue::new(&mut st.render_samples).range(1..=4096));
             });
-            ui.weak("Used by Cycles quality settings and offline capture.");
-            ui.separator();
-            ui.label(RichText::new("Film").strong());
-            ui.checkbox(
-                &mut st.render_use_viewport,
-                "Match viewport size (ignore resolution below)",
-            );
+            ui.weak("Viewport samples = live Cycles. Render samples = F12 / animation.");
+            if st.render_engine == 2 {
+                ui.separator();
+                ui.label(RichText::new("Cycles viewport").strong());
+                ui.horizontal(|ui| {
+                    ui.label("Pixel Size");
+                    for (label, val) in [("1×", 1u32), ("2×", 2), ("4×", 4), ("8×", 8)] {
+                        ui.selectable_value(&mut st.cycles_pixel_size, val, label);
+                    }
+                });
+                let (ew, eh) = effective_render_size(st);
+                let d = st.cycles_pixel_size.max(1);
+                ui.weak(format!(
+                    "The view is path-traced at the Resolution below ({ew} × {eh}) ÷ Pixel Size \
+                     → {} × {} px. Raise Pixel Size for a faster, softer view.",
+                    (ew + d - 1) / d,
+                    (eh + d - 1) / d
+                ));
+            }
             ui.separator();
             ui.horizontal(|ui| {
                 if ui
@@ -8283,8 +8521,8 @@ fn draw_render_output_props(
             });
         }
 
-        // Shared format / dimensions (Blender Output properties)
-        ui.label(RichText::new("Format").strong());
+        // The ONE resolution: drives the 3D view, camera frame, Render Image and Animation.
+        ui.label(RichText::new("Resolution (3D view + Render Image + Animation)").strong());
         ui.horizontal(|ui| {
             ui.label("Resolution X");
             ui.add(

@@ -25,10 +25,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
-/// Full-quality path depth (offline / F12).
+/// Path depth for viewport and offline (same look when samples converge).
 const MAX_BOUNCES: u32 = 5;
-/// Interactive viewport uses fewer bounces — most of the look is in the first 2–3.
-const INTERACTIVE_BOUNCES: u32 = 3;
+/// Match offline so the live view is not a softer lighting model than F12.
+const INTERACTIVE_BOUNCES: u32 = 5;
 const MAX_TRIANGLES: usize = 4_000_000;
 /// Path-trace at most this many pixels on the long side (viewport / progressive).
 const MAX_DIM: u32 = 2560;
@@ -815,6 +815,9 @@ pub struct CyclesState {
     /// Fingerprint of materials + textures + mesh topology used in the last rebuild.
     /// When this differs from the live scene, Cycles must rebuild so shading updates appear.
     scene_fp: u64,
+    /// Last user resolution controls — change forces an immediate buffer resize.
+    last_max_dim: u32,
+    last_pixel_size: u32,
 }
 
 fn build_srgb_lut() -> Vec<u8> {
@@ -852,6 +855,8 @@ impl Default for CyclesState {
             measured: false,
             srgb_lut: build_srgb_lut(),
             scene_fp: 0,
+            last_max_dim: 0,
+            last_pixel_size: 0,
         }
     }
 }
@@ -944,6 +949,18 @@ impl CyclesState {
 
     pub fn preview_rgba(&self) -> &[u8] {
         &self.preview
+    }
+
+    /// Force the next `accumulate` to rebuild the buffer (e.g. user lowered Max Size).
+    pub fn invalidate_resolution(&mut self) {
+        self.last_max_dim = 0;
+        self.last_pixel_size = 0;
+        self.width = 0;
+        self.height = 0;
+        self.samples = 0;
+        self.accum.clear();
+        self.preview.clear();
+        self.fingerprint = 0;
     }
 
     /// `true` = interactive viewport behaviour (default); `false` = final render at full
@@ -1112,32 +1129,44 @@ impl CyclesState {
         }
         self.exposure = exposure.max(0.01);
         let target = target_samples.max(1);
-        // Path-trace at the viewport size, capped only by the user Max Size control.
-        let max_dim = max_dim.clamp(256, 4096);
-        let (fw, fh) = fit_size(view_w, view_h, max_dim);
-        // Pixel size is the ONLY downscale — no hidden "preview" quarter-res mode.
+        // Resolution model (Blender-like, predictable):
+        //   1) Start from the *viewport panel* size
+        //   2) Divide by Pixel Size (1× full, 2× half, 4× quarter, 8× eighth)
+        //   3) Cap the long edge at Max Size
+        // Never supersample above the panel — that made "lower Max Size" look unchanged.
+        // Allow full viewport size offline (up to 8K); only clamp extremes.
+        let max_dim = max_dim.max(64).min(7680);
         let div = match pixel_size {
             0 | 1 => 1,
             2 => 2,
             3 | 4 => 4,
             _ => 8,
         };
-        let tw = ((fw + div - 1) / div).max(1);
-        let th = ((fh + div - 1) / div).max(1);
-        let fp = camera_fingerprint(camera, fw, fh)
+        let base_w = (view_w.max(1) + div - 1) / div;
+        let base_h = (view_h.max(1) + div - 1) / div;
+        let (tw, th) = fit_size(base_w, base_h, max_dim);
+        // Settings changes must rebuild the buffer this frame.
+        let settings_changed =
+            self.last_max_dim != max_dim || self.last_pixel_size != div || self.last_max_dim == 0;
+        self.last_max_dim = max_dim;
+        self.last_pixel_size = div;
+        let fp = camera_fingerprint(camera, tw, th)
             ^ ((max_dim as u64) << 17)
             ^ ((div as u64) << 9)
             ^ ((tw as u64) << 3)
             ^ (th as u64);
-        if fp != self.fingerprint {
+        if fp != self.fingerprint || settings_changed || self.width != tw || self.height != th {
             self.fingerprint = fp;
             self.preview_mode = false;
             self.measured = false;
             self.samples = 0;
             self.accum.clear();
             self.res_div = div;
-        }
-        if self.width != tw || self.height != th || self.accum.is_empty() {
+            self.width = tw;
+            self.height = th;
+            self.accum = vec![[0.0; 3]; (tw * th) as usize];
+            self.preview = vec![0u8; (tw * th * 4) as usize];
+        } else if self.accum.is_empty() {
             self.width = tw;
             self.height = th;
             self.samples = 0;
@@ -1401,6 +1430,22 @@ fn fit_size(w: u32, h: u32, max_dim: u32) -> (u32, u32) {
         ((w as f32 * s).round() as u32).max(1),
         ((h as f32 * s).round() as u32).max(1),
     )
+}
+
+/// Buffer whose long edge is exactly `long`, aspect matched to the panel.
+fn fit_to_long_edge(aspect_w: f32, aspect_h: f32, long: u32) -> (u32, u32) {
+    let long = long.max(1);
+    let aw = aspect_w.max(1.0);
+    let ah = aspect_h.max(1.0);
+    if aw >= ah {
+        let w = long;
+        let h = ((long as f32) * ah / aw).round().max(1.0) as u32;
+        (w, h)
+    } else {
+        let h = long;
+        let w = ((long as f32) * aw / ah).round().max(1.0) as u32;
+        (w, h)
+    }
 }
 
 fn camera_fingerprint(cam: &OrbitCamera, w: u32, h: u32) -> u64 {

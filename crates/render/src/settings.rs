@@ -109,6 +109,9 @@ pub struct ViewSettings {
     pub cycles_max_dim: u32,
     /// Viewport pixel size (1 = full resolution, 2 = half, 4 = quarter). Like Blender's pixel size.
     pub cycles_pixel_size: u32,
+    /// Size (px) of the Cycles viewport buffer, derived from the Output resolution
+    /// (X × Y × %). `[0, 0]` = follow the panel size. Pixel Size divides this further.
+    pub cycles_view_size: [u32; 2],
 }
 
 impl Default for ViewSettings {
@@ -125,8 +128,9 @@ impl Default for ViewSettings {
             shadow_softness: 1.5,
             engine: RenderEngine::Eevee,
             cycles_samples: 64,
-            cycles_max_dim: 2560,
+            cycles_max_dim: 1280,
             cycles_pixel_size: 1,
+            cycles_view_size: [0, 0],
         }
     }
 }

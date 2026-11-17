@@ -1371,10 +1371,17 @@ fn vs_main(@location(0) pos: vec3<f32>) -> @builtin(position) vec4<f32> {
                 let _ = &mut pass;
             }
             let target = s.cycles_samples.max(1);
+            // The viewport buffer follows the Output resolution (X × Y × %) when set,
+            // so the 3D view and the final render share one resolution.
+            let (bw, bh) = if s.cycles_view_size[0] >= 2 && s.cycles_view_size[1] >= 2 {
+                (s.cycles_view_size[0], s.cycles_view_size[1])
+            } else {
+                (vw as u32, vh as u32)
+            };
             self.cycles.accumulate(
                 camera,
-                vw as u32,
-                vh as u32,
+                bw,
+                bh,
                 s.exposure,
                 target,
                 s.cycles_max_dim.max(256),
@@ -1563,9 +1570,18 @@ struct VsOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32>, };
                 multiview: None,
                 cache: None,
             });
+        // Nearest when the path-traced buffer is smaller than the panel so a lower
+        // Pixel Size is obviously blockier (linear hid the difference).
+        let filter = if width < 4 || height < 4 {
+            wgpu::FilterMode::Nearest
+        } else {
+            // Heuristic: caller recreates this texture per buffer size; prefer nearest
+            // so resolution changes stay visible. Linear can be used for 1:1 panels.
+            wgpu::FilterMode::Nearest
+        };
         let sampler = self.device.create_sampler(&wgpu::SamplerDescriptor {
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
+            mag_filter: filter,
+            min_filter: filter,
             ..Default::default()
         });
         let tex = self.device.create_texture(&wgpu::TextureDescriptor {
@@ -1672,6 +1688,17 @@ struct VsOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32>, };
         self.cycles.ensure_scene(scene);
     }
 
+    /// Call when the user changes the resolution / Pixel Size so the buffer rebuilds immediately.
+    pub fn invalidate_cycles_resolution(&mut self) {
+        self.cycles.invalidate_resolution();
+        self.cycles_gpu = None; // drop blit texture so it is recreated at the new size
+    }
+
+    /// Current path-traced buffer size (0×0 if not running yet).
+    pub fn cycles_buffer_size(&self) -> (u32, u32) {
+        self.cycles.size()
+    }
+
     /// Fast path: only rewrite model matrices (animation scrub / playback).
     /// Call this instead of `set_scene` when meshes/materials did not change.
     pub fn update_transforms(&mut self, scene: &Scene, highlight: &[Highlight]) {
@@ -1711,40 +1738,124 @@ struct VsOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32>, };
         let width = width.max(64);
         let height = height.max(64);
         if s.engine == RenderEngine::Cycles {
-            let target = s.cycles_samples.max(16);
-            // Capture path has no live scene pointer here; caller must have synced via
-            // set_scene / sync_cycles first. Force a fresh accumulation at capture res.
-            self.cycles.reset_accumulation();
-            self.cycles.set_interactive(false);
-            while self.cycles.samples() < target {
-                self.cycles.accumulate(
-                    camera,
-                    width,
-                    height,
-                    s.exposure,
-                    target,
-                    width.max(height).max(256),
-                    1,
-                );
-            }
-            self.cycles.set_interactive(true);
-            let (sw, sh) = self.cycles.size();
-            let src = self.cycles.preview_rgba();
-            if sw == width && sh == height {
-                return Ok(src.to_vec());
-            }
-            let mut out = vec![0u8; (width * height * 4) as usize];
-            for y in 0..height {
-                for x in 0..width {
-                    let sx = (x as f32 * sw as f32 / width as f32) as u32;
-                    let sy = (y as f32 * sh as f32 / height as f32) as u32;
-                    let si = ((sy.min(sh - 1) * sw + sx.min(sw - 1)) * 4) as usize;
-                    let di = ((y * width + x) * 4) as usize;
-                    out[di..di + 4].copy_from_slice(&src[si..si + 4]);
-                }
-            }
-            return Ok(out);
+            return self.capture_cycles(camera, s, width, height, &mut |_| {});
         }
+        self.capture_gpu(camera, s, width, height, fast)
+    }
+
+    /// Offline Cycles capture with a 0..=1 progress callback (called after each sample).
+    pub fn capture_with_progress(
+        &mut self,
+        camera: &OrbitCamera,
+        s: &ViewSettings,
+        width: u32,
+        height: u32,
+        fast: bool,
+        on_progress: &mut dyn FnMut(f32),
+    ) -> Result<Vec<u8>> {
+        let width = width.max(64);
+        let height = height.max(64);
+        if s.engine == RenderEngine::Cycles {
+            return self.capture_cycles(camera, s, width, height, on_progress);
+        }
+        on_progress(0.05);
+        let out = self.capture_gpu(camera, s, width, height, fast)?;
+        on_progress(1.0);
+        Ok(out)
+    }
+
+    fn capture_cycles(
+        &mut self,
+        camera: &OrbitCamera,
+        s: &ViewSettings,
+        width: u32,
+        height: u32,
+        on_progress: &mut dyn FnMut(f32),
+    ) -> Result<Vec<u8>> {
+        self.cycles_offline_begin(camera, s, width, height);
+        let target = s.cycles_samples.max(1);
+        on_progress(0.0);
+        while self.cycles.samples() < target {
+            if !self.cycles_offline_step(camera, s, width, height) {
+                break;
+            }
+            on_progress((self.cycles.samples() as f32 / target as f32).min(1.0));
+        }
+        if self.cycles.samples() == 0 {
+            return Err(anyhow!(
+                "Cycles produced zero samples ({}×{})",
+                width,
+                height
+            ));
+        }
+        Ok(self.cycles_offline_finish(width, height))
+    }
+
+    /// Start an offline Cycles capture (call before stepping samples from the app).
+    pub fn cycles_offline_begin(
+        &mut self,
+        _camera: &OrbitCamera,
+        _s: &ViewSettings,
+        _width: u32,
+        _height: u32,
+    ) {
+        self.cycles.reset_accumulation();
+        self.cycles.set_interactive(false);
+    }
+
+    /// Add one offline sample. Returns false if accumulation could not progress.
+    pub fn cycles_offline_step(
+        &mut self,
+        camera: &OrbitCamera,
+        s: &ViewSettings,
+        width: u32,
+        height: u32,
+    ) -> bool {
+        let target = s.cycles_samples.max(1);
+        // max_dim >= long edge + pixel_size 1 → internal buffer == width×height exactly.
+        self.cycles.accumulate(
+            camera,
+            width,
+            height,
+            s.exposure,
+            target,
+            width.max(height).max(256),
+            1,
+        )
+    }
+
+    /// Tonemap + copy the offline Cycles buffer to an RGBA8 image of `width`×`height`.
+    pub fn cycles_offline_finish(&mut self, width: u32, height: u32) -> Vec<u8> {
+        self.cycles.set_interactive(true);
+        let (sw, sh) = self.cycles.size();
+        let src = self.cycles.preview_rgba();
+        if sw == 0 || sh == 0 {
+            return vec![0u8; (width * height * 4) as usize];
+        }
+        if sw == width && sh == height {
+            return src.to_vec();
+        }
+        let mut out = vec![0u8; (width * height * 4) as usize];
+        for y in 0..height {
+            for x in 0..width {
+                let sx = (x as f32 * sw as f32 / width as f32) as u32;
+                let sy = (y as f32 * sh as f32 / height as f32) as u32;
+                let si = ((sy.min(sh - 1) * sw + sx.min(sw - 1)) * 4) as usize;
+                let di = ((y * width + x) * 4) as usize;
+                out[di..di + 4].copy_from_slice(&src[si..si + 4]);
+            }
+        }
+        out
+    }
+
+    fn capture_gpu(
+        &mut self,
+        camera: &OrbitCamera,
+        s: &ViewSettings,
+        width: u32,
+        height: u32,
+        fast: bool,
+    ) -> Result<Vec<u8>> {
         let format = self.config.format;
 
         // Reuse offscreen targets across frames when size matches.

@@ -71,7 +71,7 @@ struct EditXform {
     confirm_on_release: bool,
 }
 
-use ui::{Rename, UiState};
+use ui::{Rename, RenderProgressUi, UiState};
 use winit::{
     application::ApplicationHandler,
     dpi::LogicalSize,
@@ -169,6 +169,11 @@ struct App {
     mods: ModifiersState,
     /// 3D viewport in physical pixels: x, y, w, h
     viewport: [f32; 4],
+    /// Last non-zero 3D panel size (physical px). Used for F12 when `viewport`
+    /// is temporarily zeroed (Rendering workspace / progress overlay).
+    last_3d_viewport: [f32; 4],
+    /// (out_w, out_h, pixel size, camera view) the Cycles buffer was last sized for.
+    cycles_res_key: (u32, u32, u32, bool),
     uploaded: u64,
     last_anim_tick: std::time::Instant,
     /// Fractional part (0..1) of the current frame while playing, for smooth motion.
@@ -337,7 +342,14 @@ impl App {
                 ui.render_width = 1920;
                 ui.render_height = 1080;
                 ui.render_percent = 100;
+                // One resolution (Output X × Y × %) drives the 3D view, Render Image and Animation.
                 ui.render_use_viewport = false;
+                // Panel defaults used to be filled in lazily only when the Render panel was drawn,
+                // so the Cycles view ran with 1 sample until it was opened. Set them up front.
+                ui.render_samples_viewport = 64;
+                ui.render_samples = 128;
+                ui.cycles_pixel_size = 1;
+                ui.cycles_max_dim = 4096;
                 ui.render_anim_frames = 36;
                 ui.render_fps = 24;
                 ui
@@ -355,6 +367,8 @@ impl App {
             right_dragged: false,
             mods: ModifiersState::empty(),
             viewport: [0.0, 0.0, 1280.0, 720.0],
+            last_3d_viewport: [0.0, 0.0, 1280.0, 720.0],
+            cycles_res_key: (0, 0, 0, false),
             uploaded: u64::MAX,
             last_anim_tick: std::time::Instant::now(),
             anim_subframe: 0.0,
@@ -796,6 +810,148 @@ impl App {
         self.ui.status = s;
     }
 
+    /// Update the render progress overlay and paint one UI frame so the user sees %.
+    fn set_render_progress(&mut self, title: impl Into<String>, detail: impl Into<String>, fraction: f32) {
+        self.ui.render_progress = Some(RenderProgressUi {
+            title: title.into(),
+            detail: detail.into(),
+            fraction: fraction.clamp(0.0, 1.0),
+        });
+        self.pump_progress_ui();
+    }
+
+    fn clear_render_progress(&mut self) {
+        self.ui.render_progress = None;
+    }
+
+    /// Paint only the progress/done overlays on top of the current swapchain.
+    fn pump_progress_ui(&mut self) {
+        let Some(g) = self.gfx.as_mut() else {
+            return;
+        };
+        let (w, h) = g.renderer.size();
+        if w < 2 || h < 2 {
+            return;
+        }
+        let ppp = g.window.scale_factor() as f32;
+        let mut raw = egui::RawInput::default();
+        raw.screen_rect = Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(w as f32 / ppp, h as f32 / ppp),
+        ));
+        raw.predicted_dt = 1.0 / 60.0;
+        // egui 0.29 uses pixels_per_point on the context / screen descriptor, not always on RawInput.
+        let progress = self.ui.render_progress.clone();
+        let done = self.ui.render_done_message.clone();
+        // Temporarily apply progress for the overlay draw without needing full UiState mutability games.
+        let out = self.egui_ctx.run(raw, |ctx| {
+            if progress.is_some() || done.is_some() {
+                let screen = ctx.screen_rect();
+                egui::Area::new(egui::Id::new("render_modal_dim_pump"))
+                    .order(egui::Order::Foreground)
+                    .fixed_pos(screen.min)
+                    .show(ctx, |ui| {
+                        let _ = ui.allocate_rect(screen, egui::Sense::hover());
+                        ui.painter().rect_filled(
+                            screen,
+                            0.0,
+                            egui::Color32::from_rgba_unmultiplied(0, 0, 0, 150),
+                        );
+                    });
+            }
+            if let Some(p) = progress.as_ref() {
+                let frac = p.fraction.clamp(0.0, 1.0);
+                let pct = (frac * 100.0).round() as i32;
+                let card = egui::Frame::none()
+                    .fill(egui::Color32::from_rgb(0x2c, 0x2c, 0x30))
+                    .stroke(egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(0x5a, 0x5a, 0x62)))
+                    .inner_margin(egui::Margin::symmetric(14.0, 12.0))
+                    .rounding(6.0);
+                egui::Window::new("Rendering…")
+                    .id(egui::Id::new("render_progress_window_pump"))
+                    .title_bar(false)
+                    .collapsible(false)
+                    .resizable(false)
+                    .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                    .order(egui::Order::Tooltip)
+                    .frame(card)
+                    .show(ctx, |ui| {
+                        ui.set_width(280.0);
+                        ui.label(
+                            egui::RichText::new(&p.title)
+                                .strong()
+                                .size(14.0)
+                                .color(egui::Color32::from_rgb(0xf0, 0xf0, 0xf2)),
+                        );
+                        ui.add_space(2.0);
+                        ui.label(
+                            egui::RichText::new(&p.detail)
+                                .size(11.5)
+                                .color(egui::Color32::from_rgb(0xa8, 0xa8, 0xb0)),
+                        );
+                        ui.add_space(8.0);
+                        ui.add(
+                            egui::ProgressBar::new(frac)
+                                .show_percentage()
+                                .desired_width(ui.available_width()),
+                        );
+                        ui.label(
+                            egui::RichText::new(format!("{pct}%"))
+                                .monospace()
+                                .size(11.0)
+                                .color(egui::Color32::from_rgb(0x88, 0xcc, 0xff)),
+                        );
+                    });
+            }
+        });
+        let tris = self.egui_ctx.tessellate(out.shapes, ppp);
+        let screen = egui_wgpu::ScreenDescriptor {
+            size_in_pixels: [w, h],
+            pixels_per_point: ppp,
+        };
+        let textures = out.textures_delta;
+        let er = &mut g.egui_renderer;
+        // Zero viewport → skip 3D/path-trace; only clear + draw the progress overlay.
+        let res = g.renderer.render(
+            &self.camera,
+            &self.settings,
+            [0.0, 0.0, 0.0, 0.0],
+            &mut |device, queue, enc, view| {
+                for (id, delta) in &textures.set {
+                    er.update_texture(device, queue, *id, delta);
+                }
+                let bufs = er.update_buffers(device, queue, enc, &tris, &screen);
+                {
+                    let mut rp = enc
+                        .begin_render_pass(&wgpu::RenderPassDescriptor {
+                            label: Some("egui-progress"),
+                            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                                view,
+                                resolve_target: None,
+                                ops: wgpu::Operations {
+                                    load: wgpu::LoadOp::Load,
+                                    store: wgpu::StoreOp::Store,
+                                },
+                            })],
+                            depth_stencil_attachment: None,
+                            timestamp_writes: None,
+                            occlusion_query_set: None,
+                        })
+                        .forget_lifetime();
+                    er.render(&mut rp, &tris, &screen);
+                }
+                for id in &textures.free {
+                    er.free_texture(id);
+                }
+                bufs
+            },
+        );
+        if let Err(e) = res {
+            log::warn!("progress UI render: {e}");
+        }
+        g.window.request_redraw();
+    }
+
     fn confirm_discard(&self) -> bool {
         if !self.doc.dirty {
             return true;
@@ -914,30 +1070,19 @@ impl App {
         self.camera.fixed = view;
     }
 
-    /// Camera used for offline renders at the scene's *current* transforms.
-    /// Uses the camera you are looking through, otherwise the first camera that has
-    /// animation keys, otherwise the plain viewport camera.
+    /// Camera for offline renders — WYSIWYG with the 3D viewport.
+    /// Uses exactly the view currently on screen (orbit *or* locked camera view).
+    /// Does NOT silently switch to a different scene camera object.
     fn render_camera(&self) -> OrbitCamera {
         let mut cam = self.camera.clone();
-        let id = self.camera_view.or_else(|| {
-            self.doc
-                .scene
-                .objects
-                .iter()
-                .find(|o| {
-                    matches!(o.kind, ObjectKind::Camera(_))
-                        && self
-                            .doc
-                            .scene
-                            .animation
-                            .objects
-                            .get(&o.id)
-                            .map_or(false, |a| !a.keys.is_empty())
-                })
-                .map(|o| o.id)
-        });
-        if let Some(v) = id.and_then(|id| self.fixed_view_for(id)) {
-            cam.fixed = Some(v);
+        // Refresh fixed view from the active camera-view object so animation keys apply.
+        if let Some(id) = self.camera_view {
+            if let Some(v) = self.fixed_view_for(id) {
+                cam.fixed = Some(v);
+            }
+        }
+        if cam.fixed.is_some() {
+            cam.ortho = false;
         }
         cam
     }
@@ -3471,19 +3616,14 @@ impl App {
 
     /// Capture the current 3D viewport (no UI) to a PNG the user chooses.
 
-    /// Resolution for offline renders (image / animation).
+    /// The ONE resolution setting: Output X × Y × %.
+    /// It drives the camera frame, the Cycles 3D view buffer, Render Image and
+    /// Render Animation, so changing it changes all of them.
     fn render_resolution(&self) -> (u32, u32) {
-        if self.ui.render_use_viewport || self.ui.render_width < 64 || self.ui.render_height < 64 {
-            (
-                (self.viewport[2].max(64.0) as u32).clamp(64, 7680),
-                (self.viewport[3].max(64.0) as u32).clamp(64, 4320),
-            )
-        } else {
-            let pct = self.ui.render_percent.clamp(1, 200) as f32 / 100.0;
-            let w = ((self.ui.render_width.max(64) as f32) * pct).round() as u32;
-            let h = ((self.ui.render_height.max(64) as f32) * pct).round() as u32;
-            (w.clamp(64, 7680), h.clamp(64, 4320))
-        }
+        let pct = self.ui.render_percent.clamp(1, 200) as f32 / 100.0;
+        let w = ((self.ui.render_width.max(64) as f32) * pct).round() as u32;
+        let h = ((self.ui.render_height.max(64) as f32) * pct).round() as u32;
+        (w.clamp(64, 7680), h.clamp(64, 4320))
     }
 
     fn insert_keyframe(&mut self, loc: bool, rot: bool, scl: bool) {
@@ -3661,18 +3801,67 @@ impl App {
             if let Some(g) = self.gfx.as_mut() {
                 g.renderer
                     .set_scene(&self.doc.scene, &highlights(&self.doc));
+                if self.settings.engine == RenderEngine::Cycles {
+                    g.renderer.sync_cycles(&self.doc.scene);
+                }
             }
             self.uploaded = self.doc.version;
             let cam = self.render_camera();
-            let settings = self.settings.clone();
-            let result = {
+            let mut settings = self.settings.clone();
+            settings.engine = RenderEngine::from_u8(self.ui.render_engine);
+            // Same engine + exposure as the viewport. Sample count from Render settings
+            // (viewport may still be converging — wait for the sample counter to catch up).
+            if settings.engine == RenderEngine::Cycles {
+                settings.cycles_samples = self.ui.render_samples.max(1);
+            }
+            let samples = settings.cycles_samples.max(1);
+            let engine_name = settings.engine.name();
+            self.set_render_progress(
+                format!("Rendering image ({engine_name})"),
+                format!("{w} × {h}"),
+                0.0,
+            );
+            let result = if settings.engine == RenderEngine::Cycles {
+                // Step samples in the app so we can pump the % UI between them.
+                {
+                    let g = self.gfx.as_mut().unwrap();
+                    g.renderer.cycles_offline_begin(&cam, &settings, w, h);
+                }
+                let mut err: Option<String> = None;
+                for i in 0..samples {
+                    {
+                        let g = self.gfx.as_mut().unwrap();
+                        if !g.renderer.cycles_offline_step(&cam, &settings, w, h) {
+                            err = Some("Cycles produced zero samples".into());
+                            break;
+                        }
+                    }
+                    let frac = (i + 1) as f32 / samples as f32;
+                    self.set_render_progress(
+                        format!("Rendering image (Cycles)"),
+                        format!("{w} × {h} · sample {}/{samples}", i + 1),
+                        frac,
+                    );
+                }
+                if let Some(e) = err {
+                    Err(e)
+                } else {
+                    let g = self.gfx.as_mut().unwrap();
+                    Ok(g.renderer.cycles_offline_finish(w, h))
+                }
+            } else {
                 let g = self.gfx.as_mut().unwrap();
-                g.renderer.capture_with(&cam, &settings, w, h, false)
+                g.renderer
+                    .capture_with(&cam, &settings, w, h, false)
+                    .map_err(|e| e.to_string())
             };
+            self.clear_render_progress();
             match result {
                 Ok(rgba) => {
                     if rgba.len() < (w as usize).saturating_mul(h as usize).saturating_mul(4) {
                         self.status("Render failed: incomplete pixel buffer");
+                        self.ui.render_done_message =
+                            Some("Render failed: incomplete pixel buffer.".into());
                         return;
                     }
                     self.ui.compositor_render_rgba = rgba.clone();
@@ -3680,16 +3869,34 @@ impl App {
                     self.ui.compositor_render_height = h;
                     self.ui.compositor_render_serial =
                         self.ui.compositor_render_serial.wrapping_add(1).max(1);
+                    // Force the Rendering workspace texture to rebuild for this frame.
+                    self.ui.render_result_texture_serial = 0;
                     self.ui.compositor_output_key = None;
                     self.ui.compositor_output_rgba.clear();
                     self.ui.compositor_output_texture = None;
                     self.ui.compositor_eval_error = false;
                     match image::save_buffer(&path, &rgba, w, h, image::ColorType::Rgba8) {
-                        Ok(()) => self.status(&format!("Saved render to {}", path.display())),
-                        Err(e) => self.status(&format!("Render failed: {e}")),
+                        Ok(()) => {
+                            let msg = format!(
+                                "Render finished.\n\nSaved to:\n{}\n\n{} × {} · {} samples",
+                                path.display(),
+                                w,
+                                h,
+                                settings.cycles_samples.max(1)
+                            );
+                            self.status(format!("Saved render to {}", path.display()));
+                            self.ui.render_done_message = Some(msg);
+                        }
+                        Err(e) => {
+                            self.status(&format!("Render failed: {e}"));
+                            self.ui.render_done_message = Some(format!("Render failed:\n{e}"));
+                        }
                     }
                 }
-                Err(e) => self.status(&format!("Render failed: {e}")),
+                Err(e) => {
+                    self.status(format!("Render failed: {e}"));
+                    self.ui.render_done_message = Some(format!("Render failed:\n{e}"));
+                }
             }
         }
     }
@@ -3726,6 +3933,7 @@ impl App {
                     self.ui.compositor_render_height = h;
                     self.ui.compositor_render_serial =
                         self.ui.compositor_render_serial.wrapping_add(1).max(1);
+                    self.ui.render_result_texture_serial = 0;
                     self.ui.compositor_output_key = None;
                     self.ui.compositor_output_rgba.clear();
                     self.ui.compositor_output_texture = None;
@@ -3870,53 +4078,54 @@ impl App {
         }
         #[cfg(not(target_arch = "wasm32"))]
         {
+            // Action may run before the per-frame settings sync — mirror UI now.
+            self.settings.engine = RenderEngine::from_u8(self.ui.render_engine);
+
             let Some(dir) = rfd::FileDialog::new()
                 .set_title("Choose folder for animation frames")
                 .pick_folder()
             else {
+                self.status("Animation render cancelled (no folder chosen)");
                 return;
             };
             if self.gfx.is_none() {
                 self.status("Renderer not ready");
+                self.ui.render_done_message = Some("Renderer not ready.".into());
                 return;
             }
-            // Scene animation frames (object keyframes). Fast GPU path: transform-only
-            // updates + reused capture targets + no shadow pass while baking video.
             let start = self.doc.scene.animation.frame_start;
             let end = self.doc.scene.animation.frame_end.max(start);
             let restore = self.doc.scene.animation.frame_current;
             let fps = self.doc.scene.animation.fps.max(1);
             let (w, h) = self.render_resolution();
+            let cycles_anim = self.settings.engine == RenderEngine::Cycles;
             let mut ok = 0u32;
             let mut err_msg: Option<String> = None;
             let total = (end - start + 1) as u32;
             let t0 = std::time::Instant::now();
 
-            // Ensure GPU scene is fully built once, then only update matrices.
             {
                 let highlight = highlights(&self.doc);
                 if let Some(g) = self.gfx.as_mut() {
                     g.renderer.set_scene(&self.doc.scene, &highlight);
+                    if cycles_anim {
+                        g.renderer.sync_cycles(&self.doc.scene);
+                    }
                 }
                 self.uploaded = self.doc.version;
             }
 
             let frames_dir = dir.join("frames");
-            let _ = std::fs::create_dir_all(&frames_dir);
+            if let Err(e) = std::fs::create_dir_all(&frames_dir) {
+                let msg = format!("Could not create frames folder: {e}");
+                self.status(msg.clone());
+                self.ui.render_done_message = Some(msg);
+                return;
+            }
+            // Cycles: always write PNGs so progress is visible on disk even if AVI fails.
+            // GPU engines: skip PNGs when the AVI writer is available (faster).
+            let write_png_frames = cycles_anim;
 
-            // ---- Speed strategy (target ~2+ fps on typical hardware) ----
-            // 1. Fast GPU path already skips shadows and reuses offscreen targets.
-            // 2. Do NOT write a PNG every frame by default when video export works
-            //    (PNG compress + disk is often slower than the GPU itself).
-            // 3. JPEG encoding runs on a pool of worker threads so the next frame can
-            //    start rendering while previous ones are compressed in parallel.
-            // 4. The in-flight queue is bounded so RAM stays reasonable.
-            // Resolution still comes from Render settings — use 50% / 1280×720
-            // if you need more speed on weaker GPUs.
-            let write_png_frames = false; // set true only if you need the image sequence
-
-            // Pure-Rust MJPEG/AVI writer (crates/video): frames are JPEG-compressed on a
-            // pool of worker threads and streamed to disk, so no C/C++ encoder is needed.
             let avi_path = dir.join("animation.avi");
             let mut video = match forge_video::VideoWriter::create(&avi_path, w, h, fps, 90) {
                 Ok(v) => Some(v),
@@ -3926,38 +4135,87 @@ impl App {
                 }
             };
 
+            // Cap Cycles samples for animation so a 250-frame shot does not take all night.
+            // Full quality remains available via single-frame F12.
+            let cycles_samples = if cycles_anim {
+                self.ui.render_samples.max(1).min(48)
+            } else {
+                1
+            };
+
+            self.set_render_progress(
+                "Rendering animation",
+                format!(
+                    "Frames {start}–{end} · {w}×{h}{}",
+                    if cycles_anim {
+                        format!(" · Cycles {cycles_samples} spp")
+                    } else {
+                        String::new()
+                    }
+                ),
+                0.0,
+            );
+
             for frame in start..=end {
                 self.doc.scene.animation.frame_current = frame;
                 self.doc.scene.animation.playing = false;
                 self.apply_animation_frame();
 
                 let highlight = highlights(&self.doc);
-                // Re-evaluate the camera for THIS frame (it is an animated object).
                 let cam = self.render_camera();
-                let settings = self.settings.clone();
+                let mut settings = self.settings.clone();
+                if cycles_anim {
+                    settings.engine = RenderEngine::Cycles;
+                    settings.cycles_samples = cycles_samples;
+                }
+                let frame_i = (frame - start) as u32;
                 let result = {
                     let g = self.gfx.as_mut().unwrap();
-                    // Transform-only upload (avoids rebuilding materials/meshes every frame).
-                    g.renderer.update_transforms(&self.doc.scene, &highlight);
-                    // Fast capture: skip shadows, reuse offscreen targets.
-                    g.renderer.capture_with(&cam, &settings, w, h, true)
+                    if cycles_anim {
+                        g.renderer.set_scene(&self.doc.scene, &highlight);
+                        g.renderer.sync_cycles(&self.doc.scene);
+                        g.renderer.capture_with(&cam, &settings, w, h, false)
+                    } else {
+                        g.renderer.update_transforms(&self.doc.scene, &highlight);
+                        g.renderer.capture_with(&cam, &settings, w, h, true)
+                    }
                 };
                 match result {
                     Ok(rgba) => {
+                        let need = (w as usize).saturating_mul(h as usize).saturating_mul(4);
+                        if rgba.len() < need {
+                            err_msg = Some(format!(
+                                "Animation render failed at frame {frame}: buffer {} < {need} bytes",
+                                rgba.len()
+                            ));
+                            break;
+                        }
                         ok += 1;
-                        // PNG sequence only when requested, or as a fallback if the
-                        // video writer could not be created.
                         if write_png_frames || video.is_none() {
                             let path = frames_dir.join(format!("frame_{:04}.png", frame));
-                            let _ = image::save_buffer(&path, &rgba, w, h, image::ColorType::Rgba8);
+                            if let Err(e) =
+                                image::save_buffer(&path, &rgba, w, h, image::ColorType::Rgba8)
+                            {
+                                err_msg = Some(format!("Failed to write {}: {e}", path.display()));
+                                break;
+                            }
                         }
                         if let Some(v) = video.as_mut() {
-                            // Blocks only if the encoder queue is full (bounds RAM).
                             if let Err(e) = v.push_rgba(rgba) {
                                 err_msg = Some(format!("Video encoding failed: {e}"));
                                 break;
                             }
                         }
+                        let frac = (frame_i + 1) as f32 / total.max(1) as f32;
+                        self.set_render_progress(
+                            "Rendering animation",
+                            format!(
+                                "Frame {frame} / {end}  ({}/{} done) · {w}×{h}",
+                                frame_i + 1,
+                                total
+                            ),
+                            frac,
+                        );
                     }
                     Err(e) => {
                         err_msg = Some(format!("Animation render failed at frame {frame}: {e}"));
@@ -3965,6 +4223,7 @@ impl App {
                     }
                 }
             }
+            self.clear_render_progress();
 
             // Restore timeline position and transforms.
             self.doc.scene.animation.frame_current = restore;
@@ -4004,11 +4263,14 @@ impl App {
             }
 
             if let Some(msg) = err_msg {
-                self.status(msg);
+                self.status(msg.clone());
+                self.ui.render_done_message = Some(msg);
             } else {
-                self.status(format!(
-                    "Rendered {ok}/{total} frames ({w}×{h}) in {elapsed:.1}s ({fps_render:.1} fps) · {start}–{end}{video_note}"
-                ));
+                let msg = format!(
+                    "Animation render finished.\n\n{ok}/{total} frames ({w}×{h}) in {elapsed:.1}s ({fps_render:.1} fps)\nFrames {start}–{end}{video_note}"
+                );
+                self.status(msg.clone());
+                self.ui.render_done_message = Some(msg);
             }
         }
     }
@@ -4675,7 +4937,11 @@ impl App {
                 &self.recent.paths,
             );
             // Rendering workspace: no 3D overlays / gizmos / tool HUD — only the Image editor UI.
-            if !rendering_ws {
+            // Also hide gizmos while a render progress/done modal is up so they cannot
+            // paint on top of the dialog (they use Order::Foreground; modal uses Tooltip).
+            let render_modal = self.ui.render_progress.is_some()
+                || self.ui.render_done_message.is_some();
+            if !rendering_ws && !render_modal {
                 tools::draw_toolbar(ctx, r, &mut self.ts);
                 nav_actions = navgizmo::draw(ctx, &self.camera, r, nav_full, nav_in_camera);
                 let measure_preview = match (self.measure_a, self.measure_b) {
@@ -4718,12 +4984,35 @@ impl App {
         if rendering_ws {
             self.viewport = [0.0, 0.0, 0.0, 0.0];
         } else {
-            self.viewport = [
-                rect.min.x * ppp,
-                rect.min.y * ppp,
-                rect.width() * ppp,
-                rect.height() * ppp,
-            ];
+            let mut vx = rect.min.x * ppp;
+            let mut vy = rect.min.y * ppp;
+            let mut vw = rect.width() * ppp;
+            let mut vh = rect.height() * ppp;
+            // Camera view: letterbox to the *output* aspect so F12 matches what you see.
+            if self.camera_view.is_some() && vw > 1.0 && vh > 1.0 {
+                let (rw, rh) = if self.ui.render_width >= 64 && self.ui.render_height >= 64 {
+                    (self.ui.render_width as f32, self.ui.render_height as f32)
+                } else {
+                    (vw, vh)
+                };
+                let target = (rw / rh.max(1.0)).max(0.05);
+                let panel = vw / vh.max(1.0);
+                if panel > target {
+                    // Panel wider than render → pillarbox left/right
+                    let new_w = vh * target;
+                    vx += (vw - new_w) * 0.5;
+                    vw = new_w;
+                } else if panel < target {
+                    // Panel taller than render → letterbox top/bottom
+                    let new_h = vw / target;
+                    vy += (vh - new_h) * 0.5;
+                    vh = new_h;
+                }
+            }
+            self.viewport = [vx, vy, vw, vh];
+            if vw >= 32.0 && vh >= 32.0 {
+                self.last_3d_viewport = [vx, vy, vw, vh];
+            }
         }
 
         // 2) apply menu actions
@@ -4756,17 +5045,44 @@ impl App {
 
         // Sync Blender-style render engine from the Render properties panel.
         self.settings.engine = RenderEngine::from_u8(self.ui.render_engine);
+        // One resolution for everything: Output X × Y × %. The Cycles view buffer uses it
+        // (exactly, in camera view; same pixel density otherwise). Pixel Size only divides
+        // the live view for speed.
+        let (out_w, out_h) = self.render_resolution();
+        let want_pix = match self.ui.cycles_pixel_size {
+            1 | 2 | 4 | 8 => self.ui.cycles_pixel_size,
+            _ => 1,
+        };
+        let mut view_size = if self.camera_view.is_some() {
+            (out_w, out_h)
+        } else if self.viewport[2] >= 2.0 && self.viewport[3] >= 2.0 {
+            let k = out_w.max(out_h) as f32 / self.viewport[2].max(self.viewport[3]);
+            (
+                ((self.viewport[2] * k).round() as u32).max(2),
+                ((self.viewport[3] * k).round() as u32).max(2),
+            )
+        } else {
+            (out_w, out_h)
+        };
+        let long = view_size.0.max(view_size.1);
+        if long > 4096 {
+            let k = 4096.0 / long as f32;
+            view_size = (
+                ((view_size.0 as f32 * k).round() as u32).max(2),
+                ((view_size.1 as f32 * k).round() as u32).max(2),
+            );
+        }
+        let res_key = (out_w, out_h, want_pix, self.camera_view.is_some());
+        let res_changed = res_key != self.cycles_res_key
+            || self.settings.cycles_pixel_size != want_pix;
+        self.cycles_res_key = res_key;
+        self.settings.cycles_max_dim = 4096;
+        self.settings.cycles_pixel_size = want_pix;
+        self.settings.cycles_view_size = [view_size.0, view_size.1];
         if self.settings.engine == RenderEngine::Cycles {
-            // Viewport progressive quality only — do NOT touch EEVEE shadow settings here.
             self.settings.cycles_samples = self.ui.render_samples_viewport.max(1);
-            self.settings.cycles_max_dim = self.ui.cycles_max_dim.clamp(256, 4096);
-            self.settings.cycles_pixel_size = match self.ui.cycles_pixel_size {
-                1 | 2 | 4 | 8 => self.ui.cycles_pixel_size,
-                _ => 1,
-            };
         } else if self.settings.engine == RenderEngine::Workbench {
-            // Solid mode: keep shadows off for a pure studio look unless user enables them.
-            // (Leave settings.shadows as user set; shader ignores mapped shadows in Workbench.)
+            // Solid mode: leave shadows as user set.
         }
 
         // 4) sync scene to the GPU when something changed
@@ -4785,8 +5101,24 @@ impl App {
         // Shader-graph edits often write materials without bumping doc.version.
         // When Cycles is active, rebuild path-tracer data if shading inputs changed.
         if self.settings.engine == RenderEngine::Cycles {
+            if res_changed {
+                g.renderer.invalidate_cycles_resolution();
+            }
             g.renderer.sync_cycles(&self.doc.scene);
         }
+        // Status after gfx borrow ends (cannot mut-borrow self while `g` is held).
+        let cycles_res_msg = if self.settings.engine == RenderEngine::Cycles && res_changed {
+            Some(format!(
+                "Cycles view: {} × {} px (Output {} × {}) · Pixel Size {}×",
+                self.settings.cycles_view_size[0] / self.settings.cycles_pixel_size.max(1),
+                self.settings.cycles_view_size[1] / self.settings.cycles_pixel_size.max(1),
+                out_w,
+                out_h,
+                self.settings.cycles_pixel_size.max(1)
+            ))
+        } else {
+            None
+        };
 
         // 5) render 3D + egui overlay
         let (w, h) = g.renderer.size();
@@ -4835,6 +5167,10 @@ impl App {
             log::error!("render error: {e}");
         }
         g.window.request_redraw();
+        drop(g);
+        if let Some(msg) = cycles_res_msg {
+            self.status(msg);
+        }
     }
 }
 
