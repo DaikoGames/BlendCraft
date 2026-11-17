@@ -669,9 +669,7 @@ pub fn draw(
                         actions.push(Action::TogglePaintMode);
                     }
                     if st.python_script.is_empty() {
-                        st.python_script =
-                            include_str!("../../../examples/blendcraft_blender_compat_test.py")
-                                .to_owned();
+                        st.python_script = SCRIPT_TEMPLATE_STARTER.to_owned();
                     }
                 }
                 if ui.selectable_label(st.shading_mode, "Shading").clicked() {
@@ -4931,68 +4929,417 @@ fn draw_rendering_properties(
 
 /// Center editor: Blender Image / Render Result (no 3D viewport).
 fn draw_scripting_workspace(ui: &mut egui::Ui, st: &mut UiState, actions: &mut Vec<Action>) {
+    // Toolbar
     ui.horizontal(|ui| {
-        ui.label(RichText::new("Text Editor").strong());
+        ui.label(RichText::new("Scripting").strong().size(14.0));
         ui.separator();
         if ui
             .add_enabled(
                 !st.python_script_running,
-                egui::Button::new("Run Script  (Alt-P)"),
+                egui::Button::new("▶  Run  (Alt+P)"),
             )
+            .on_hover_text("Execute the script against the current scene")
             .clicked()
         {
             actions.push(Action::RunPythonScript);
         }
         #[cfg(not(target_arch = "wasm32"))]
         {
-            if ui.button("Open").clicked() {
+            if ui.button("Open…").clicked() {
                 actions.push(Action::OpenPythonScript);
             }
             if ui.button("Save").clicked() {
                 actions.push(Action::SavePythonScript);
             }
+            if ui.button("Save As…").clicked() {
+                actions.push(Action::SavePythonScript);
+            }
+        }
+        if ui.button("New").on_hover_text("Clear editor to a starter script").clicked() {
+            st.python_script = SCRIPT_TEMPLATE_STARTER.to_owned();
+            st.python_script_path = None;
+            st.python_script_output.clear();
+        }
+        if ui.button("Clear Output").clicked() {
+            st.python_script_output.clear();
+        }
+        ui.separator();
+        ui.menu_button("Templates", |ui| {
+            for (name, body) in SCRIPT_TEMPLATES {
+                if ui.button(*name).clicked() {
+                    if st.python_script.trim().is_empty() {
+                        st.python_script = (*body).to_owned();
+                    } else {
+                        st.python_script.push_str("\n\n");
+                        st.python_script.push_str(body);
+                    }
+                    ui.close_menu();
+                }
+            }
+        });
+        ui.menu_button("Insert API", |ui| {
+            for (name, snippet) in SCRIPT_SNIPPETS {
+                if ui.button(*name).clicked() {
+                    if !st.python_script.ends_with('\n') && !st.python_script.is_empty() {
+                        st.python_script.push('\n');
+                    }
+                    st.python_script.push_str(snippet);
+                    st.python_script.push('\n');
+                    ui.close_menu();
+                }
+            }
+        });
+        if ui.button("API Help").on_hover_text("Append bc_api_help() call").clicked() {
+            st.python_script.push_str("\n\nimport bpy\nbc_api_help()\n");
         }
         if let Some(path) = st.python_script_path.as_ref() {
             ui.weak(path.display().to_string());
         }
         if st.python_script_running {
             ui.spinner();
-            ui.weak("Running");
+            ui.colored_label(egui::Color32::LIGHT_BLUE, "Running…");
         }
     });
     ui.separator();
-    let editor_height = (ui.available_height() * 0.68).max(180.0);
-    ui.add_sized(
-        [ui.available_width(), editor_height],
-        egui::TextEdit::multiline(&mut st.python_script)
-            .font(egui::TextStyle::Monospace)
-            .code_editor()
-            .desired_width(f32::INFINITY),
-    );
-    ui.separator();
+
+    let full = ui.available_size();
+    let api_w = 280.0_f32;
     ui.horizontal(|ui| {
-        ui.label(RichText::new("Python Console").strong());
-        ui.weak("Embedded Python · Rust scene compatibility subset");
-    });
-    egui::ScrollArea::vertical()
-        .max_height(ui.available_height())
-        .stick_to_bottom(true)
-        .show(ui, |ui| {
-            if st.python_script_output.is_empty() {
-                ui.weak("Script output and errors will appear here.");
-            } else {
-                ui.label(RichText::new(&st.python_script_output).monospace().color(
-                    if st.python_script_output.contains("Traceback")
-                        || st.python_script_output.starts_with("Could not")
-                    {
-                        egui::Color32::LIGHT_RED
+        // ---- Editor + console ----
+        ui.vertical(|ui| {
+            ui.set_min_width((full.x - api_w - 12.0).max(320.0));
+            ui.set_max_width((full.x - api_w - 8.0).max(320.0));
+            let editor_h = (ui.available_height() * 0.62).max(200.0);
+            ui.label(RichText::new("Text Editor").weak().size(11.0));
+            egui::ScrollArea::vertical()
+                .id_salt("script_editor_scroll")
+                .max_height(editor_h)
+                .show(ui, |ui| {
+                    ui.add_sized(
+                        [ui.available_width(), editor_h - 8.0],
+                        egui::TextEdit::multiline(&mut st.python_script)
+                            .font(egui::TextStyle::Monospace)
+                            .code_editor()
+                            .desired_width(f32::INFINITY)
+                            .desired_rows(24),
+                    );
+                });
+            ui.separator();
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Console").strong());
+                ui.weak("stdout / stderr · embedded RustPython");
+            });
+            egui::ScrollArea::vertical()
+                .id_salt("script_console_scroll")
+                .stick_to_bottom(true)
+                .max_height(ui.available_height().max(80.0))
+                .show(ui, |ui| {
+                    if st.python_script_output.is_empty() {
+                        ui.weak("Run a script to see output here.");
                     } else {
-                        ui.visuals().text_color()
-                    },
-                ));
-            }
+                        let err = st.python_script_output.contains("Traceback")
+                            || st.python_script_output.contains("Error")
+                            || st.python_script_output.starts_with("Could not");
+                        ui.label(
+                            RichText::new(&st.python_script_output)
+                                .monospace()
+                                .color(if err {
+                                    egui::Color32::from_rgb(0xff, 0x8a, 0x80)
+                                } else {
+                                    egui::Color32::from_rgb(0xc8, 0xe6, 0xc9)
+                                }),
+                        );
+                    }
+                });
         });
+
+        ui.separator();
+
+        // ---- API reference side panel ----
+        ui.vertical(|ui| {
+            ui.set_width(api_w);
+            ui.label(RichText::new("API Reference").strong());
+            ui.weak("BlendCraft bpy subset");
+            ui.separator();
+            egui::ScrollArea::vertical()
+                .id_salt("script_api_ref")
+                .show(ui, |ui| {
+                    for (section, lines) in SCRIPT_API_DOCS {
+                        ui.label(RichText::new(*section).strong().color(egui::Color32::from_rgb(0x9a, 0xc8, 0x70)));
+                        for line in *lines {
+                            ui.label(RichText::new(*line).monospace().size(11.0));
+                        }
+                        ui.add_space(6.0);
+                    }
+                });
+        });
+    });
 }
+
+const SCRIPT_TEMPLATE_STARTER: &str = r#"import bpy
+from mathutils import Vector, Euler
+
+# Active object or create a cube
+obj = bpy.context.object
+if obj is None:
+    bpy.ops.mesh.primitive_cube_add(size=2.0)
+    obj = bpy.context.object
+
+obj.name = "ScriptCube"
+obj.location = Vector((0.0, 0.0, 1.0))
+print("Hello from BlendCraft scripting")
+print("Active:", obj.name)
+"#;
+
+const SCRIPT_TEMPLATES: &[(&str, &str)] = &[
+    ("Starter — cube + move", SCRIPT_TEMPLATE_STARTER),
+    (
+        "All mesh primitives",
+        r#"import bpy
+from mathutils import Vector
+
+prims = [
+    ("cube", lambda: bpy.ops.mesh.primitive_cube_add(size=1.0, location=(-4, 0, 0))),
+    ("plane", lambda: bpy.ops.mesh.primitive_plane_add(size=1.5, location=(-2, 0, 0))),
+    ("uv sphere", lambda: bpy.ops.mesh.primitive_uv_sphere_add(radius=0.6, location=(0, 0, 0))),
+    ("ico", lambda: bpy.ops.mesh.primitive_ico_sphere_add(radius=0.6, location=(2, 0, 0))),
+    ("cylinder", lambda: bpy.ops.mesh.primitive_cylinder_add(radius=0.5, depth=1.5, location=(4, 0, 0))),
+    ("cone", lambda: bpy.ops.mesh.primitive_cone_add(radius=0.5, depth=1.5, location=(-3, 2, 0))),
+    ("torus", lambda: bpy.ops.mesh.primitive_torus_add(location=(-1, 2, 0))),
+    ("monkey", lambda: bpy.ops.mesh.primitive_monkey_add(size=1.0, location=(1, 2, 0))),
+    ("grid", lambda: bpy.ops.mesh.primitive_grid_add(size=2.0, location=(3, 2, 0))),
+    ("capsule", lambda: bpy.ops.mesh.primitive_capsule_add(location=(-2, -2, 0))),
+    ("pyramid", lambda: bpy.ops.mesh.primitive_pyramid_add(location=(0, -2, 0))),
+    ("prism", lambda: bpy.ops.mesh.primitive_prism_add(location=(2, -2, 0))),
+]
+for name, fn in prims:
+    fn()
+    print("added", name)
+"#,
+    ),
+    (
+        "Materials",
+        r#"import bpy
+
+bpy.ops.mesh.primitive_uv_sphere_add(radius=1.0)
+obj = bpy.context.object
+mat = bpy.data.materials.new(name="ScriptMetal")
+mat.diffuse_color = (0.15, 0.45, 0.85, 1.0)
+mat.metallic = 0.8
+mat.roughness = 0.25
+obj.data.materials.append(mat)
+print("Material", mat.name, "on", obj.name)
+"#,
+    ),
+    (
+        "Lights + Camera",
+        r#"import bpy
+from mathutils import Vector
+
+bpy.ops.object.light_add(type='SUN', location=(4, 4, 8))
+sun = bpy.context.object
+sun.name = "KeySun"
+sun.data.energy = 3.0
+
+bpy.ops.object.light_add(type='POINT', location=(-3, -2, 2))
+pt = bpy.context.object
+pt.name = "FillPoint"
+pt.data.energy = 50.0
+pt.data.color = (1.0, 0.9, 0.8)
+
+bpy.ops.object.camera_add(location=(6, -6, 4))
+cam = bpy.context.object
+cam.name = "ScriptCam"
+print("Lights + camera ready")
+"#,
+    ),
+    (
+        "Animation keyframes",
+        r#"import bpy
+from mathutils import Vector
+
+bpy.ops.mesh.primitive_cube_add(size=1.0)
+obj = bpy.context.object
+obj.name = "BounceCube"
+scene = bpy.context.scene
+
+for frame, z in [(1, 0.0), (20, 2.0), (40, 0.0), (60, 1.5), (80, 0.0)]:
+    scene.frame_current = frame
+    obj.location = Vector((0.0, 0.0, z))
+    # keyframe location if the shim supports it
+    if hasattr(obj, "keyframe_insert"):
+        obj.keyframe_insert(data_path="location", frame=frame)
+print("Keyframe path set for", obj.name)
+"#,
+    ),
+    (
+        "Rigid body physics",
+        r#"import bpy
+from mathutils import Vector
+
+bpy.ops.mesh.primitive_plane_add(size=8.0, location=(0, 0, 0))
+ground = bpy.context.object
+ground.name = "Ground"
+bpy.ops.rigidbody.object_add(type='PASSIVE')
+
+bpy.ops.mesh.primitive_cube_add(size=1.0, location=(0, 0, 3))
+cube = bpy.context.object
+cube.name = "FallingCube"
+bpy.ops.rigidbody.object_add(type='ACTIVE')
+print("Rigid bodies: ground passive, cube active")
+"#,
+    ),
+    (
+        "Cloth / soft body / particles",
+        r#"import bpy
+
+bpy.ops.mesh.primitive_grid_add(size=3.0, x_subdivisions=16, y_subdivisions=16, location=(0, 0, 2))
+cloth = bpy.context.object
+cloth.name = "ClothGrid"
+bpy.ops.cloth.object_add()
+
+bpy.ops.mesh.primitive_uv_sphere_add(radius=0.8, location=(3, 0, 1))
+soft = bpy.context.object
+soft.name = "SoftBall"
+bpy.ops.softbody.object_add()
+
+bpy.ops.mesh.primitive_cube_add(size=0.5, location=(-3, 0, 1))
+p = bpy.context.object
+p.name = "Emitter"
+bpy.ops.particle.object_add(count=200)
+print("Cloth, soft body, particles tagged")
+"#,
+    ),
+    (
+        "Collections + parenting",
+        r#"import bpy
+from mathutils import Vector
+
+bpy.ops.mesh.primitive_cube_add(location=(0, 0, 0))
+parent = bpy.context.object
+parent.name = "Parent"
+
+bpy.ops.mesh.primitive_uv_sphere_add(radius=0.4, location=(1.5, 0, 0))
+child = bpy.context.object
+child.name = "Child"
+child.parent = parent
+
+col = bpy.data.collections.new("ScriptGroup")
+# membership depends on shim support
+print("Parent/child created; collection", col.name)
+"#,
+    ),
+    (
+        "API dump (bc_api_help)",
+        r#"import bpy
+bc_api_help()
+"#,
+    ),
+];
+
+const SCRIPT_SNIPPETS: &[(&str, &str)] = &[
+    ("import bpy + mathutils", "import bpy\nfrom mathutils import Vector, Euler, Quaternion"),
+    ("cube_add", "bpy.ops.mesh.primitive_cube_add(size=2.0, location=(0, 0, 0))"),
+    ("uv_sphere_add", "bpy.ops.mesh.primitive_uv_sphere_add(radius=1.0, segments=32, ring_count=16)"),
+    ("monkey_add", "bpy.ops.mesh.primitive_monkey_add(size=2.0)"),
+    ("select all", "bpy.ops.object.select_all(action='SELECT')"),
+    ("delete selected", "bpy.ops.object.delete()"),
+    ("duplicate", "bpy.ops.object.duplicate()"),
+    ("new material", "mat = bpy.data.materials.new(name=\"Mat\")\nmat.diffuse_color = (1, 0.4, 0.1, 1)\nmat.metallic = 0.2\nmat.roughness = 0.5"),
+    ("assign material", "obj = bpy.context.object\nmat = bpy.data.materials.new(name=\"Mat\")\nobj.data.materials.append(mat)"),
+    ("set location", "obj = bpy.context.object\nobj.location = (1.0, 2.0, 0.5)"),
+    ("set rotation", "obj = bpy.context.object\nobj.rotation_euler = (0.0, 0.0, 0.785)"),
+    ("set scale", "obj = bpy.context.object\nobj.scale = (1.0, 1.0, 2.0)"),
+    ("light POINT", "bpy.ops.object.light_add(type='POINT', location=(0, 0, 5))"),
+    ("light SUN", "bpy.ops.object.light_add(type='SUN', location=(5, 5, 10))"),
+    ("camera_add", "bpy.ops.object.camera_add(location=(5, -5, 3))"),
+    ("empty_add", "bpy.ops.object.empty_add(type='PLAIN_AXES', location=(0, 0, 0))"),
+    ("rigid ACTIVE", "bpy.ops.rigidbody.object_add(type='ACTIVE')"),
+    ("rigid PASSIVE", "bpy.ops.rigidbody.object_add(type='PASSIVE')"),
+    ("cloth", "bpy.ops.cloth.object_add()"),
+    ("soft body", "bpy.ops.softbody.object_add()"),
+    ("particles", "bpy.ops.particle.object_add(count=500)"),
+    ("fluid DOMAIN", "bpy.ops.fluid.object_add(type='DOMAIN')"),
+    ("frame_current", "bpy.context.scene.frame_current = 1"),
+    ("print objects", "for o in bpy.data.objects:\n    print(o.name, o.location)"),
+];
+
+const SCRIPT_API_DOCS: &[(&str, &[&str])] = &[
+    (
+        "Imports",
+        &[
+            "import bpy",
+            "from mathutils import Vector,",
+            "    Euler, Quaternion, Matrix, Color",
+        ],
+    ),
+    (
+        "Mesh ops",
+        &[
+            "bpy.ops.mesh.primitive_cube_add",
+            "  plane / uv_sphere / ico_sphere",
+            "  cylinder / cone / torus / monkey",
+            "  circle / grid / capsule / pyramid",
+            "  prism / tube / metaball",
+        ],
+    ),
+    (
+        "Object ops",
+        &[
+            "bpy.ops.object.select_all",
+            "bpy.ops.object.delete",
+            "bpy.ops.object.duplicate",
+            "bpy.ops.object.empty_add",
+            "bpy.ops.object.light_add",
+            "bpy.ops.object.camera_add",
+        ],
+    ),
+    (
+        "Data",
+        &[
+            "bpy.data.objects[name]",
+            "bpy.data.materials.new(name)",
+            "bpy.data.collections.new(name)",
+            "bpy.context.object  # active",
+            "bpy.context.scene.frame_current",
+            "bpy.context.scene.gravity",
+        ],
+    ),
+    (
+        "Object props",
+        &[
+            "obj.name, .location, .scale",
+            "obj.rotation_euler",
+            "obj.visible, .parent",
+            "obj.data.materials.append(mat)",
+        ],
+    ),
+    (
+        "Material",
+        &[
+            "mat.diffuse_color = (r,g,b,a)",
+            "mat.metallic, mat.roughness",
+        ],
+    ),
+    (
+        "Physics",
+        &[
+            "bpy.ops.rigidbody.object_add",
+            "bpy.ops.fluid.object_add",
+            "bpy.ops.cloth.object_add",
+            "bpy.ops.softbody.object_add",
+            "bpy.ops.particle.object_add",
+        ],
+    ),
+    (
+        "Help",
+        &[
+            "bc_api_help()  # print full list",
+            "Templates menu → full examples",
+            "Insert API → one-liners",
+        ],
+    ),
+];
 
 fn poll_python_script(doc: &mut Document, st: &mut UiState) {
     let completion = match st.python_script_rx.as_ref() {
@@ -5607,6 +5954,15 @@ fn primitive_from_script(object: &crate::scripting::ScriptObject) -> Option<Prim
             radius: parameter(0, 1.0),
             height: parameter(1, 2.0),
             segments: parameter(2, 32.0) as u32,
+        },
+        "Prism" => P::Prism {
+            radius: parameter(0, 1.0),
+            height: parameter(1, 2.0),
+            segments: parameter(2, 6.0) as u32,
+        },
+        "Metaball" => P::Metaball {
+            radius: parameter(0, 1.0),
+            subdivisions: parameter(1, 3.0) as u32,
         },
         _ => return None,
     })

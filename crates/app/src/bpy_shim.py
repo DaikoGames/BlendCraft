@@ -947,6 +947,12 @@ class _MeshOps(object):
         return _add_mesh("Capsule", "Capsule", [radius, depth, vertices, 8], location, rotation)
     def primitive_pyramid_add(self, size=2.0, depth=2.0, location=None, rotation=None, **kw):
         return _add_mesh("Pyramid", "Pyramid", [size, depth], location, rotation)
+    def primitive_prism_add(self, radius=1.0, depth=2.0, vertices=6, location=None, rotation=None, **kw):
+        return _add_mesh("Prism", "Prism", [radius, depth, vertices], location, rotation)
+    def primitive_tube_add(self, radius=1.0, depth=2.0, vertices=32, location=None, rotation=None, **kw):
+        return _add_mesh("Tube", "Tube", [radius, depth, vertices], location, rotation)
+    def primitive_metaball_add(self, radius=1.0, subdivisions=3, location=None, rotation=None, **kw):
+        return _add_mesh("Metaball", "Metaball", [radius, subdivisions], location, rotation)
 
 class _ObjectOps(object):
     def select_all(self, action="TOGGLE"):
@@ -1241,3 +1247,57 @@ class _BpyModule(object):
 
 bpy = _BpyModule()
 sys.modules["bpy"] = bpy
+
+
+def bc_api_help():
+    """Print the BlendCraft scripting API surface."""
+    print("""BlendCraft bpy subset
+====================
+import bpy
+from mathutils import Vector, Euler, Quaternion, Matrix, Color
+
+# Mesh primitives
+bpy.ops.mesh.primitive_cube_add(size=2.0, location=(0,0,0))
+bpy.ops.mesh.primitive_plane_add / _uv_sphere_add / _ico_sphere_add
+bpy.ops.mesh.primitive_cylinder_add / _cone_add / _torus_add / _monkey_add
+bpy.ops.mesh.primitive_circle_add / _grid_add / _capsule_add / _pyramid_add
+bpy.ops.mesh.primitive_prism_add / _tube_add / _metaball_add
+
+# Objects
+bpy.ops.object.select_all(action='SELECT'|'DESELECT'|'INVERT')
+bpy.ops.object.delete()
+bpy.ops.object.duplicate()
+bpy.ops.object.empty_add(type='PLAIN_AXES', location=(0,0,0))
+bpy.ops.object.light_add(type='POINT'|'SUN'|'SPOT'|'AREA', location=...)
+bpy.ops.object.camera_add(location=..., rotation=...)
+
+# Materials
+mat = bpy.data.materials.new(name="MyMat")
+mat.diffuse_color = (r,g,b,a)
+mat.metallic = 0.0
+mat.roughness = 0.5
+obj.data.materials.append(mat)
+
+# Scene / frame / physics
+bpy.context.scene.frame_current = 1
+bpy.context.scene.gravity = (0, -9.81, 0)
+bpy.context.object   # active object
+bpy.data.objects / materials / collections
+
+# Physics helpers
+bpy.ops.rigidbody.object_add(type='ACTIVE'|'PASSIVE')
+bpy.ops.fluid.object_add(type='DOMAIN'|'FLOW'|'EFFECTOR')
+bpy.ops.cloth.object_add()
+bpy.ops.softbody.object_add()
+bpy.ops.particle.object_add(count=1000)
+
+# Transforms
+obj.location = Vector((x,y,z))
+obj.rotation_euler = Euler((rx,ry,rz))
+obj.scale = Vector((sx,sy,sz))
+obj.name / .visible / .parent
+
+# Keyframes (if supported on object)
+# obj.keyframe_insert(data_path="location", frame=1)
+""")
+
