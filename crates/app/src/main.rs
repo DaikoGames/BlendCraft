@@ -3953,15 +3953,31 @@ impl App {
         }
         #[cfg(not(target_arch = "wasm32"))]
         {
-            let rgba = &self.ui.compositor_output_rgba;
             let (width, height) = (
                 self.ui.compositor_render_width,
                 self.ui.compositor_render_height,
             );
-            if rgba.is_empty() || width == 0 || height == 0 {
+            if self.ui.compositor_render_rgba.is_empty() || width == 0 || height == 0 {
                 self.status("Render an image before saving the compositor output");
                 return;
             }
+            // Blender: Composite node is the final file output (Viewer is preview only).
+            let rgba = self
+                .doc
+                .scene
+                .compositor_graph
+                .evaluate_composite(width, height, &self.ui.compositor_render_rgba)
+                .or_else(|| {
+                    if !self.ui.compositor_output_rgba.is_empty() {
+                        Some(self.ui.compositor_output_rgba.clone())
+                    } else {
+                        None
+                    }
+                });
+            let Some(rgba) = rgba else {
+                self.status("Compositor graph produced no Composite output");
+                return;
+            };
             let Some(mut path) = rfd::FileDialog::new()
                 .add_filter("PNG image", &["png"])
                 .set_file_name("composited.png")
@@ -3972,7 +3988,7 @@ impl App {
             if path.extension().is_none() {
                 path.set_extension("png");
             }
-            match image::save_buffer(&path, rgba, width, height, image::ColorType::Rgba8) {
+            match image::save_buffer(&path, &rgba, width, height, image::ColorType::Rgba8) {
                 Ok(()) => self.status(&format!("Saved compositor output to {}", path.display())),
                 Err(e) => self.status(&format!("Compositor save failed: {e}")),
             }

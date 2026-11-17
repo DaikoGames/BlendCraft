@@ -6079,17 +6079,19 @@ fn poll_compositor_evaluation(ctx: &egui::Context, doc: &mut Document, st: &mut 
     }
     if st
         .compositor_eval_requested_at
-        .is_some_and(|time| time.elapsed() < Duration::from_millis(120))
+        .is_some_and(|time| time.elapsed() < Duration::from_millis(280))
     {
-        ctx.request_repaint_after(Duration::from_millis(120));
+        ctx.request_repaint_after(Duration::from_millis(280));
         return;
     }
 
     let graph = graph.clone();
     let source = st.compositor_render_rgba.clone();
-    let width = st.compositor_render_width;
-    let height = st.compositor_render_height;
+    let full_w = st.compositor_render_width;
+    let full_h = st.compositor_render_height;
     let render_serial = st.compositor_render_serial;
+    // Preview at capped long-edge so node edits stay responsive (full-res on Save).
+    let (width, height, source) = downscale_rgba_for_preview(&source, full_w, full_h, 720);
     let (tx, rx) = mpsc::channel();
     st.compositor_eval_rx = Some(rx);
     st.compositor_eval_busy = true;
@@ -6103,7 +6105,28 @@ fn poll_compositor_evaluation(ctx: &egui::Context, doc: &mut Document, st: &mut 
             rgba,
         });
     });
-    ctx.request_repaint_after(Duration::from_millis(30));
+    ctx.request_repaint_after(Duration::from_millis(50));
+}
+
+fn downscale_rgba_for_preview(src: &[u8], w: u32, h: u32, max_long: u32) -> (u32, u32, Vec<u8>) {
+    let long = w.max(h).max(1);
+    if long <= max_long || w == 0 || h == 0 {
+        return (w, h, src.to_vec());
+    }
+    let scale = max_long as f32 / long as f32;
+    let nw = ((w as f32 * scale).round() as u32).max(1);
+    let nh = ((h as f32 * scale).round() as u32).max(1);
+    let mut out = vec![0u8; (nw * nh * 4) as usize];
+    for y in 0..nh {
+        for x in 0..nw {
+            let sx = (x as f32 * w as f32 / nw as f32) as u32;
+            let sy = (y as f32 * h as f32 / nh as f32) as u32;
+            let si = ((sy.min(h - 1) * w + sx.min(w - 1)) * 4) as usize;
+            let di = ((y * nw + x) * 4) as usize;
+            out[di..di + 4].copy_from_slice(&src[si..si + 4]);
+        }
+    }
+    (nw, nh, out)
 }
 
 fn graph_fingerprint(graph: &CompositorGraph) -> u64 {
@@ -6117,7 +6140,9 @@ fn graph_fingerprint(graph: &CompositorGraph) -> u64 {
     }
     for link in &graph.links {
         link.from_node.hash(&mut hasher);
+        link.from_socket.hash(&mut hasher);
         link.to_node.hash(&mut hasher);
+        link.to_socket.hash(&mut hasher);
     }
     hasher.finish()
 }
@@ -6129,35 +6154,113 @@ fn draw_compositing_editor(
     st: &mut UiState,
     _actions: &mut Vec<Action>,
 ) {
+    // Same interaction model as the Shader Editor: pan/zoom canvas + Area nodes.
     let before = doc.scene.compositor_graph.clone();
     ui.horizontal(|ui| {
         ui.label(RichText::new("Compositor").strong());
         ui.separator();
-        ui.menu_button("Add Node", |ui| {
-            for kind in [
-                CompositorNodeKind::BrightnessContrast,
-                CompositorNodeKind::Exposure,
-                CompositorNodeKind::Blur,
-                CompositorNodeKind::Glare,
-                CompositorNodeKind::Invert,
-            ] {
-                if ui.button(kind.title()).clicked() {
-                    let graph = &mut doc.scene.compositor_graph;
-                    let pos = [220.0, graph.nodes.len() as f32 * 32.0];
-                    let id = graph.add_node(kind, pos);
-                    insert_compositor_effect(graph, id);
-                    ui.close_menu();
-                }
+        ui.menu_button("Add", |ui| {
+            let cats: [(&str, &[CompositorNodeKind]); 5] = [
+                ("Input", &[CompositorNodeKind::RGB]),
+                (
+                    "Output",
+                    &[CompositorNodeKind::Composite, CompositorNodeKind::Viewer],
+                ),
+                (
+                    "Color",
+                    &[
+                        CompositorNodeKind::BrightnessContrast,
+                        CompositorNodeKind::Exposure,
+                        CompositorNodeKind::Gamma,
+                        CompositorNodeKind::HueSaturation,
+                        CompositorNodeKind::Invert,
+                        CompositorNodeKind::ColorBalance,
+                        CompositorNodeKind::Tonemap,
+                        CompositorNodeKind::Posterize,
+                    ],
+                ),
+                (
+                    "Filter",
+                    &[
+                        CompositorNodeKind::Blur,
+                        CompositorNodeKind::Glare,
+                        CompositorNodeKind::Filter,
+                    ],
+                ),
+                (
+                    "Color Mix / Distort",
+                    &[
+                        CompositorNodeKind::Mix,
+                        CompositorNodeKind::AlphaOver,
+                        CompositorNodeKind::SetAlpha,
+                        CompositorNodeKind::Flip,
+                    ],
+                ),
+            ];
+            for (cat, kinds) in cats {
+                ui.menu_button(cat, |ui| {
+                    for &kind in kinds {
+                        // Don't duplicate system outputs if already present
+                        if matches!(
+                            kind,
+                            CompositorNodeKind::Composite | CompositorNodeKind::Viewer
+                        ) && doc
+                            .scene
+                            .compositor_graph
+                            .nodes
+                            .iter()
+                            .any(|n| n.kind == kind)
+                        {
+                            continue;
+                        }
+                        if ui.button(kind.title()).clicked() {
+                            let graph = &mut doc.scene.compositor_graph;
+                            let pos = [
+                                160.0 + (graph.nodes.len() as f32 % 4.0) * 40.0,
+                                80.0 + graph.nodes.len() as f32 * 24.0,
+                            ];
+                            let id = graph.add_node(kind, pos);
+                            if kind.image_inputs() == 1 && kind.has_image_output() {
+                                insert_compositor_effect(graph, id);
+                            }
+                            ui.close_menu();
+                        }
+                    }
+                });
             }
         });
         ui.separator();
-        ui.weak("Click output then input to connect · drag empty space to pan · scroll to zoom · right-click a wire to remove it");
+        ui.weak("Drag nodes · click sockets to link · RMB wire to cut · scroll zoom · MMB / drag empty to pan");
     });
 
     let (canvas, canvas_response) =
         ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
     let painter = ui.painter_at(canvas);
     painter.rect_filled(canvas, 0.0, egui::Color32::from_rgb(0x1b, 0x1b, 0x1b));
+    // soft grid like shader editor
+    {
+        let step = 24.0 * st.compositor_zoom.clamp(0.25, 2.5);
+        let col = egui::Color32::from_rgb(0x28, 0x28, 0x28);
+        let ox = canvas.min.x + st.compositor_pan[0].rem_euclid(step);
+        let oy = canvas.min.y + st.compositor_pan[1].rem_euclid(step);
+        let mut x = ox;
+        while x < canvas.max.x {
+            painter.line_segment(
+                [egui::pos2(x, canvas.min.y), egui::pos2(x, canvas.max.y)],
+                egui::Stroke::new(1.0, col),
+            );
+            x += step;
+        }
+        let mut y = oy;
+        while y < canvas.max.y {
+            painter.line_segment(
+                [egui::pos2(canvas.min.x, y), egui::pos2(canvas.max.x, y)],
+                egui::Stroke::new(1.0, col),
+            );
+            y += step;
+        }
+    }
+
     if st.compositor_zoom < 0.2 {
         st.compositor_zoom = 1.0;
     }
@@ -6169,7 +6272,7 @@ fn draw_compositing_editor(
                 .unwrap_or(canvas.center())
                 - canvas.min;
             let before_zoom = st.compositor_zoom;
-            let after_zoom = (before_zoom * (scroll * 0.001).exp()).clamp(0.25, 2.5);
+            let after_zoom = (before_zoom * (scroll * 0.001).exp()).clamp(0.35, 2.5);
             let graph_x = (local.x - st.compositor_pan[0]) / before_zoom;
             let graph_y = (local.y - st.compositor_pan[1]) / before_zoom;
             st.compositor_zoom = after_zoom;
@@ -6179,44 +6282,70 @@ fn draw_compositing_editor(
             ];
         }
     }
+    if canvas_response.dragged_by(egui::PointerButton::Middle)
+        || (canvas_response.dragged_by(egui::PointerButton::Primary)
+            && st.compositor_link_from.is_none()
+            && !st
+                .compositor_last_node_rects
+                .iter()
+                .any(|(_, r)| r.contains(canvas_response.interact_pointer_pos().unwrap_or_default())))
+    {
+        let d = canvas_response.drag_delta();
+        st.compositor_pan[0] += d.x;
+        st.compositor_pan[1] += d.y;
+    }
 
-    let zoom = st.compositor_zoom.clamp(0.25, 2.5);
-    let origin = canvas.min + egui::vec2(st.compositor_pan[0], st.compositor_pan[1]);
-    let rect_for = |node: &forge_core::CompositorNode| {
-        let size = egui::vec2(230.0, compositor_node_height(node.kind)) * zoom;
-        egui::Rect::from_min_size(origin + egui::vec2(node.pos[0], node.pos[1]) * zoom, size)
-    };
+    let zoom = st.compositor_zoom.clamp(0.35, 2.5);
+    let pan0 = st.compositor_pan[0];
+    let pan1 = st.compositor_pan[1];
 
-    st.compositor_last_node_rects = doc
-        .scene
-        .compositor_graph
-        .nodes
-        .iter()
-        .map(|node| (node.id, rect_for(node)))
-        .collect();
-    let socket_y = |rect: egui::Rect| rect.top() + 42.0 * zoom;
-    let node_rects = st.compositor_last_node_rects.clone();
-    let wire_painter = painter.with_clip_rect(canvas);
-    let mut wire_to_remove = None;
+    // ---- Wires (behind nodes) ----
+    let nodes_snap: Vec<_> = doc.scene.compositor_graph.nodes.clone();
+    let mut socket_pos: std::collections::HashMap<(u64, bool, u8), egui::Pos2> =
+        std::collections::HashMap::new();
+    // Precompute approximate socket positions for wiring before Areas run
+    for node in &nodes_snap {
+        let n_in = node.kind.image_inputs();
+        let n_out = if node.kind.has_image_output() { 1u8 } else { 0 };
+        let rows = n_in.max(n_out).max(1) as f32;
+        let extra = compositor_extra_rows(node.kind) as f32;
+        let gw = 180.0_f32;
+        let gh = (26.0 + (rows + extra) * 18.0 + 10.0).clamp(56.0, 280.0);
+        let screen = egui::pos2(
+            canvas.min.x + pan0 + node.pos[0] * zoom,
+            canvas.min.y + pan1 + node.pos[1] * zoom,
+        );
+        let sw = (gw * zoom).max(40.0);
+        let sh = (gh * zoom).max(32.0);
+        let title_h = (22.0 * zoom).clamp(14.0, 28.0);
+        for i in 0..n_in {
+            let y = screen.y + title_h + 8.0 * zoom + (i as f32) * 18.0 * zoom;
+            socket_pos.insert((node.id, true, i), egui::pos2(screen.x, y));
+        }
+        if n_out > 0 {
+            let y = screen.y + title_h + 8.0 * zoom;
+            socket_pos.insert((node.id, false, 0), egui::pos2(screen.x + sw, y));
+        }
+    }
+
     let pointer = ctx.input(|i| i.pointer.interact_pos());
+    let mut wire_to_remove = None;
     for (index, link) in doc.scene.compositor_graph.links.iter().enumerate() {
-        let Some((_, from)) = node_rects.iter().find(|(id, _)| *id == link.from_node) else {
+        let Some(&a) = socket_pos.get(&(link.from_node, false, link.from_socket)) else {
             continue;
         };
-        let Some((_, to)) = node_rects.iter().find(|(id, _)| *id == link.to_node) else {
+        let Some(&b) = socket_pos.get(&(link.to_node, true, link.to_socket)) else {
             continue;
         };
-        let a = egui::pos2(from.right(), socket_y(*from));
-        let b = egui::pos2(to.left(), socket_y(*to));
         let points = shader_wire_points(a, b);
         let hovered = canvas.contains(pointer.unwrap_or_default())
             && pointer.is_some_and(|pos| shader_wire_hit(pos, points, 7.0));
-        wire_painter.add(egui::epaint::CubicBezierShape::from_points_stroke(
+        painter.add(egui::epaint::CubicBezierShape::from_points_stroke(
             points,
             false,
             egui::Color32::TRANSPARENT,
             egui::Stroke::new(
-                if hovered { 3.5 } else { 2.5_f32 },
+                if hovered { 3.5 } else { 2.5 },
                 if hovered {
                     egui::Color32::LIGHT_BLUE
                 } else {
@@ -6229,14 +6358,13 @@ fn draw_compositing_editor(
         }
     }
     if let (Some(from_id), Some(pointer)) = (st.compositor_link_from, pointer) {
-        if let Some((_, from)) = node_rects.iter().find(|(id, _)| *id == from_id) {
-            let a = egui::pos2(from.right(), socket_y(*from));
+        if let Some(&a) = socket_pos.get(&(from_id, false, 0)) {
             let points = shader_wire_points(a, pointer);
-            wire_painter.add(egui::epaint::CubicBezierShape::from_points_stroke(
+            painter.add(egui::epaint::CubicBezierShape::from_points_stroke(
                 points,
                 false,
                 egui::Color32::TRANSPARENT,
-                egui::Stroke::new(2.0_f32, egui::Color32::LIGHT_BLUE),
+                egui::Stroke::new(2.0, egui::Color32::LIGHT_BLUE),
             ));
         }
     }
@@ -6244,205 +6372,496 @@ fn draw_compositing_editor(
         doc.scene.compositor_graph.links.remove(index);
     }
 
-    let mut node_rects = Vec::new();
-    let node_count = doc.scene.compositor_graph.nodes.len();
-    for index in 0..node_count {
-        let kind = doc.scene.compositor_graph.nodes[index].kind;
-        let id = doc.scene.compositor_graph.nodes[index].id;
-        let rect = rect_for(&doc.scene.compositor_graph.nodes[index]);
-        node_rects.push((id, rect));
-        let title_rect =
-            egui::Rect::from_min_max(rect.min, egui::pos2(rect.right(), rect.top() + 30.0 * zoom));
-        let body_rect = egui::Rect::from_min_max(title_rect.max, rect.max);
-        painter.rect_filled(rect, 5.0, egui::Color32::from_rgb(0x33, 0x33, 0x33));
-        painter.rect_filled(title_rect, 5.0, egui::Color32::from_rgb(0x50, 0x47, 0x29));
-        painter.text(
-            title_rect.center() - egui::vec2(8.0, 0.0),
-            egui::Align2::CENTER_CENTER,
-            kind.title(),
-            egui::FontId::proportional((13.0 * zoom).max(9.0)),
-            egui::Color32::WHITE,
+    // ---- Nodes (egui Areas — same approach as Shader Editor) ----
+    let mut node_rects: Vec<(u64, egui::Rect)> = Vec::new();
+    let mut delete_node: Option<u64> = None;
+    let node_ids: Vec<u64> = doc
+        .scene
+        .compositor_graph
+        .nodes
+        .iter()
+        .map(|n| n.id)
+        .collect();
+
+    for id in node_ids {
+        let Some(node_index) = doc
+            .scene
+            .compositor_graph
+            .nodes
+            .iter()
+            .position(|n| n.id == id)
+        else {
+            continue;
+        };
+        let kind = doc.scene.compositor_graph.nodes[node_index].kind;
+        let pos = doc.scene.compositor_graph.nodes[node_index].pos;
+        let n_in = kind.image_inputs();
+        let n_out = if kind.has_image_output() { 1u8 } else { 0 };
+        let rows = n_in.max(n_out).max(1) as f32;
+        let extra = compositor_extra_rows(kind) as f32;
+        let gw = 180.0_f32;
+        let gh = (26.0 + (rows + extra) * 18.0 + 10.0).clamp(56.0, 280.0);
+        let screen_pos = egui::pos2(
+            canvas.min.x + pan0 + pos[0] * zoom,
+            canvas.min.y + pan1 + pos[1] * zoom,
         );
-        let header_response = ui.interact(
-            title_rect,
-            egui::Id::new(("compositor_node_header", id)),
-            egui::Sense::click_and_drag(),
-        );
-        if header_response.dragged() {
-            let delta = ctx.input(|i| i.pointer.delta()) / zoom;
-            doc.scene.compositor_graph.nodes[index].pos[0] += delta.x;
-            doc.scene.compositor_graph.nodes[index].pos[1] += delta.y;
+        let sw = (gw * zoom).max(40.0);
+        let sh = (gh * zoom).max(32.0);
+        let approx = egui::Rect::from_min_size(screen_pos, egui::vec2(sw, sh));
+        if !approx.intersects(canvas.expand(8.0)) {
+            continue;
         }
-        if matches!(
-            kind,
-            CompositorNodeKind::BrightnessContrast
-                | CompositorNodeKind::Exposure
-                | CompositorNodeKind::Blur
-                | CompositorNodeKind::Glare
-                | CompositorNodeKind::Invert
-        ) {
-            let delete_rect = egui::Rect::from_center_size(
-                egui::pos2(title_rect.right() - 12.0 * zoom, title_rect.center().y),
-                egui::vec2(20.0, 20.0) * zoom,
-            );
-            painter.text(
-                delete_rect.center(),
-                egui::Align2::CENTER_CENTER,
-                "×",
-                egui::FontId::proportional((15.0 * zoom).max(10.0)),
-                egui::Color32::from_gray(200),
-            );
-            if ui
-                .interact(
-                    delete_rect,
-                    egui::Id::new(("compositor_delete", id)),
-                    egui::Sense::click(),
-                )
-                .on_hover_text("Delete node")
-                .clicked()
-            {
-                doc.scene.compositor_graph.remove_node(id);
-                break;
-            }
-        }
-        let mut input_pos = None;
-        if kind.has_image_input() {
-            let center = egui::pos2(rect.left(), socket_y(rect));
-            let socket = egui::Rect::from_center_size(center, egui::vec2(16.0, 16.0));
-            painter.circle_filled(center, 5.0, egui::Color32::from_rgb(0x9a, 0xc8, 0x70));
-            let response = ui.interact(
-                socket,
-                egui::Id::new(("compositor_input", id)),
-                egui::Sense::click(),
-            );
-            if response.clicked()
-                || (response.hovered()
-                    && ctx.input(|i| i.pointer.any_released())
-                    && st.compositor_link_from.is_some())
-            {
-                if let Some(from) = st.compositor_link_from.take() {
-                    if doc.scene.compositor_graph.connect(from, id) {
-                        doc.touch();
+
+        let header_col = compositor_node_color(kind);
+        let area = egui::Area::new(egui::Id::new(("comp_node", id)))
+            .order(egui::Order::Middle)
+            .current_pos(screen_pos)
+            .movable(false)
+            .constrain(false)
+            .show(ctx, |ui| {
+                ui.set_clip_rect(canvas);
+                let move_node = ui.interact(
+                    egui::Rect::from_min_size(screen_pos, egui::vec2(sw, sh)),
+                    ui.id().with("move"),
+                    egui::Sense::drag(),
+                );
+                {
+                    let mut style = (*ui.ctx().style()).clone();
+                    let z = zoom.clamp(0.35, 2.5);
+                    style.spacing.item_spacing = egui::vec2(4.0 * z, 2.0 * z);
+                    style.spacing.button_padding = egui::vec2(3.0 * z, 1.5 * z);
+                    for ts in style.text_styles.values_mut() {
+                        ts.size = (ts.size * z).clamp(7.0, 16.0);
                     }
+                    ui.set_style(style);
                 }
-            }
-            input_pos = Some(center);
-        }
-        if !kind.is_output() {
-            let center = egui::pos2(rect.right(), socket_y(rect));
-            let socket = egui::Rect::from_center_size(center, egui::vec2(16.0, 16.0));
-            painter.circle_filled(center, 5.0, egui::Color32::from_rgb(0x9a, 0xc8, 0x70));
-            let response = ui.interact(
-                socket,
-                egui::Id::new(("compositor_output", id)),
-                egui::Sense::click_and_drag(),
-            );
-            if response.clicked() || response.drag_started() {
-                st.compositor_link_from = Some(id);
-            }
-        }
-        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(body_rect.shrink(8.0)), |ui| {
-            ui.set_clip_rect(canvas);
-            if zoom < 0.65 {
-                ui.weak("Zoom in to edit node values");
-            } else {
-                match kind {
-                    CompositorNodeKind::RenderLayers => {
-                        ui.weak("Current rendered frame");
-                    }
-                    CompositorNodeKind::BrightnessContrast => {
-                        ui.add(
-                            egui::Slider::new(
-                                &mut doc.scene.compositor_graph.nodes[index].value,
-                                -100.0..=100.0,
-                            )
-                            .text("Brightness"),
+                let frame = egui::Frame::none()
+                    .fill(egui::Color32::from_rgb(0x2b, 0x2b, 0x2b))
+                    .stroke(egui::Stroke::new(
+                        1.0_f32,
+                        egui::Color32::from_rgb(0x14, 0x14, 0x14),
+                    ))
+                    .rounding(egui::Rounding::same((4.0 * zoom).clamp(2.0, 6.0)))
+                    .inner_margin(egui::Margin::same(0.0));
+                frame.show(ui, |ui| {
+                    ui.set_width(sw);
+                    ui.set_max_width(sw);
+                    ui.set_min_width(sw);
+
+                    let title_h = (22.0 * zoom).clamp(14.0, 28.0);
+                    let title_rect = ui
+                        .allocate_exact_size(egui::vec2(sw, title_h), egui::Sense::hover())
+                        .0;
+                    ui.painter().rect_filled(
+                        title_rect,
+                        egui::Rounding {
+                            nw: 4.0,
+                            ne: 4.0,
+                            sw: 0.0,
+                            se: 0.0,
+                        },
+                        header_col,
+                    );
+                    ui.painter().text(
+                        title_rect.left_center() + egui::vec2(8.0, 0.0),
+                        egui::Align2::LEFT_CENTER,
+                        kind.title(),
+                        egui::FontId::proportional((12.0 * zoom).clamp(8.0, 16.0)),
+                        egui::Color32::WHITE,
+                    );
+
+                    let can_delete = !matches!(
+                        kind,
+                        CompositorNodeKind::RenderLayers
+                            | CompositorNodeKind::Composite
+                            | CompositorNodeKind::Viewer
+                    );
+                    if can_delete {
+                        let close_r = egui::Rect::from_center_size(
+                            egui::pos2(title_rect.right() - 11.0, title_rect.center().y),
+                            egui::vec2(14.0, 14.0),
                         );
-                        ui.add(
-                            egui::Slider::new(
-                                &mut doc.scene.compositor_graph.nodes[index].secondary,
-                                -100.0..=100.0,
-                            )
-                            .text("Contrast"),
+                        let close = ui.interact(close_r, ui.id().with("x"), egui::Sense::click());
+                        ui.painter().circle_filled(
+                            close_r.center(),
+                            6.0,
+                            if close.hovered() {
+                                egui::Color32::from_rgb(0xc0, 0x40, 0x40)
+                            } else {
+                                egui::Color32::from_black_alpha(40)
+                            },
                         );
-                    }
-                    CompositorNodeKind::Exposure => {
-                        ui.add(
-                            egui::Slider::new(
-                                &mut doc.scene.compositor_graph.nodes[index].value,
-                                -8.0..=8.0,
-                            )
-                            .text("Stops"),
+                        ui.painter().text(
+                            close_r.center(),
+                            egui::Align2::CENTER_CENTER,
+                            "×",
+                            egui::FontId::proportional(11.0),
+                            egui::Color32::from_gray(230),
                         );
+                        if close.clicked() {
+                            delete_node = Some(id);
+                        }
+                        if move_node.dragged() && !close.hovered() {
+                            if let Some(n) = doc
+                                .scene
+                                .compositor_graph
+                                .nodes
+                                .iter_mut()
+                                .find(|n| n.id == id)
+                            {
+                                let d = ui.input(|i| i.pointer.delta());
+                                n.pos[0] += d.x / zoom;
+                                n.pos[1] += d.y / zoom;
+                            }
+                            ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+                        } else if move_node.hovered() && !close.hovered() {
+                            ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
+                        }
+                    } else if move_node.dragged() {
+                        if let Some(n) = doc
+                            .scene
+                            .compositor_graph
+                            .nodes
+                            .iter_mut()
+                            .find(|n| n.id == id)
+                        {
+                            let d = ui.input(|i| i.pointer.delta());
+                            n.pos[0] += d.x / zoom;
+                            n.pos[1] += d.y / zoom;
+                        }
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+                    } else if move_node.hovered() {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
                     }
-                    CompositorNodeKind::Blur => {
-                        ui.add(
-                            egui::Slider::new(
-                                &mut doc.scene.compositor_graph.nodes[index].value,
-                                0.0..=32.0,
-                            )
-                            .text("Radius"),
-                        );
-                    }
-                    CompositorNodeKind::Glare => {
-                        ui.add(
-                            egui::Slider::new(
-                                &mut doc.scene.compositor_graph.nodes[index].value,
-                                0.0..=1.0,
-                            )
-                            .text("Threshold"),
-                        );
-                        ui.add(
-                            egui::Slider::new(
-                                &mut doc.scene.compositor_graph.nodes[index].secondary,
-                                0.0..=4.0,
-                            )
-                            .text("Strength"),
-                        );
-                    }
-                    CompositorNodeKind::Invert => {
-                        ui.weak("Invert RGB; preserve alpha");
-                    }
-                    CompositorNodeKind::Composite | CompositorNodeKind::Viewer => {
-                        ui.weak(if input_pos.is_some() {
-                            "Final image output"
-                        } else {
-                            "Connect an image input"
+
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        ui.add_space(6.0);
+                        ui.vertical(|ui| {
+                            ui.set_width((sw - 12.0).max(40.0));
+                            ui.spacing_mut().item_spacing.y = 2.0;
+
+                            // Input sockets
+                            for sock in 0..n_in {
+                                ui.horizontal(|ui| {
+                                    let (rect, resp) = ui.allocate_exact_size(
+                                        egui::vec2(12.0, 12.0),
+                                        egui::Sense::click(),
+                                    );
+                                    ui.painter().circle_filled(
+                                        rect.center(),
+                                        5.0,
+                                        egui::Color32::from_rgb(0x9a, 0xc8, 0x70),
+                                    );
+                                    if resp.clicked()
+                                        || (resp.hovered()
+                                            && ctx.input(|i| i.pointer.any_released())
+                                            && st.compositor_link_from.is_some())
+                                    {
+                                        if let Some(from) = st.compositor_link_from.take() {
+                                            if doc.scene.compositor_graph.connect_sockets(
+                                                from, 0, id, sock,
+                                            ) {
+                                                doc.dirty = true;
+                                            }
+                                        }
+                                    }
+                                    ui.label(
+                                        RichText::new(kind.input_socket_name(sock)).size(
+                                            (11.0 * zoom).clamp(8.0, 13.0),
+                                        ),
+                                    );
+                                });
+                            }
+
+                            // Params
+                            if zoom >= 0.55 {
+                                compositor_node_params(ui, doc, id, kind);
+                            }
+
+                            // Output socket
+                            if n_out > 0 {
+                                ui.horizontal(|ui| {
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            let (rect, resp) = ui.allocate_exact_size(
+                                                egui::vec2(12.0, 12.0),
+                                                egui::Sense::click_and_drag(),
+                                            );
+                                            ui.painter().circle_filled(
+                                                rect.center(),
+                                                5.0,
+                                                egui::Color32::from_rgb(0x9a, 0xc8, 0x70),
+                                            );
+                                            if resp.clicked() || resp.drag_started() {
+                                                st.compositor_link_from = Some(id);
+                                            }
+                                            ui.label(
+                                                RichText::new(kind.output_socket_name()).size(
+                                                    (11.0 * zoom).clamp(8.0, 13.0),
+                                                ),
+                                            );
+                                        },
+                                    );
+                                });
+                            }
                         });
-                    }
-                }
-            }
-        });
+                    });
+                });
+            });
+        node_rects.push((id, area.response.rect));
     }
 
-    if canvas_response.hovered()
-        && ctx.input(|i| i.pointer.button_down(egui::PointerButton::Middle))
-    {
-        let delta = ctx.input(|i| i.pointer.delta());
-        st.compositor_pan[0] += delta.x;
-        st.compositor_pan[1] += delta.y;
-    } else if canvas_response.dragged()
-        && !st
+    if let Some(id) = delete_node {
+        doc.scene.compositor_graph.remove_node(id);
+        st.compositor_link_from = None;
+    }
+    st.compositor_last_node_rects = node_rects;
+    if canvas_response.clicked() && st.compositor_link_from.is_some() {
+        // Click empty canvas cancels link
+        if !st
             .compositor_last_node_rects
             .iter()
-            .any(|(_, rect)| rect.contains(pointer.unwrap_or_default()))
-    {
-        let delta = ctx.input(|i| i.pointer.delta());
-        st.compositor_pan[0] += delta.x;
-        st.compositor_pan[1] += delta.y;
+            .any(|(_, r)| r.contains(canvas_response.interact_pointer_pos().unwrap_or_default()))
+        {
+            st.compositor_link_from = None;
+        }
     }
     commit_compositor_graph(doc, before);
 }
 
-fn compositor_node_height(kind: CompositorNodeKind) -> f32 {
+fn compositor_extra_rows(kind: CompositorNodeKind) -> usize {
     match kind {
-        CompositorNodeKind::BrightnessContrast | CompositorNodeKind::Glare => 130.0,
-        CompositorNodeKind::Exposure | CompositorNodeKind::Blur => 100.0,
-        _ => 75.0,
+        CompositorNodeKind::BrightnessContrast
+        | CompositorNodeKind::HueSaturation
+        | CompositorNodeKind::Glare
+        | CompositorNodeKind::ColorBalance
+        | CompositorNodeKind::Tonemap
+        | CompositorNodeKind::Flip
+        | CompositorNodeKind::RGB => 2,
+        CompositorNodeKind::Exposure
+        | CompositorNodeKind::Gamma
+        | CompositorNodeKind::Blur
+        | CompositorNodeKind::Filter
+        | CompositorNodeKind::Posterize
+        | CompositorNodeKind::Mix
+        | CompositorNodeKind::AlphaOver
+        | CompositorNodeKind::SetAlpha => 1,
+        _ => 0,
+    }
+}
+
+fn compositor_node_color(kind: CompositorNodeKind) -> egui::Color32 {
+    match kind.category() {
+        "Input" => egui::Color32::from_rgb(0x45, 0x55, 0x70),
+        "Output" => egui::Color32::from_rgb(0x50, 0x47, 0x29),
+        "Filter" => egui::Color32::from_rgb(0x3a, 0x5a, 0x4a),
+        "Color Mix" => egui::Color32::from_rgb(0x5a, 0x4a, 0x3a),
+        "Distort" => egui::Color32::from_rgb(0x4a, 0x3a, 0x5a),
+        _ => egui::Color32::from_rgb(0x55, 0x45, 0x35), // Color
+    }
+}
+
+fn compositor_node_params(
+    ui: &mut egui::Ui,
+    doc: &mut Document,
+    id: u64,
+    kind: CompositorNodeKind,
+) {
+    let Some(index) = doc
+        .scene
+        .compositor_graph
+        .nodes
+        .iter()
+        .position(|n| n.id == id)
+    else {
+        return;
+    };
+    match kind {
+        CompositorNodeKind::BrightnessContrast => {
+            ui.add(
+                egui::Slider::new(
+                    &mut doc.scene.compositor_graph.nodes[index].value,
+                    -100.0..=100.0,
+                )
+                .text("Bright"),
+            );
+            ui.add(
+                egui::Slider::new(
+                    &mut doc.scene.compositor_graph.nodes[index].secondary,
+                    -100.0..=100.0,
+                )
+                .text("Contrast"),
+            );
+        }
+        CompositorNodeKind::Exposure => {
+            ui.add(
+                egui::Slider::new(
+                    &mut doc.scene.compositor_graph.nodes[index].value,
+                    -8.0..=8.0,
+                )
+                .text("Stops"),
+            );
+        }
+        CompositorNodeKind::Gamma => {
+            ui.add(
+                egui::Slider::new(
+                    &mut doc.scene.compositor_graph.nodes[index].value,
+                    0.1..=5.0,
+                )
+                .text("Gamma"),
+            );
+        }
+        CompositorNodeKind::HueSaturation => {
+            ui.add(
+                egui::Slider::new(
+                    &mut doc.scene.compositor_graph.nodes[index].value,
+                    0.0..=1.0,
+                )
+                .text("Hue"),
+            );
+            ui.add(
+                egui::Slider::new(
+                    &mut doc.scene.compositor_graph.nodes[index].secondary,
+                    0.0..=2.0,
+                )
+                .text("Sat"),
+            );
+        }
+        CompositorNodeKind::Blur => {
+            ui.add(
+                egui::Slider::new(
+                    &mut doc.scene.compositor_graph.nodes[index].value,
+                    0.0..=32.0,
+                )
+                .text("Size"),
+            );
+        }
+        CompositorNodeKind::Glare => {
+            ui.add(
+                egui::Slider::new(
+                    &mut doc.scene.compositor_graph.nodes[index].value,
+                    0.0..=1.0,
+                )
+                .text("Thr"),
+            );
+            ui.add(
+                egui::Slider::new(
+                    &mut doc.scene.compositor_graph.nodes[index].secondary,
+                    0.0..=4.0,
+                )
+                .text("Str"),
+            );
+        }
+        CompositorNodeKind::Filter => {
+            ui.add(
+                egui::Slider::new(
+                    &mut doc.scene.compositor_graph.nodes[index].value,
+                    0.0..=4.0,
+                )
+                .text("Strength"),
+            );
+        }
+        CompositorNodeKind::Mix | CompositorNodeKind::AlphaOver | CompositorNodeKind::SetAlpha => {
+            ui.add(
+                egui::Slider::new(
+                    &mut doc.scene.compositor_graph.nodes[index].value,
+                    0.0..=1.0,
+                )
+                .text("Fac"),
+            );
+        }
+        CompositorNodeKind::Flip => {
+            ui.add(
+                egui::Slider::new(
+                    &mut doc.scene.compositor_graph.nodes[index].value,
+                    0.0..=1.0,
+                )
+                .text("Flip X"),
+            );
+            ui.add(
+                egui::Slider::new(
+                    &mut doc.scene.compositor_graph.nodes[index].secondary,
+                    0.0..=1.0,
+                )
+                .text("Flip Y"),
+            );
+        }
+        CompositorNodeKind::ColorBalance => {
+            ui.add(
+                egui::Slider::new(
+                    &mut doc.scene.compositor_graph.nodes[index].value,
+                    -1.0..=1.0,
+                )
+                .text("Lift"),
+            );
+            ui.add(
+                egui::Slider::new(
+                    &mut doc.scene.compositor_graph.nodes[index].secondary,
+                    0.0..=4.0,
+                )
+                .text("Gain"),
+            );
+        }
+        CompositorNodeKind::Tonemap => {
+            ui.add(
+                egui::Slider::new(
+                    &mut doc.scene.compositor_graph.nodes[index].value,
+                    0.01..=2.0,
+                )
+                .text("Key"),
+            );
+            ui.add(
+                egui::Slider::new(
+                    &mut doc.scene.compositor_graph.nodes[index].secondary,
+                    0.01..=4.0,
+                )
+                .text("Offset"),
+            );
+        }
+        CompositorNodeKind::Posterize => {
+            ui.add(
+                egui::Slider::new(
+                    &mut doc.scene.compositor_graph.nodes[index].value,
+                    2.0..=32.0,
+                )
+                .text("Steps"),
+            );
+        }
+        CompositorNodeKind::RGB => {
+            ui.add(
+                egui::Slider::new(
+                    &mut doc.scene.compositor_graph.nodes[index].value,
+                    0.0..=1.0,
+                )
+                .text("Value"),
+            );
+            ui.add(
+                egui::Slider::new(
+                    &mut doc.scene.compositor_graph.nodes[index].secondary,
+                    0.0..=1.0,
+                )
+                .text("Blue"),
+            );
+        }
+        CompositorNodeKind::RenderLayers => {
+            ui.weak("Image");
+        }
+        CompositorNodeKind::Composite => {
+            ui.weak("Final");
+        }
+        CompositorNodeKind::Viewer => {
+            ui.weak("Preview");
+        }
+        CompositorNodeKind::Invert => {
+            ui.weak("Invert RGB");
+        }
     }
 }
 
 fn insert_compositor_effect(graph: &mut CompositorGraph, id: u64) {
+    // Insert on the Image path from Render Layers into Composite/Viewer (Blender-ish).
     let Some(source) = graph
         .nodes
         .iter()
@@ -6451,24 +6870,28 @@ fn insert_compositor_effect(graph: &mut CompositorGraph, id: u64) {
     else {
         return;
     };
-    let outgoing = graph
+    let outgoing: Vec<(u64, u8)> = graph
         .links
         .iter()
         .filter(|link| link.from_node == source)
-        .map(|link| link.to_node)
-        .collect::<Vec<_>>();
+        .map(|link| (link.to_node, link.to_socket))
+        .collect();
     if outgoing.is_empty() {
         return;
     }
     graph.links.retain(|link| link.from_node != source);
     graph.links.push(forge_core::CompositorLink {
         from_node: source,
+        from_socket: 0,
         to_node: id,
+        to_socket: 0,
     });
-    for to_node in outgoing {
+    for (to_node, to_socket) in outgoing {
         graph.links.push(forge_core::CompositorLink {
             from_node: id,
+            from_socket: 0,
             to_node,
+            to_socket,
         });
     }
 }
@@ -6477,14 +6900,44 @@ fn commit_compositor_graph(doc: &mut Document, before: CompositorGraph) {
     if before == doc.scene.compositor_graph {
         return;
     }
+    // Position-only moves must not dirty the GPU scene / undo every frame (major lag source).
+    let structure_changed = compositor_structure_changed(&before, &doc.scene.compositor_graph);
     let after = doc.scene.compositor_graph.clone();
-    if !doc.edit_open {
-        doc.scene.compositor_graph = before;
-        doc.checkpoint();
-        doc.edit_open = true;
-        doc.scene.compositor_graph = after;
+    if structure_changed {
+        if !doc.edit_open {
+            doc.scene.compositor_graph = before;
+            doc.checkpoint();
+            doc.edit_open = true;
+            doc.scene.compositor_graph = after;
+        }
+        doc.dirty = true;
+        // Do not call doc.touch() — compositor is independent of the mesh GPU upload path.
     }
-    doc.touch();
+}
+
+fn compositor_structure_changed(a: &CompositorGraph, b: &CompositorGraph) -> bool {
+    if a.nodes.len() != b.nodes.len() || a.links.len() != b.links.len() {
+        return true;
+    }
+    for (na, nb) in a.nodes.iter().zip(b.nodes.iter()) {
+        if na.id != nb.id
+            || na.kind != nb.kind
+            || na.value != nb.value
+            || na.secondary != nb.secondary
+        {
+            return true;
+        }
+    }
+    for (la, lb) in a.links.iter().zip(b.links.iter()) {
+        if la.from_node != lb.from_node
+            || la.to_node != lb.to_node
+            || la.from_socket != lb.from_socket
+            || la.to_socket != lb.to_socket
+        {
+            return true;
+        }
+    }
+    false
 }
 
 fn draw_timeline(
