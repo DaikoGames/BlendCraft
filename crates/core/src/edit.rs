@@ -111,13 +111,17 @@ impl EditSession {
     }
 
     pub fn build_edges(&self) -> Vec<EdgeKey> {
-        let mut set = BTreeSet::new();
+        // Sorted + deduplicated (same result as a BTreeSet, but much cheaper; this runs
+        // every frame for the edit-mode overlay).
+        let mut edges: Vec<EdgeKey> = Vec::with_capacity(self.mesh.indices.len());
         for tri in self.mesh.indices.chunks_exact(3) {
-            set.insert(edge_key(tri[0], tri[1]));
-            set.insert(edge_key(tri[1], tri[2]));
-            set.insert(edge_key(tri[2], tri[0]));
+            edges.push(edge_key(tri[0], tri[1]));
+            edges.push(edge_key(tri[1], tri[2]));
+            edges.push(edge_key(tri[2], tri[0]));
         }
-        set.into_iter().collect()
+        edges.sort_unstable();
+        edges.dedup();
+        edges
     }
 
     pub fn selected_vert_indices(&self) -> BTreeSet<u32> {

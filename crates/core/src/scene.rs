@@ -46,6 +46,9 @@ pub struct Object {
     pub constraints: Vec<Constraint>,
     /// Optional armature skinning binding (mesh objects only).
     pub skin: Option<SkinBinding>,
+    /// Classic non-destructive modifier stack (applied before Geometry Nodes).
+    #[serde(default)]
+    pub modifiers: Vec<crate::modifiers::Modifier>,
     /// Optional Geometry Nodes modifier graph (Blender-style).
     #[serde(default)]
     pub geo_nodes: Option<crate::geometry_nodes::GeometryNodeGraph>,
@@ -69,6 +72,7 @@ impl Object {
             link_group: None,
             constraints: Vec::new(),
             skin: None,
+            modifiers: Vec::new(),
             geo_nodes: None,
         }
     }
@@ -86,6 +90,33 @@ impl Object {
     /// Local matrix (relative to the parent).
     pub fn matrix(&self) -> Mat4 {
         Mat4::from_scale_rotation_translation(self.scale, self.rotation, self.translation)
+    }
+
+    /// Mesh after the classic modifier stack (and optional Geometry Nodes).
+    ///
+    /// `operand_lookup` supplies world-space meshes for Boolean modifiers
+    /// (object id → mesh). Pass an empty map when no Booleans are used.
+    pub fn evaluated_mesh(
+        &self,
+        operand_lookup: &std::collections::HashMap<u64, MeshData>,
+        for_render: bool,
+    ) -> std::sync::Arc<MeshData> {
+        let has_mods = !self.modifiers.is_empty();
+        let has_geo = self.geo_nodes.is_some();
+        if !has_mods && !has_geo {
+            return self.mesh.clone();
+        }
+        let mut mesh = if has_mods {
+            crate::modifiers::evaluate_stack(&self.mesh, &self.modifiers, operand_lookup, for_render)
+        } else {
+            (*self.mesh).clone()
+        };
+        if let Some(graph) = &self.geo_nodes {
+            if let Some(out) = graph.evaluate(&mesh) {
+                mesh = out;
+            }
+        }
+        std::sync::Arc::new(mesh)
     }
 }
 

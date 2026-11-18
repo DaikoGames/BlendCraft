@@ -723,24 +723,69 @@ fn vs_main(@location(0) pos: vec3<f32>) -> @builtin(position) vec4<f32> {
         let mut old = std::mem::take(&mut self.mesh_cache);
         let mut fresh: HashMap<usize, (Arc<MeshData>, Arc<MeshBuffers>)> = HashMap::new();
         let mut objects = Vec::new();
+        // Pre-build Boolean operand lookup (world-space meshes) once per sync.
+        let mut operand_lookup: std::collections::HashMap<u64, MeshData> =
+            std::collections::HashMap::new();
+        let needs_operands = scene.objects.iter().any(|o| {
+            o.modifiers.iter().any(|m| {
+                matches!(
+                    &m.kind,
+                    forge_core::ModifierKind::Boolean {
+                        object: Some(_),
+                        ..
+                    }
+                )
+            })
+        });
+        if needs_operands {
+            for (i, o) in scene.objects.iter().enumerate() {
+                if o.mesh.indices.is_empty() {
+                    continue;
+                }
+                operand_lookup.insert(o.id, o.mesh.transformed(worlds[i]));
+            }
+        }
         for (i, o) in scene.objects.iter().enumerate() {
-            if !scene.is_visible(i) || o.mesh.indices.is_empty() {
+            if !scene.is_visible(i) {
                 continue;
             }
-            let key = Arc::as_ptr(&o.mesh) as usize;
+            let display = o.evaluated_mesh(&operand_lookup, false);
+            if display.indices.is_empty() {
+                continue;
+            }
+            // Cache key: base mesh pointer when no modifiers, otherwise a stable
+            // hash of the evaluated content so modifier parameter changes rebuild.
+            let key = if o.modifiers.is_empty() && o.geo_nodes.is_none() {
+                Arc::as_ptr(&o.mesh) as usize
+            } else {
+                // Mix object id with a cheap content fingerprint.
+                let mut h = o.id as usize;
+                h ^= display.vertices.len().wrapping_mul(0x9e37_79b9);
+                h ^= display.indices.len().wrapping_mul(0x85eb_ca6b);
+                if let Some(v) = display.vertices.first() {
+                    h ^= (v.position[0].to_bits() as usize)
+                        .wrapping_mul(0xc2b2_ae35);
+                }
+                h
+            };
             let buffers = if let Some((_, b)) = fresh.get(&key) {
                 b.clone()
             } else {
                 let b = match old.remove(&key) {
-                    Some((_, b)) => b,
-                    None => Arc::new(self.upload_mesh(&o.mesh)),
+                    Some((cached_mesh, b)) if Arc::ptr_eq(&cached_mesh, &display) => b,
+                    Some((_, b)) => {
+                        // Content changed under the same key – re-upload.
+                        let _ = b;
+                        Arc::new(self.upload_mesh(&display))
+                    }
+                    None => Arc::new(self.upload_mesh(&display)),
                 };
-                fresh.insert(key, (o.mesh.clone(), b.clone()));
+                fresh.insert(key, (display.clone(), b.clone()));
                 b
             };
             let slot = |m: Option<usize>| m.map(|m| m + 1).filter(|&m| m < mats.len()).unwrap_or(0);
             let mut draws = Vec::new();
-            if o.mesh.groups.is_empty() {
+            if display.groups.is_empty() {
                 let mi = slot(o.material);
                 draws.push(Draw {
                     first: 0,
@@ -749,7 +794,7 @@ fn vs_main(@location(0) pos: vec3<f32>) -> @builtin(position) vec4<f32> {
                     blend: mats[mi].blend,
                 });
             } else {
-                for g in &o.mesh.groups {
+                for g in &display.groups {
                     let mi = slot(g.material);
                     draws.push(Draw {
                         first: g.first_index,

@@ -209,9 +209,22 @@ operation.
 - **Real-time shadows**: on by default. 2048² shadow map from the primary Sun (preferred) or Spot light, with 3×3 PCF soft shadows. Toggle and adjust softness under **View**.
 - **Render Image**: **View > Render Image…** captures the current 3D view (no UI) to a PNG you choose.
 
+## Modifiers
+Objects have a classic non-destructive **modifier stack** (Properties → Modifiers, or Tools → Modifiers):
+
+- **Subdivision Surface** – simple midpoint levels (viewport + render levels)
+- **Array** – count, relative/absolute offset, optional merge
+- **Mirror** – X/Y/Z axes, optional merge at the plane
+- **Solidify** – thickness + offset, side walls on boundary edges
+- **Bevel** – amount, segments, angle limit (chamfer-style)
+- **Boolean** – union / difference / intersect against another mesh object
+
+The stack is evaluated before Geometry Nodes. Apply order can be changed with ▲/▼; each modifier can be toggled for viewport and render independently. Old projects load with an empty stack.
+
 ## Not yet there
-Vertex/edge/face edit mode, modifiers, UV editing, animation, video export, FBX / native .blend export.
+Full Edit Mode parity (many BMesh operators), Curves/NURBS editing depth, native .blend import/export.
 Point-light omnidirectional shadows, cascaded shadow maps for large scenes.
+Vertex/Weight paint, full animation editors (NLA/drivers), Game-dev helpers (LODs, collider gen, lightmap UVs).
 
 ## Gizmo
 Select an object (Move tool is default), then drag the colored handles. Press G / R / S for modal move/rotate/scale, Q returns to select mode. Every drag is one undo step.

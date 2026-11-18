@@ -4913,6 +4913,11 @@ impl App {
         // Camera view follows the (already updated) camera object this very frame.
         self.sync_camera_view();
 
+        // Camera used for BOTH the egui overlays (edit-mode vertices/edges, gizmos) and the
+        // GPU pass of this frame. Nav-gizmo orbit/pan/zoom are applied after the UI is built,
+        // so rendering with the live camera made the overlay trail one frame behind the mesh.
+        let frame_camera = self.camera.clone();
+
         // 1) build the UI
         let raw = match self.gfx.as_mut() {
             Some(g) => g.egui_state.take_egui_input(&g.window),
@@ -5146,7 +5151,7 @@ impl App {
         let textures = out.textures_delta;
         let er = &mut g.egui_renderer;
         let res = g.renderer.render(
-            &self.camera,
+            &frame_camera,
             &self.settings,
             self.viewport,
             &mut |device, queue, enc, view| {

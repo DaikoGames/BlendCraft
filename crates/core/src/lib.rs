@@ -16,6 +16,7 @@ pub mod kinds;
 pub mod material;
 pub mod meshcache;
 pub mod mesh;
+pub mod modifiers;
 pub mod primitives;
 pub mod physics;
 pub mod project;
@@ -54,6 +55,9 @@ pub use kinds::{
 };
 pub use material::{AlphaMode, Material, TextureData};
 pub use mesh::{Aabb, MeshData, MeshGroup, Vertex};
+pub use modifiers::{
+    evaluate_object_modifiers, evaluate_stack, BooleanOperation, Modifier, ModifierKind,
+};
 pub use primitives::{Primitive, TextFont};
 pub use physics::{
     apply_baked_frame, bake_physics_to_keyframes, bake_scene, CollisionShape, PhysicsCache, PhysicsRuntime,

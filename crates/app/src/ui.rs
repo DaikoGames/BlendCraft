@@ -213,6 +213,7 @@ pub enum PropertiesTab {
     Render,
     Output,
     Material,
+    Modifiers,
     Physics,
     Scene,
 }
@@ -3156,12 +3157,8 @@ fn shader_socket_control(
         );
     }
 
-    // Wire endpoints: left edge for inputs, right edge for outputs
-    let p = if is_output {
-        [rect.right(), rect.center().y]
-    } else {
-        [rect.left(), rect.center().y]
-    };
+    // Wire endpoints: the exact centre of the drawn socket circle
+    let p = [rect.center().x, rect.center().y];
     st.shader_socket_positions
         .insert((node_id, is_output, socket), p);
     if response.drag_started() {
@@ -7453,63 +7450,11 @@ fn draw_geometry_nodes_editor(
         }
     }
 
-    let pointer = ctx.input(|i| i.pointer.interact_pos());
-    let mut wire_to_remove = None;
-    for (index, link) in graph.links.iter().enumerate() {
-        let Some(&a) = socket_pos.get(&(link.from, true, link.from_socket)) else {
-            continue;
-        };
-        let Some(&b) = socket_pos.get(&(link.to, false, link.to_socket)) else {
-            continue;
-        };
-        let points = shader_wire_points(a, b);
-        let hovered = canvas.contains(pointer.unwrap_or_default())
-            && pointer.is_some_and(|pos| shader_wire_hit(pos, points, 7.0));
-        let col = graph
-            .nodes
-            .iter()
-            .find(|n| n.id == link.from)
-            .and_then(|n| n.kind.outputs().get(link.from_socket as usize))
-            .map(|s| geo_socket_color(s.ty))
-            .unwrap_or(egui::Color32::from_rgb(0x00, 0xb5, 0x9f));
-        painter.add(egui::epaint::CubicBezierShape::from_points_stroke(
-            points,
-            false,
-            egui::Color32::TRANSPARENT,
-            egui::Stroke::new(
-                if hovered { 3.5 } else { 2.5 },
-                if hovered {
-                    egui::Color32::LIGHT_BLUE
-                } else {
-                    col
-                },
-            ),
-        ));
-        if hovered && ctx.input(|i| i.pointer.secondary_clicked()) {
-            wire_to_remove = Some(index);
-        }
-    }
-    if let (Some((from_id, is_out, sock)), Some(pointer)) = (st.geo_drag_from, pointer) {
-        if is_out {
-            if let Some(&a) = socket_pos.get(&(from_id, true, sock)) {
-                let points = shader_wire_points(a, pointer);
-                painter.add(egui::epaint::CubicBezierShape::from_points_stroke(
-                    points,
-                    false,
-                    egui::Color32::TRANSPARENT,
-                    egui::Stroke::new(2.0, egui::Color32::LIGHT_BLUE),
-                ));
-            }
-        }
-    }
-    if let Some(index) = wire_to_remove {
-        if let Some(g) = doc.scene.objects[obj_idx].geo_nodes.as_mut() {
-            g.links.remove(index);
-            doc.dirty = true;
-        }
-    }
 
     // Nodes as Areas
+    // Exact socket circle centres are measured while the nodes are drawn, so wires
+    // always end exactly on the circles (the estimates above are only a fallback).
+    let mut socket_dots: Vec<(egui::Pos2, egui::Color32, f32)> = Vec::new();
     let mut node_rects = Vec::new();
     let mut delete_node: Option<u64> = None;
     let node_ids: Vec<u64> = graph.nodes.iter().map(|n| n.id).collect();
@@ -7656,6 +7601,8 @@ fn draw_geometry_nodes_editor(
                                             egui::Sense::click_and_drag(),
                                         );
                                         let col = geo_socket_color(sock.ty);
+                                        socket_pos.insert((id, false, i as u8), rect.center());
+                                        socket_dots.push((rect.center(), col, 5.5));
                                         ui.painter().circle_filled(rect.center(), 5.5, col);
                                         ui.painter().circle_stroke(
                                             rect.center(),
@@ -7704,6 +7651,8 @@ fn draw_geometry_nodes_editor(
                                                 egui::Sense::click_and_drag(),
                                             );
                                             let col = geo_socket_color(sock.ty);
+                                            socket_pos.insert((id, true, i as u8), rect.center());
+                                            socket_dots.push((rect.center(), col, 5.5));
                                             ui.painter().circle_filled(rect.center(), 5.5, col);
                                             ui.painter().circle_stroke(
                                                 rect.center(),
@@ -7729,6 +7678,71 @@ fn draw_geometry_nodes_editor(
             });
         area_rect = node_rect;
         node_rects.push((id, area_rect));
+    }
+
+    // Wires are drawn after the nodes so they use the measured socket centres.
+    let pointer = ctx.input(|i| i.pointer.interact_pos());
+    let mut wire_to_remove = None;
+    for (index, link) in graph.links.iter().enumerate() {
+        let Some(&a) = socket_pos.get(&(link.from, true, link.from_socket)) else {
+            continue;
+        };
+        let Some(&b) = socket_pos.get(&(link.to, false, link.to_socket)) else {
+            continue;
+        };
+        let points = shader_wire_points(a, b);
+        let hovered = canvas.contains(pointer.unwrap_or_default())
+            && pointer.is_some_and(|pos| shader_wire_hit(pos, points, 7.0));
+        let col = graph
+            .nodes
+            .iter()
+            .find(|n| n.id == link.from)
+            .and_then(|n| n.kind.outputs().get(link.from_socket as usize))
+            .map(|s| geo_socket_color(s.ty))
+            .unwrap_or(egui::Color32::from_rgb(0x00, 0xb5, 0x9f));
+        painter.add(egui::epaint::CubicBezierShape::from_points_stroke(
+            points,
+            false,
+            egui::Color32::TRANSPARENT,
+            egui::Stroke::new(
+                if hovered { 3.5 } else { 2.5 },
+                if hovered {
+                    egui::Color32::LIGHT_BLUE
+                } else {
+                    col
+                },
+            ),
+        ));
+        if hovered && ctx.input(|i| i.pointer.secondary_clicked()) {
+            wire_to_remove = Some(index);
+        }
+    }
+    if let (Some((from_id, is_out, sock)), Some(pointer)) = (st.geo_drag_from, pointer) {
+        if is_out {
+            if let Some(&a) = socket_pos.get(&(from_id, true, sock)) {
+                let points = shader_wire_points(a, pointer);
+                painter.add(egui::epaint::CubicBezierShape::from_points_stroke(
+                    points,
+                    false,
+                    egui::Color32::TRANSPARENT,
+                    egui::Stroke::new(2.0, egui::Color32::LIGHT_BLUE),
+                ));
+            }
+        }
+    }
+    if let Some(index) = wire_to_remove {
+        if let Some(g) = doc.scene.objects[obj_idx].geo_nodes.as_mut() {
+            g.links.remove(index);
+            doc.dirty = true;
+        }
+    }
+    for (center, col, r) in &socket_dots {
+        painter.circle_filled(*center, *r, *col);
+        painter.circle_stroke(
+            *center,
+            *r,
+            egui::Stroke::new(1.0, egui::Color32::from_black_alpha(160)),
+        );
     }
 
     if let Some(id) = delete_node {
@@ -8050,51 +8064,10 @@ fn draw_compositing_editor(
         }
     }
 
-    let pointer = ctx.input(|i| i.pointer.interact_pos());
-    let mut wire_to_remove = None;
-    for (index, link) in doc.scene.compositor_graph.links.iter().enumerate() {
-        let Some(&a) = socket_pos.get(&(link.from_node, false, link.from_socket)) else {
-            continue;
-        };
-        let Some(&b) = socket_pos.get(&(link.to_node, true, link.to_socket)) else {
-            continue;
-        };
-        let points = shader_wire_points(a, b);
-        let hovered = canvas.contains(pointer.unwrap_or_default())
-            && pointer.is_some_and(|pos| shader_wire_hit(pos, points, 7.0));
-        painter.add(egui::epaint::CubicBezierShape::from_points_stroke(
-            points,
-            false,
-            egui::Color32::TRANSPARENT,
-            egui::Stroke::new(
-                if hovered { 3.5 } else { 2.5 },
-                if hovered {
-                    egui::Color32::LIGHT_BLUE
-                } else {
-                    egui::Color32::from_rgb(0xc0, 0xb0, 0x55)
-                },
-            ),
-        ));
-        if hovered && ctx.input(|i| i.pointer.secondary_clicked()) {
-            wire_to_remove = Some(index);
-        }
-    }
-    if let (Some(from_id), Some(pointer)) = (st.compositor_link_from, pointer) {
-        if let Some(&a) = socket_pos.get(&(from_id, false, 0)) {
-            let points = shader_wire_points(a, pointer);
-            painter.add(egui::epaint::CubicBezierShape::from_points_stroke(
-                points,
-                false,
-                egui::Color32::TRANSPARENT,
-                egui::Stroke::new(2.0, egui::Color32::LIGHT_BLUE),
-            ));
-        }
-    }
-    if let Some(index) = wire_to_remove {
-        doc.scene.compositor_graph.links.remove(index);
-    }
 
     // ---- Nodes (egui Areas — same approach as Shader Editor) ----
+    // Socket circle centres are measured while drawing so wires end exactly on them.
+    let mut socket_dots: Vec<egui::Pos2> = Vec::new();
     let mut node_rects: Vec<(u64, egui::Rect)> = Vec::new();
     let mut delete_node: Option<u64> = None;
     let node_ids: Vec<u64> = doc
@@ -8270,6 +8243,8 @@ fn draw_compositing_editor(
                                         egui::vec2(12.0, 12.0),
                                         egui::Sense::click(),
                                     );
+                                    socket_pos.insert((id, true, sock), rect.center());
+                                    socket_dots.push(rect.center());
                                     ui.painter().circle_filled(
                                         rect.center(),
                                         5.0,
@@ -8311,6 +8286,8 @@ fn draw_compositing_editor(
                                                 egui::vec2(12.0, 12.0),
                                                 egui::Sense::click_and_drag(),
                                             );
+                                            socket_pos.insert((id, false, 0), rect.center());
+                                            socket_dots.push(rect.center());
                                             ui.painter().circle_filled(
                                                 rect.center(),
                                                 5.0,
@@ -8333,6 +8310,60 @@ fn draw_compositing_editor(
                 });
             });
         node_rects.push((id, area.response.rect));
+    }
+
+    // Wires are drawn after the nodes (on top) using the measured socket centres.
+    let wire_painter = ctx
+        .layer_painter(egui::LayerId::new(
+            egui::Order::Middle,
+            egui::Id::new("compositor_wires"),
+        ))
+        .with_clip_rect(canvas);
+    let pointer = ctx.input(|i| i.pointer.interact_pos());
+    let mut wire_to_remove = None;
+    for (index, link) in doc.scene.compositor_graph.links.iter().enumerate() {
+        let Some(&a) = socket_pos.get(&(link.from_node, false, link.from_socket)) else {
+            continue;
+        };
+        let Some(&b) = socket_pos.get(&(link.to_node, true, link.to_socket)) else {
+            continue;
+        };
+        let points = shader_wire_points(a, b);
+        let hovered = canvas.contains(pointer.unwrap_or_default())
+            && pointer.is_some_and(|pos| shader_wire_hit(pos, points, 7.0));
+        wire_painter.add(egui::epaint::CubicBezierShape::from_points_stroke(
+            points,
+            false,
+            egui::Color32::TRANSPARENT,
+            egui::Stroke::new(
+                if hovered { 3.5 } else { 2.5 },
+                if hovered {
+                    egui::Color32::LIGHT_BLUE
+                } else {
+                    egui::Color32::from_rgb(0xc0, 0xb0, 0x55)
+                },
+            ),
+        ));
+        if hovered && ctx.input(|i| i.pointer.secondary_clicked()) {
+            wire_to_remove = Some(index);
+        }
+    }
+    if let (Some(from_id), Some(pointer)) = (st.compositor_link_from, pointer) {
+        if let Some(&a) = socket_pos.get(&(from_id, false, 0)) {
+            let points = shader_wire_points(a, pointer);
+            wire_painter.add(egui::epaint::CubicBezierShape::from_points_stroke(
+                points,
+                false,
+                egui::Color32::TRANSPARENT,
+                egui::Stroke::new(2.0, egui::Color32::LIGHT_BLUE),
+            ));
+        }
+    }
+    if let Some(index) = wire_to_remove {
+        doc.scene.compositor_graph.links.remove(index);
+    }
+    for center in &socket_dots {
+        wire_painter.circle_filled(*center, 5.0, egui::Color32::from_rgb(0x9a, 0xc8, 0x70));
     }
 
     if let Some(id) = delete_node {
@@ -9704,17 +9735,41 @@ fn menu_bar(
         });
 
         ui.menu_button("Tools", |ui| {
-            soon(ui, "Modifiers");
+            if ui.button("Modifiers").clicked() {
+                st.properties_tab = PropertiesTab::Modifiers;
+                ui.close_menu();
+            }
             if ui.button("UV Editing").clicked() {
                 actions.push(Action::ToggleUvMode);
                 ui.close_menu();
             }
-            soon(ui, "Texture painting");
+            if ui.button("Texture Paint").clicked() {
+                actions.push(Action::TogglePaintMode);
+                ui.close_menu();
+            }
             if ui.button("Sculpt Mode").clicked() {
                 actions.push(Action::ToggleSculptMode);
                 ui.close_menu();
             }
-            soon(ui, "Animation / rigging");
+            if ui.button("Animation").clicked() {
+                // Mirror the header workspace switch: enter Animation mode (Dope Sheet + timeline).
+                st.shading_mode = false;
+                st.rendering_mode = false;
+                st.compositing_mode = false;
+                st.geometry_nodes_mode = false;
+                st.scripting_mode = false;
+                st.animation_mode = true;
+                ui.close_menu();
+            }
+            if ui.button("Geometry Nodes").clicked() {
+                st.shading_mode = false;
+                st.rendering_mode = false;
+                st.compositing_mode = false;
+                st.animation_mode = false;
+                st.scripting_mode = false;
+                st.geometry_nodes_mode = true;
+                ui.close_menu();
+            }
         });
         ui.menu_button("Game Dev", |ui| {
             soon(ui, "Asset validation");
@@ -10807,6 +10862,312 @@ fn draw_render_output_props(
     });
 }
 
+fn draw_modifiers_props(ui: &mut egui::Ui, doc: &mut Document, object_index: usize) {
+    use forge_core::{BooleanOperation, Modifier, ModifierKind};
+
+    let is_mesh = doc
+        .scene
+        .objects
+        .get(object_index)
+        .map(|o| !o.mesh.indices.is_empty() || matches!(o.kind, ObjectKind::Mesh | ObjectKind::Surface(_)))
+        .unwrap_or(false);
+
+    if !is_mesh {
+        ui.weak("Modifiers apply to mesh objects.");
+        return;
+    }
+
+    // Add Modifier menu
+    ui.horizontal(|ui| {
+        ui.label(RichText::new("Add Modifier").strong());
+        ui.menu_button("＋", |ui| {
+            let add = |doc: &mut Document, kind: ModifierKind| {
+                doc.checkpoint();
+                if let Some(o) = doc.scene.objects.get_mut(object_index) {
+                    o.modifiers.push(Modifier::new(kind));
+                }
+                doc.touch();
+            };
+            if ui.button("Subdivision Surface").clicked() {
+                add(doc, ModifierKind::default_subdivision());
+                ui.close_menu();
+            }
+            if ui.button("Array").clicked() {
+                add(doc, ModifierKind::default_array());
+                ui.close_menu();
+            }
+            if ui.button("Mirror").clicked() {
+                add(doc, ModifierKind::default_mirror());
+                ui.close_menu();
+            }
+            if ui.button("Solidify").clicked() {
+                add(doc, ModifierKind::default_solidify());
+                ui.close_menu();
+            }
+            if ui.button("Bevel").clicked() {
+                add(doc, ModifierKind::default_bevel());
+                ui.close_menu();
+            }
+            if ui.button("Boolean").clicked() {
+                add(doc, ModifierKind::default_boolean());
+                ui.close_menu();
+            }
+        });
+    });
+    ui.separator();
+
+    if doc.scene.objects[object_index].modifiers.is_empty() {
+        ui.weak("No modifiers. Use ＋ to add Subdivision, Array, Mirror, Solidify, Bevel or Boolean.");
+        return;
+    }
+
+    // Work on a local copy of the stack so we can reorder / delete safely.
+    let mut stack = doc.scene.objects[object_index].modifiers.clone();
+    let mut changed = false;
+    let mut remove_at: Option<usize> = None;
+    let mut move_up: Option<usize> = None;
+    let mut move_down: Option<usize> = None;
+
+    for mi in 0..stack.len() {
+        let title = stack[mi].kind.title().to_string();
+        let header = format!(
+            "{}  {}",
+            if stack[mi].enabled { "●" } else { "○" },
+            title
+        );
+        egui::CollapsingHeader::new(header)
+            .default_open(true)
+            .id_salt(format!("mod_{object_index}_{mi}"))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    let r = ui.checkbox(&mut stack[mi].enabled, "Enabled");
+                    if r.changed() {
+                        changed = true;
+                    }
+                    let r = ui.checkbox(&mut stack[mi].show_viewport, "Viewport");
+                    if r.changed() {
+                        changed = true;
+                    }
+                    let r = ui.checkbox(&mut stack[mi].show_render, "Render");
+                    if r.changed() {
+                        changed = true;
+                    }
+                    if ui.small_button("▲").on_hover_text("Move up").clicked() {
+                        move_up = Some(mi);
+                    }
+                    if ui.small_button("▼").on_hover_text("Move down").clicked() {
+                        move_down = Some(mi);
+                    }
+                    if ui.small_button("✕").on_hover_text("Remove").clicked() {
+                        remove_at = Some(mi);
+                    }
+                });
+
+                match &mut stack[mi].kind {
+                    ModifierKind::SubdivisionSurface {
+                        levels,
+                        render_levels,
+                    } => {
+                        let r = ui.add(egui::Slider::new(levels, 0..=6).text("Levels"));
+                        if r.changed() {
+                            changed = true;
+                        }
+                        let r = ui.add(egui::Slider::new(render_levels, 0..=6).text("Render"));
+                        if r.changed() {
+                            changed = true;
+                        }
+                    }
+                    ModifierKind::Array {
+                        count,
+                        offset,
+                        relative,
+                        merge,
+                        merge_distance,
+                    } => {
+                        let r = ui.add(egui::Slider::new(count, 1..=64).text("Count"));
+                        if r.changed() {
+                            changed = true;
+                        }
+                        ui.horizontal(|ui| {
+                            ui.label("Offset");
+                            for (c, label) in offset.iter_mut().zip(["X", "Y", "Z"]) {
+                                let r = ui.add(
+                                    egui::DragValue::new(c)
+                                        .speed(0.01)
+                                        .prefix(format!("{label} ")),
+                                );
+                                if r.changed() {
+                                    changed = true;
+                                }
+                            }
+                        });
+                        let r = ui.checkbox(relative, "Relative offset");
+                        if r.changed() {
+                            changed = true;
+                        }
+                        let r = ui.checkbox(merge, "Merge");
+                        if r.changed() {
+                            changed = true;
+                        }
+                        if *merge {
+                            let r = ui.add(
+                                egui::Slider::new(merge_distance, 0.0001..=0.5)
+                                    .logarithmic(true)
+                                    .text("Merge distance"),
+                            );
+                            if r.changed() {
+                                changed = true;
+                            }
+                        }
+                    }
+                    ModifierKind::Mirror {
+                        axis_x,
+                        axis_y,
+                        axis_z,
+                        merge,
+                        merge_threshold,
+                    } => {
+                        ui.horizontal(|ui| {
+                            let rx = ui.checkbox(axis_x, "X");
+                            let ry = ui.checkbox(axis_y, "Y");
+                            let rz = ui.checkbox(axis_z, "Z");
+                            if rx.changed() || ry.changed() || rz.changed() {
+                                changed = true;
+                            }
+                        });
+                        let r = ui.checkbox(merge, "Merge");
+                        if r.changed() {
+                            changed = true;
+                        }
+                        if *merge {
+                            let r = ui.add(
+                                egui::Slider::new(merge_threshold, 0.0001..=0.1)
+                                    .logarithmic(true)
+                                    .text("Merge threshold"),
+                            );
+                            if r.changed() {
+                                changed = true;
+                            }
+                        }
+                    }
+                    ModifierKind::Solidify {
+                        thickness,
+                        offset,
+                        even,
+                    } => {
+                        let r = ui.add(
+                            egui::Slider::new(thickness, -2.0..=2.0)
+                                .text("Thickness"),
+                        );
+                        if r.changed() {
+                            changed = true;
+                        }
+                        let r = ui.add(egui::Slider::new(offset, -1.0..=1.0).text("Offset"));
+                        if r.changed() {
+                            changed = true;
+                        }
+                        let r = ui.checkbox(even, "Even thickness");
+                        if r.changed() {
+                            changed = true;
+                        }
+                    }
+                    ModifierKind::Bevel {
+                        amount,
+                        segments,
+                        angle_limit,
+                    } => {
+                        let r = ui.add(egui::Slider::new(amount, 0.0..=1.0).text("Amount"));
+                        if r.changed() {
+                            changed = true;
+                        }
+                        let r = ui.add(egui::Slider::new(segments, 1..=8).text("Segments"));
+                        if r.changed() {
+                            changed = true;
+                        }
+                        let mut deg = angle_limit.to_degrees();
+                        let r = ui.add(egui::Slider::new(&mut deg, 0.0..=180.0).text("Angle limit °"));
+                        if r.changed() {
+                            *angle_limit = deg.to_radians();
+                            changed = true;
+                        }
+                    }
+                    ModifierKind::Boolean { operation, object } => {
+                        ui.horizontal(|ui| {
+                            ui.label("Operation");
+                            for op in [
+                                BooleanOperation::Difference,
+                                BooleanOperation::Union,
+                                BooleanOperation::Intersect,
+                            ] {
+                                if ui
+                                    .selectable_label(*operation == op, op.name())
+                                    .clicked()
+                                {
+                                    *operation = op;
+                                    changed = true;
+                                }
+                            }
+                        });
+                        // Operand object picker
+                        let current_name = object
+                            .and_then(|id| {
+                                doc.scene
+                                    .objects
+                                    .iter()
+                                    .find(|o| o.id == id)
+                                    .map(|o| o.name.clone())
+                            })
+                            .unwrap_or_else(|| "(none)".into());
+                        ui.horizontal(|ui| {
+                            ui.label("Object");
+                            ui.menu_button(current_name, |ui| {
+                                if ui.button("(none)").clicked() {
+                                    *object = None;
+                                    changed = true;
+                                    ui.close_menu();
+                                }
+                                let self_id = doc.scene.objects[object_index].id;
+                                for o in &doc.scene.objects {
+                                    if o.id == self_id || o.mesh.indices.is_empty() {
+                                        continue;
+                                    }
+                                    if ui.button(&o.name).clicked() {
+                                        *object = Some(o.id);
+                                        changed = true;
+                                        ui.close_menu();
+                                    }
+                                }
+                            });
+                        });
+                    }
+                }
+            });
+    }
+
+    if let Some(i) = remove_at {
+        stack.remove(i);
+        changed = true;
+    }
+    if let Some(i) = move_up {
+        if i > 0 {
+            stack.swap(i, i - 1);
+            changed = true;
+        }
+    }
+    if let Some(i) = move_down {
+        if i + 1 < stack.len() {
+            stack.swap(i, i + 1);
+            changed = true;
+        }
+    }
+
+    if changed {
+        doc.checkpoint();
+        doc.scene.objects[object_index].modifiers = stack;
+        doc.touch();
+    }
+}
+
 fn draw_material_props_summary(ui: &mut egui::Ui, doc: &mut Document, object_index: usize) {
     let Some(mi) = doc.scene.objects[object_index]
         .material
@@ -11696,6 +12057,7 @@ fn properties(ui: &mut egui::Ui, doc: &mut Document, st: &mut UiState, actions: 
             (PropertiesTab::Render, "📷", "Render"),
             (PropertiesTab::Output, "🖼", "Output"),
             (PropertiesTab::Material, "🎨", "Material"),
+            (PropertiesTab::Modifiers, "🔧", "Modifiers"),
             (PropertiesTab::Physics, "⚛", "Physics"),
             (PropertiesTab::Scene, "◉", "Scene"),
         ] {
@@ -11712,6 +12074,7 @@ fn properties(ui: &mut egui::Ui, doc: &mut Document, st: &mut UiState, actions: 
                 PropertiesTab::Render => "Render Properties",
                 PropertiesTab::Output => "Output Properties",
                 PropertiesTab::Material => "Material Properties",
+                PropertiesTab::Modifiers => "Modifier Properties",
                 PropertiesTab::Physics => "Physics Properties",
                 PropertiesTab::Scene => "Scene Properties",
             })
@@ -11760,6 +12123,12 @@ fn properties(ui: &mut egui::Ui, doc: &mut Document, st: &mut UiState, actions: 
 
     if st.properties_tab == PropertiesTab::Material {
         draw_material_props_summary(ui, doc, i);
+        return;
+    }
+    if st.properties_tab == PropertiesTab::Modifiers {
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            draw_modifiers_props(ui, doc, i);
+        });
         return;
     }
     egui::ScrollArea::vertical().show(ui, |ui| {
