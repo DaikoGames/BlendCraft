@@ -5,6 +5,11 @@ Please run:
     cargo test -p forge-core -p forge-render
     cargo build --release
 
+## Additional Edit Mode operators
+- **Subdivide**: subdivides selected triangles into four, caches shared edge midpoints to keep adjacent selected faces connected, and interpolates UV coordinates. Shortcut: `Ctrl+Shift+D`.
+- **Flip Normals**: reverses selected faces when Face Select has a selection, or the complete mesh otherwise. Shortcut: `N`.
+- Added core unit tests for triangle subdivision and face winding reversal.
+
 ## Fixes (this pass)
 - **Cloth bake freeze**: baking no longer runs the whole timeline on the UI thread.
   Object Physics → Cloth → **Bake** now uses a progressive `ClothBaker` (same pattern as

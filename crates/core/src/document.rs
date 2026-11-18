@@ -69,6 +69,8 @@ pub struct Document {
     pub uv_mode: bool,
     /// Texture Paint Mode.
     pub paint_mode: bool,
+    /// Original pixels captured when a texture enters Paint Mode; used by the eraser.
+    paint_base_textures: HashMap<usize, Vec<u8>>,
     /// Selected vertex indices for UV editing.
     pub uv_selection: std::collections::BTreeSet<u32>,
     rng: u32,
@@ -133,6 +135,7 @@ impl Document {
             sculpt_mode: false,
             uv_mode: false,
             paint_mode: false,
+            paint_base_textures: HashMap::new(),
             uv_selection: std::collections::BTreeSet::new(),
             rng: 0x9E37_79B9,
             undo: Vec::new(),
@@ -1279,6 +1282,19 @@ impl Document {
         self.selection.insert(id);
         self.active = Some(id);
         self.ensure_paint_texture()?;
+        // Capture the image as it existed when Paint Mode was entered. Erasing later
+        // restores the original image pixels, including images loaded by the user.
+        if let Some(texture_index) = self.scene.objects.iter()
+            .find(|o| o.id == id)
+            .and_then(|o| o.material)
+            .or(Some(0))
+            .and_then(|mi| self.scene.materials.get(mi))
+            .and_then(|m| m.base_color_tex)
+        {
+            if let Some(texture) = self.scene.textures.get(texture_index) {
+                self.paint_base_textures.entry(texture_index).or_insert_with(|| texture.rgba8.clone());
+            }
+        }
         self.paint_mode = true;
         Ok(())
     }
@@ -1381,6 +1397,28 @@ impl Document {
         radius_uv: f32,
         strength: f32,
     ) -> bool {
+        self.paint_stroke_uv_impl(uvs, color, radius_uv, strength, false)
+    }
+
+    /// Restore painted pixels to the neutral checkerboard used by a newly-created
+    /// paint atlas. This is a real erase operation, not painting a fixed gray color.
+    pub fn erase_stroke_uv(
+        &mut self,
+        uvs: &[glam::Vec2],
+        radius_uv: f32,
+        strength: f32,
+    ) -> bool {
+        self.paint_stroke_uv_impl(uvs, [0.0; 4], radius_uv, strength, true)
+    }
+
+    fn paint_stroke_uv_impl(
+        &mut self,
+        uvs: &[glam::Vec2],
+        color: [f32; 4],
+        radius_uv: f32,
+        strength: f32,
+        erase: bool,
+    ) -> bool {
         if uvs.is_empty() {
             return false;
         }
@@ -1412,6 +1450,8 @@ impl Document {
         if w < 1 || h < 1 || tex.rgba8.len() != (w as usize * h as usize * 4) {
             return false;
         }
+        let base_pixels = self.paint_base_textures.entry(tex_idx)
+            .or_insert_with(|| tex.rgba8.clone()).clone();
 
         let radius_uv = radius_uv.clamp(0.0001, 1.0);
         let radius_px = (radius_uv * w.min(h) as f32).max(1.0);
@@ -1445,21 +1485,22 @@ impl Document {
                     }
                     let t = (1.0 - d / radius_px).clamp(0.0, 1.0);
                     let falloff = t * t * (3.0 - 2.0 * t);
-                    let alpha = (falloff * strength * (src[3] as f32 / 255.0)).clamp(0.0, 1.0);
-                    if alpha <= 0.0 {
-                        continue;
-                    }
+                    let opacity = if erase { 1.0 } else { src[3] as f32 / 255.0 };
+                    let alpha = (falloff * strength * opacity).clamp(0.0, 1.0);
+                    if alpha <= 0.0 { continue; }
                     let i = ((y * w + x) * 4) as usize;
                     for channel in 0..3 {
+                        let target = if erase { base_pixels.get(i + channel).copied().unwrap_or(tex.rgba8[i + channel]) } else { src[channel] };
                         let dst = tex.rgba8[i + channel] as f32;
-                        tex.rgba8[i + channel] = (dst * (1.0 - alpha) + src[channel] as f32 * alpha)
-                            .round()
-                            .clamp(0.0, 255.0)
-                            as u8;
+                        tex.rgba8[i + channel] = (dst * (1.0 - alpha) + target as f32 * alpha)
+                            .round().clamp(0.0, 255.0) as u8;
                     }
-                    tex.rgba8[i + 3] = (tex.rgba8[i + 3] as f32 * (1.0 - alpha) + 255.0 * alpha)
-                        .round()
-                        .clamp(0.0, 255.0) as u8;
+                    if erase {
+                        tex.rgba8[i + 3] = base_pixels.get(i + 3).copied().unwrap_or(255);
+                    } else {
+                        tex.rgba8[i + 3] = (tex.rgba8[i + 3] as f32 * (1.0 - alpha) + 255.0 * alpha)
+                            .round().clamp(0.0, 255.0) as u8;
+                    }
                     changed = true;
                 }
             }
@@ -1947,8 +1988,22 @@ impl Document {
         }
         match pick {
             crate::edit::EditPick::Vertex(i) => {
-                if extend && e.selection.verts.contains(&i) {
-                    e.selection.verts.remove(&i);
+                if extend {
+                    if let Some(position) = e.mesh.vertices.get(i as usize).map(|v| v.position) {
+                        let eps2 = 1.0e-10_f32;
+                        let coincident: Vec<u32> = e.mesh.vertices.iter().enumerate()
+                            .filter_map(|(index, vertex)| {
+                                let dx = vertex.position[0] - position[0];
+                                let dy = vertex.position[1] - position[1];
+                                let dz = vertex.position[2] - position[2];
+                                (dx*dx + dy*dy + dz*dz <= eps2).then_some(index as u32)
+                            }).collect();
+                        if e.selection.verts.contains(&i) {
+                            for index in coincident { e.selection.verts.remove(&index); }
+                        } else {
+                            e.selection.verts.extend(coincident);
+                        }
+                    }
                 } else {
                     e.selection.verts.insert(i);
                     e.expand_vert_selection_by_position(1e-5);
@@ -1992,6 +2047,20 @@ impl Document {
         self.sync_edit_mesh();
     }
 
+    pub fn edit_subdivide(&mut self) {
+        if self.edit.is_none() { return; }
+        self.checkpoint();
+        if let Some(e) = self.edit.as_mut() { e.subdivide_selected(); }
+        self.sync_edit_mesh();
+    }
+
+    pub fn edit_flip_normals(&mut self) {
+        if self.edit.is_none() { return; }
+        self.checkpoint();
+        if let Some(e) = self.edit.as_mut() { e.flip_normals(); }
+        self.sync_edit_mesh();
+    }
+
     pub fn edit_merge_verts(&mut self) {
         if self.edit.is_none() {
             return;
@@ -2000,6 +2069,13 @@ impl Document {
         if let Some(e) = self.edit.as_mut() {
             e.merge_verts_at_center();
         }
+        self.sync_edit_mesh();
+    }
+
+    pub fn edit_weld_verts(&mut self, distance: f32) {
+        if self.edit.is_none() { return; }
+        self.checkpoint();
+        if let Some(e) = self.edit.as_mut() { e.weld_coincident(distance); }
         self.sync_edit_mesh();
     }
 

@@ -50,6 +50,9 @@ pub enum Action {
     Shear,
     RipRegion,
     MergeVerts,
+    WeldVerts,
+    Subdivide,
+    FlipNormals,
     Rename,
     MakeSingleUser,
     // select
@@ -304,7 +307,8 @@ pub fn bindings() -> Vec<Binding> {
     b("Edit", "Rip Region", "", K::KeyV, A::RipRegion);
     b("Edit", "Poly Build", "", K::KeyP, A::PolyBuild);
     b("Edit", "Spin", "a", K::KeyE, A::Spin);
-    b("Edit", "Merge verts", "", K::KeyM, A::MergeVerts);
+    b("Edit", "Merge verts at center", "", K::KeyM, A::MergeVerts);
+    b("Edit", "Merge by Distance (selected verts)", "shift", K::KeyM, A::WeldVerts);
     b("Edit", "Rename active object", "", K::F2, A::Rename);
 
     b("Select", "Select all", "", K::KeyA, A::SelectAll);
@@ -403,6 +407,8 @@ pub fn bindings() -> Vec<Binding> {
     b("UV", "Cube Projection", "s", K::KeyU, A::UvUnwrapCube);
     b("UV", "Pack Islands", "p", K::KeyP, A::UvPack);
     b("UV", "Reset UVs", "a", K::KeyR, A::UvReset);
+    b("Edit", "Subdivide selected geometry", "cs", K::KeyD, A::Subdivide);
+    b("Edit", "Flip selected face normals (or all faces)", "", K::KeyN, A::FlipNormals);
     b("Mode", "Vertex select", "", K::Digit1, A::EditDomainVertex);
     b("Mode", "Edge select", "", K::Digit2, A::EditDomainEdge);
     b("Mode", "Face select", "", K::Digit3, A::EditDomainFace);

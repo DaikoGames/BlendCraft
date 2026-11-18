@@ -492,6 +492,88 @@ impl EditSession {
         self.mesh.compute_normals();
     }
 
+    /// Subdivide selected triangles into four triangles. Shared edge midpoints are
+    /// cached so adjacent selected faces remain welded. UVs are interpolated.
+    pub fn subdivide_selected(&mut self) {
+        if self.mesh.indices.len() < 3 { return; }
+        let mut midpoint_cache: HashMap<EdgeKey, u32> = HashMap::new();
+        let mut new_indices = Vec::with_capacity(self.mesh.indices.len() * 4);
+        let selected_verts = self.selected_vert_indices();
+        let selected_faces = self.selection.faces.clone();
+        let domain = self.selection.domain;
+        let mut changed = false;
+        // Keep the source topology separate: midpoint creation mutates vertices,
+        // while this pass must continue reading the original triangle indices.
+        let source_indices = self.mesh.indices.clone();
+        for (face_i, tri) in source_indices.chunks_exact(3).enumerate() {
+            let [a, b, c] = [tri[0], tri[1], tri[2]];
+            let selected = match domain {
+                EditDomain::Face => selected_faces.contains(&(face_i as u32)),
+                EditDomain::Vertex => selected_verts.contains(&a) && selected_verts.contains(&b) && selected_verts.contains(&c),
+                EditDomain::Edge => {
+                    let e0 = edge_key(a,b); let e1 = edge_key(b,c); let e2 = edge_key(c,a);
+                    self.selection.edges.contains(&e0) || self.selection.edges.contains(&e1) || self.selection.edges.contains(&e2)
+                }
+            };
+            if !selected { new_indices.extend_from_slice(tri); continue; }
+            changed = true;
+            let midpoint = |mesh: &mut MeshData, cache: &mut HashMap<EdgeKey,u32>, x:u32, y:u32| -> u32 {
+                let key = edge_key(x,y);
+                if let Some(&idx) = cache.get(&key) { return idx; }
+                let va = mesh.vertices[x as usize]; let vb = mesh.vertices[y as usize];
+                let mut v = va;
+                for k in 0..3 { v.position[k] = (va.position[k] + vb.position[k]) * 0.5; v.normal[k] = (va.normal[k] + vb.normal[k]) * 0.5; }
+                for k in 0..2 { v.uv[k] = (va.uv[k] + vb.uv[k]) * 0.5; }
+                let idx = mesh.vertices.len() as u32; mesh.vertices.push(v); cache.insert(key,idx); idx
+            };
+            let ab = midpoint(&mut self.mesh, &mut midpoint_cache, a,b);
+            let bc = midpoint(&mut self.mesh, &mut midpoint_cache, b,c);
+            let ca = midpoint(&mut self.mesh, &mut midpoint_cache, c,a);
+            new_indices.extend_from_slice(&[a,ab,ca, ab,b,bc, ca,bc,c, ab,bc,ca]);
+        }
+        if changed {
+            self.mesh.indices = new_indices;
+            self.mesh.compute_normals();
+            self.selection.clear();
+            self.selection.domain = EditDomain::Face;
+        }
+    }
+
+    /// Reverse winding for faces touched by the current selection. With no selection,
+    /// all faces are flipped. Vertex and edge selections are expanded to their incident faces.
+    pub fn flip_normals(&mut self) {
+        let mut selected_faces = BTreeSet::new();
+        match self.selection.domain {
+            EditDomain::Face => selected_faces.extend(self.selection.faces.iter().copied()),
+            EditDomain::Vertex => {
+                if !self.selection.verts.is_empty() {
+                    for (fi, tri) in self.mesh.indices.chunks_exact(3).enumerate() {
+                        if tri.iter().any(|v| self.selection.verts.contains(v)) {
+                            selected_faces.insert(fi as u32);
+                        }
+                    }
+                }
+            }
+            EditDomain::Edge => {
+                if !self.selection.edges.is_empty() {
+                    for (fi, tri) in self.mesh.indices.chunks_exact(3).enumerate() {
+                        let edges = [edge_key(tri[0], tri[1]), edge_key(tri[1], tri[2]), edge_key(tri[2], tri[0])];
+                        if edges.iter().any(|edge| self.selection.edges.contains(edge)) {
+                            selected_faces.insert(fi as u32);
+                        }
+                    }
+                }
+            }
+        }
+        let use_selection = !self.selection.is_empty();
+        for (i, tri) in self.mesh.indices.chunks_exact_mut(3).enumerate() {
+            if !use_selection || selected_faces.contains(&(i as u32)) {
+                tri.swap(1, 2);
+            }
+        }
+        self.mesh.compute_normals();
+    }
+
     /// Merge selected verts to their median point.
     pub fn merge_verts_at_center(&mut self) {
         let verts: Vec<u32> = self.selected_vert_indices().into_iter().collect();
@@ -526,38 +608,68 @@ impl EditSession {
         self.mesh.compute_normals();
     }
 
-    /// Merge vertices that share the same position (within epsilon).
-    /// Fixes cubes built with per-face split verts so corners are single points.
+    /// Merge selected vertices that are within `eps` of one another.
+    /// Unselected vertices are kept distinct. A spatial hash checks neighboring
+    /// cells and an exact distance test avoids quantization-boundary errors.
     pub fn weld_coincident(&mut self, eps: f32) {
-        if self.mesh.vertices.is_empty() {
+        if self.mesh.vertices.is_empty() || self.selection.is_empty() || !eps.is_finite() {
             return;
         }
-        let quant = |p: [f32; 3]| -> (i32, i32, i32) {
-            let s = 1.0 / eps.max(1e-8);
-            (
-                (p[0] * s).round() as i32,
-                (p[1] * s).round() as i32,
-                (p[2] * s).round() as i32,
-            )
+        let selected: BTreeSet<u32> = self.selected_vert_indices();
+        if selected.len() < 2 { return; }
+        let cell_size = eps.abs().max(1.0e-8);
+        let eps2 = cell_size * cell_size;
+        let cell_of = |p: [f32; 3]| -> Option<(i32, i32, i32)> {
+            if !p.iter().all(|v| v.is_finite()) { return None; }
+            let cell = |value: f32| (value / cell_size).floor().clamp(-2_147_483_646.0, 2_147_483_646.0) as i32;
+            Some((cell(p[0]), cell(p[1]), cell(p[2])))
         };
-        let mut map: std::collections::HashMap<(i32, i32, i32), u32> =
-            std::collections::HashMap::new();
-        let mut new_verts: Vec<crate::mesh::Vertex> = Vec::new();
+        let mut buckets: HashMap<(i32, i32, i32), Vec<u32>> = HashMap::new();
+        let mut new_verts: Vec<crate::mesh::Vertex> = Vec::with_capacity(self.mesh.vertices.len());
         let mut remap = vec![0u32; self.mesh.vertices.len()];
+        let mut welded = false;
         for (i, v) in self.mesh.vertices.iter().enumerate() {
-            let k = quant(v.position);
-            if let Some(&ni) = map.get(&k) {
-                remap[i] = ni;
-            } else {
+            if !selected.contains(&(i as u32)) {
                 let ni = new_verts.len() as u32;
-                map.insert(k, ni);
                 remap[i] = ni;
                 new_verts.push(v.clone());
+                continue;
+            }
+            let Some(cell) = cell_of(v.position) else {
+                let ni = new_verts.len() as u32;
+                remap[i] = ni;
+                new_verts.push(v.clone());
+                continue;
+            };
+            let point = Vec3::from(v.position);
+            let mut match_index = None;
+            'search: for dx in -1..=1 {
+                for dy in -1..=1 {
+                    for dz in -1..=1 {
+                        let key = (cell.0 + dx, cell.1 + dy, cell.2 + dz);
+                        if let Some(candidates) = buckets.get(&key) {
+                            for &candidate in candidates {
+                                let other = Vec3::from(new_verts[candidate as usize].position);
+                                if point.distance_squared(other) <= eps2 {
+                                    match_index = Some(candidate);
+                                    break 'search;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if let Some(ni) = match_index {
+                remap[i] = ni;
+                welded = true;
+            } else {
+                let ni = new_verts.len() as u32;
+                remap[i] = ni;
+                new_verts.push(v.clone());
+                buckets.entry(cell).or_default().push(ni);
             }
         }
-        if new_verts.len() == self.mesh.vertices.len() {
-            return; // nothing to weld
-        }
+        if !welded { return; }
         let mut new_idx = Vec::with_capacity(self.mesh.indices.len());
         for tri in self.mesh.indices.chunks_exact(3) {
             let a = remap[tri[0] as usize];
@@ -747,13 +859,13 @@ impl EditSession {
             return;
         }
         // Build neighbor map
-        let mut neighbors: HashMap<u32, Vec<u32>> = HashMap::new();
+        let mut neighbors: HashMap<u32, BTreeSet<u32>> = HashMap::new();
         for tri in self.mesh.indices.chunks_exact(3) {
             for i in 0..3 {
                 let a = tri[i];
                 let b = tri[(i + 1) % 3];
-                neighbors.entry(a).or_default().push(b);
-                neighbors.entry(b).or_default().push(a);
+                neighbors.entry(a).or_default().insert(b);
+                neighbors.entry(b).or_default().insert(a);
             }
         }
         let mut new_pos: HashMap<u32, Vec3> = HashMap::new();
@@ -783,7 +895,7 @@ impl EditSession {
     /// Move selected verts along their normals (shrink/fatten).
     pub fn shrink_fatten(&mut self, amount: f32) {
         let verts: BTreeSet<u32> = self.selected_vert_indices();
-        if verts.is_empty() {
+        if verts.is_empty() || !amount.is_finite() || amount.abs() < f32::EPSILON {
             return;
         }
         let mut normals = vec![Vec3::ZERO; self.mesh.vertices.len()];
@@ -1358,4 +1470,75 @@ pub fn world_positions(mesh: &MeshData, world: Mat4) -> Vec<Vec3> {
         .iter()
         .map(|v| world.transform_point3(Vec3::from(v.position)))
         .collect()
+}
+
+#[cfg(test)]
+mod operator_tests {
+    use super::*;
+    use crate::mesh::Vertex;
+
+    fn triangle_session() -> EditSession {
+        let vertex = |position: [f32; 3], uv: [f32; 2]| Vertex {
+            position,
+            normal: [0.0, 0.0, 1.0],
+            uv,
+        };
+        let mesh = MeshData {
+            name: "triangle".into(),
+            vertices: vec![
+                vertex([0.0, 0.0, 0.0], [0.0, 0.0]),
+                vertex([1.0, 0.0, 0.0], [1.0, 0.0]),
+                vertex([0.0, 1.0, 0.0], [0.0, 1.0]),
+            ],
+            indices: vec![0, 1, 2],
+            groups: Vec::new(),
+        };
+        let mut session = EditSession::new(1, mesh);
+        session.selection.domain = EditDomain::Face;
+        session.selection.faces.insert(0);
+        session
+    }
+
+    #[test]
+    fn subdivide_selected_triangle_creates_four_faces() {
+        let mut session = triangle_session();
+        session.subdivide_selected();
+        assert_eq!(session.mesh.indices.len(), 12);
+        assert_eq!(session.mesh.vertices.len(), 6);
+        assert_eq!(session.mesh.indices.len() / 3, 4);
+    }
+
+    #[test]
+    fn flip_normals_reverses_triangle_winding() {
+        let mut session = triangle_session();
+        session.flip_normals();
+        assert_eq!(session.mesh.indices, vec![0, 2, 1]);
+    }
+
+    #[test]
+    fn flip_normals_from_vertex_selection_only_flips_incident_faces() {
+        let mut session = triangle_session();
+        session.selection.clear();
+        session.selection.domain = EditDomain::Vertex;
+        session.selection.verts.insert(0);
+        session.flip_normals();
+        assert_eq!(session.mesh.indices, vec![0, 2, 1]);
+    }
+
+    #[test]
+    fn weld_coincident_only_changes_selected_vertices() {
+        let vertex = |position: [f32; 3]| Vertex { position, normal: [0.0, 0.0, 1.0], uv: [0.0, 0.0] };
+        let mesh = MeshData {
+            name: "weld test".into(),
+            vertices: vec![vertex([0.0,0.0,0.0]), vertex([1.0,0.0,0.0]), vertex([0.0,0.0,0.0]), vertex([0.0,1.0,0.0])],
+            indices: vec![0,1,3, 2,1,3],
+            groups: Vec::new(),
+        };
+        let mut session = EditSession::new(1, mesh);
+        session.selection.domain = EditDomain::Vertex;
+        session.selection.verts.extend([0, 2]);
+        session.weld_coincident(1.0e-5);
+        assert_eq!(session.mesh.vertices.len(), 3);
+        assert_eq!(session.mesh.indices, vec![0,1,2, 0,1,2]);
+    }
 }

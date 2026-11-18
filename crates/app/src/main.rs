@@ -307,6 +307,31 @@ fn draw_edit_gizmo_ui(
     let _ = viewport;
 }
 
+fn save_render_image(path: &std::path::Path, rgba: &[u8], width: u32, height: u32, format: u8) -> Result<(), String> {
+    let expected = (width as usize).checked_mul(height as usize).and_then(|n| n.checked_mul(4))
+        .ok_or_else(|| "Render dimensions overflow".to_string())?;
+    if rgba.len() < expected { return Err("Render pixel buffer is incomplete".into()); }
+    match format {
+        1 => {
+            let mut rgb = Vec::with_capacity(width as usize * height as usize * 3);
+            for px in rgba[..expected].chunks_exact(4) { rgb.extend_from_slice(&px[..3]); }
+            image::save_buffer_with_format(path, &rgb, width, height, image::ColorType::Rgb8, image::ImageFormat::Jpeg)
+                .map_err(|e| e.to_string())
+        }
+        2 => {
+            let pixels: Vec<f32> = rgba[..expected].chunks_exact(4)
+                .flat_map(|px| px.iter().map(|v| *v as f32 / 255.0))
+                .collect();
+            let image = image::ImageBuffer::<image::Rgba<f32>, Vec<f32>>::from_raw(width, height, pixels)
+                .ok_or_else(|| "Could not construct OpenEXR image buffer".to_string())?;
+            image::DynamicImage::ImageRgba32F(image).save_with_format(path, image::ImageFormat::OpenExr)
+                .map_err(|e| e.to_string())
+        }
+        _ => image::save_buffer_with_format(path, &rgba[..expected], width, height, image::ColorType::Rgba8, image::ImageFormat::Png)
+            .map_err(|e| e.to_string()),
+    }
+}
+
 impl App {
     fn new(initial: Option<PathBuf>) -> Self {
         Self {
@@ -629,14 +654,11 @@ impl App {
 
     fn paint_sample(&mut self) {
         if let Some(uv) = self.paint_sample_at(self.cursor) {
-            let color = if self.ts.tool == Tool::PaintErase {
-                [0.78, 0.78, 0.78, 1.0]
+            if self.ts.tool == Tool::PaintErase {
+                let _ = self.doc.erase_stroke_uv(&[uv], self.ts.paint_radius, self.ts.paint_strength);
             } else {
-                self.ts.paint_color
-            };
-            let _ = self
-                .doc
-                .paint_at_uv(uv, color, self.ts.paint_radius, self.ts.paint_strength);
+                let _ = self.doc.paint_at_uv(uv, self.ts.paint_color, self.ts.paint_radius, self.ts.paint_strength);
+            }
         }
     }
 
@@ -2851,10 +2873,34 @@ impl App {
                     self.status("Rip: Tab into Edit Mode first");
                 }
             }
+            A::Subdivide => {
+                if self.doc.in_edit_mode() {
+                    let empty = self.doc.edit.as_ref().map(|e| e.selection.is_empty()).unwrap_or(true);
+                    if empty { self.status("Subdivide: select vertices, edges, or faces first"); }
+                    else { self.doc.edit_subdivide(); self.status("Subdivided selected geometry"); }
+                } else { self.status("Subdivide: enter Edit Mode first"); }
+            }
+            A::FlipNormals => {
+                if self.doc.in_edit_mode() { self.doc.edit_flip_normals(); self.status("Flipped face normals"); }
+                else { self.status("Flip Normals: enter Edit Mode first"); }
+            }
             A::MergeVerts => {
                 if self.doc.in_edit_mode() {
                     self.doc.edit_merge_verts();
                     self.status("Merged vertices");
+                }
+            }
+            A::WeldVerts => {
+                if self.doc.in_edit_mode() {
+                    let selected = self.doc.edit.as_ref().map(|e| e.selected_vert_indices().len()).unwrap_or(0);
+                    if selected < 2 {
+                        self.status("Merge by Distance: select at least two vertices first");
+                    } else {
+                        self.doc.edit_weld_verts(1.0e-5);
+                        self.status("Merged coincident selected vertices");
+                    }
+                } else {
+                    self.status("Merge by Distance: enter Edit Mode first");
                 }
             }
             A::Rename => {
@@ -3785,16 +3831,17 @@ impl App {
                 self.status("Renderer not ready");
                 return;
             }
-            let Some(mut path) = rfd::FileDialog::new()
-                .add_filter("PNG image", &["png"])
-                .set_file_name("render.png")
-                .save_file()
-            else {
-                return;
+            let (format_name, extension, dialog_filter) = match self.ui.render_format {
+                1 => ("JPEG", "jpg", "JPEG image"),
+                2 => ("OpenEXR", "exr", "OpenEXR image"),
+                _ => ("PNG", "png", "PNG image"),
             };
-            if path.extension().is_none() {
-                path.set_extension("png");
-            }
+            let Some(mut path) = rfd::FileDialog::new()
+                .add_filter(dialog_filter, &[extension])
+                .set_file_name(&format!("render.{extension}"))
+                .save_file()
+            else { return; };
+            path.set_extension(extension);
             let (w, h) = self.render_resolution();
             // Ensure objects sit on the current timeline frame.
             self.apply_animation_frame();
@@ -3875,14 +3922,11 @@ impl App {
                     self.ui.compositor_output_rgba.clear();
                     self.ui.compositor_output_texture = None;
                     self.ui.compositor_eval_error = false;
-                    match image::save_buffer(&path, &rgba, w, h, image::ColorType::Rgba8) {
+                    match save_render_image(&path, &rgba, w, h, self.ui.render_format) {
                         Ok(()) => {
                             let msg = format!(
-                                "Render finished.\n\nSaved to:\n{}\n\n{} × {} · {} samples",
-                                path.display(),
-                                w,
-                                h,
-                                settings.cycles_samples.max(1)
+                                "Render finished.\n\nSaved to:\n{}\n\n{} × {} · {} samples · {format_name}",
+                                path.display(), w, h, settings.cycles_samples.max(1)
                             );
                             self.status(format!("Saved render to {}", path.display()));
                             self.ui.render_done_message = Some(msg);
@@ -4695,17 +4739,11 @@ impl App {
                 }
             }
             if !uvs.is_empty() {
-                let color = if self.ts.tool == Tool::PaintErase {
-                    [0.78, 0.78, 0.78, 1.0]
+                if self.ts.tool == Tool::PaintErase {
+                    let _ = self.doc.erase_stroke_uv(&uvs, self.ts.paint_radius, self.ts.paint_strength);
                 } else {
-                    self.ts.paint_color
-                };
-                let _ = self.doc.paint_stroke_uv(
-                    &uvs,
-                    color,
-                    self.ts.paint_radius,
-                    self.ts.paint_strength,
-                );
+                    let _ = self.doc.paint_stroke_uv(&uvs, self.ts.paint_color, self.ts.paint_radius, self.ts.paint_strength);
+                }
             }
             self.paint_last_cursor = Some((x, y));
             return;

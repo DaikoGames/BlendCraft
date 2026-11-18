@@ -1,307 +1,178 @@
 # BlendCraft
-This project was made with the Help of Grok and Claude
-BlendCraft is an open-source clone of Blender, written from scratch in Rust.
-It is an independent project: it contains no Blender source code or artwork, and it is
-not affiliated with or endorsed by the Blender Foundation. "Blender" is a trademark of
-the Blender Foundation.
 
-BlendCraft is early and incomplete. If you want the real, mature 3D suite,
-please visit and support the original at https://www.blender.org.
+BlendCraft is an independent, local-first 3D creation application written in Rust. It is inspired by workflows found in Blender, but it is **not Blender**, does not contain Blender source code or artwork, and is not affiliated with or endorsed by the Blender Foundation. “Blender” is a trademark of the Blender Foundation.
 
+BlendCraft is an early-stage project. Features described below are BlendCraft implementations and should not be assumed to have full Blender compatibility or parity. The project is designed to perform scene editing, rendering, painting, and simulation on the user's computer; its core workflows do not require sending scene data to a remote service.
 
-Rust 3D suite for game assets (formerly Forge3D).
+## Project status
 
-- Step 1: workspace, viewport, glTF viewer
-- Step 2: PBR materials/textures, HDRI lighting, view modes
-- Step 3: egui UI (menu bar, outliner, properties), parametric primitives, selection,
-  transforms, materials, undo/redo, project save/load (.forge), import glTF/GLB/OBJ, export GLB/OBJ
-- Step 7+: Blender-like defaults (Cube + Sun + Camera), auto transform gizmo, improved outliner parenting,
-  sky/IBL off by default, branding update
+This README is the project progress record. A feature is marked **Finished** only when the implementation exists in the project. **Partially finished** means that a usable foundation exists but important behavior or edge cases are still missing. **Not finished** means it is not implemented or is only a placeholder.
 
-## Run
-```
+### Stage 1 — quick improvements
+
+| Feature | Status | Current implementation / remaining work |
+|---|---|---|
+| Basic Edit Mode selection | **Finished** | Vertex, edge, and face selection; click selection; Shift-click toggling; deselection; selection-domain switching; selected components can be transformed. |
+| Flip Normals | **Finished** | Flips all faces when nothing is selected, or faces touched by the current vertex, edge, or face selection. |
+| Merge at Center | **Finished** | Merges selected vertices to their median/center point and removes degenerate triangles. |
+| Merge by Distance / Weld | **Finished** | `Shift+M` welds coincident selected vertices only; unselected vertices are left alone. |
+| Smooth Vertices | **Finished** | Selected vertices use a one-pass Laplacian smooth with unique adjacent neighbors. Advanced iterative and volume-preserving smoothing are future enhancements. |
+| Shrink/Fatten | **Finished** | Moves selected vertices along their averaged mesh normals; available through the toolbar/tool drag and `Alt+S`. |
+| Texture Paint Erase | **Finished** | Eraser strokes restore the original texture pixels captured on entering Paint Mode, including user-loaded images. |
+| Render output format | **Finished** | Render Image supports PNG, JPEG, and OpenEXR output; the selected format controls the save dialog filter and file extension. OpenEXR is written from the available 8-bit render buffer, so it does not add high-dynamic-range render data. |
+| Fix Stage 1 Edit Mode operator issues | **Finished** | Selection-sensitive normal flipping, selected-only welding, duplicate-neighbor handling in smoothing, and coincident-vertex selection toggling have been corrected. Other topology operators remain simplified and are tracked in later stages. |
+
+**Stage 1 implementation is complete.** The source-level changes are in place. Build and runtime verification is still pending in this environment because the Rust toolchain is not installed here. More advanced smoothing controls and topology-safe modeling remain later-stage work, not unfinished Stage 1 requirements.
+
+### Stage 2 — painting and attribute foundations
+
+| Feature | Status |
+|---|---|
+| Vertex Paint mode and vertex-color attributes | **Not finished** |
+| Vertex Paint brush tools | **Not finished** |
+| Editable vertex groups | **Not finished** |
+| Weight Paint mode and weight visualization | **Not finished** |
+| Weight normalization and practical weight editing | **Not finished** |
+| Expanded Texture Paint brushes and image workflow | **Partially finished** — basic draw/erase painting exists; the broader brush set and source-image-safe erasing remain incomplete. |
+
+### Stage 3 — intermediate modeling and animation tools
+
+| Feature | Status |
+|---|---|
+| UV editing, projections, and basic island packing | **Partially finished** |
+| UV seams, pinning, and advanced unwrap tools | **Not finished** |
+| Sculpt brushes | **Partially finished** — a collection of basic brushes exists; masks, face sets, remeshing, and advanced brush behavior are incomplete. |
+| Shader node editor | **Partially finished** — node editing and a supported real-time shader subset exist; unsupported nodes use limited fallback behavior. |
+| Geometry Nodes | **Partially finished** — a small procedural graph evaluator exists, not a complete Blender-compatible system. |
+| Armature Pose Mode and toolbar | **Partially finished** — bones and basic pose transforms exist; advanced rigging and constraints are incomplete. |
+| Animation workspace / Dope Sheet | **Partially finished** — basic transform keyframes and timeline editing exist; Graph Editor, NLA, and drivers are not implemented. |
+
+### Stage 4 — advanced modeling and rigging
+
+| Feature | Status |
+|---|---|
+| Proper vertex, edge, and face extrusion | **Partially finished** — current operations are simplified and do not provide full polygon-mesh behavior. |
+| Inset, Bevel, Loop Cut, Edge Slide, Spin | **Partially finished** — basic approximations exist; robust topology-aware behavior remains. |
+| Subdivision surfaces | **Partially finished** — basic midpoint subdivision exists; production subdivision surfaces are not implemented. |
+| Boolean operations | **Partially finished** — current implementation is simplified and is not robust general-purpose CSG. |
+| Advanced UV unwrapping | **Not finished** |
+| Armature constraints and advanced rigging | **Not finished** |
+| Graph Editor and advanced animation tools | **Not finished** |
+| Full compositor workflow | **Partially finished** |
+
+### Stage 5 — core architecture and parity work
+
+| Feature | Status |
+|---|---|
+| Robust polygon topology with shared vertices, edges, faces, and n-gons | **Not finished** — the current mesh representation is triangle-based. |
+| Topology-safe editing and attribute preservation | **Not finished** |
+| Advanced modifiers and geometry evaluation | **Partially finished** |
+| Expanded Geometry Nodes | **Partially finished** |
+| Advanced sculpting and remeshing | **Not finished** |
+| Broader rendering, material, and animation compatibility | **Partially finished** |
+| Simulation and workflow parity with Blender | **Partially finished** |
+
+## Build and run
+
+A Rust toolchain compatible with the workspace's declared Rust version is required.
+
+```sh
 cargo run --release -p forge-app
 cargo run --release -p forge-app -- model.glb
 cargo test -p forge-core
 ```
 
-## Workflow
-1. On start you get a default Cube, Sun Light and Camera (Blender-style).
-2. The Move gizmo (arrows) is active by default so selected objects show transform handles immediately.
-3. Add more objects via Add > Mesh / Light / Camera / Empty. Tweak parameters, transform and material in the Properties panel.
-4. Combine objects to build a model. Click objects in the viewport to select them. Right-click in the Outliner for Rename / Delete / Parenting / etc.
-5. File > Save (.forge) to keep the project, File > Export > glTF Binary to use it in Unity/Godot.
+The desktop application binary is named `forge3d`. The workspace includes separate crates for the application, core scene/editing logic, rendering, file I/O, and video output.
 
-## Shader graphs
-The renderer compiles supported connected graphs into a WGSL fragment shader and evaluates them
-per rendered surface fragment; compiled pipelines are cached, and parameter changes update a
-uniform buffer instead of recompiling. The current GPU subset includes Value, RGB, texture
-coordinates, Mapping, Noise and White Noise (1D-4D), Voronoi, Brick, Checker, Gradient, Magic,
-Gabor, Wave, Math, Color Ramp, Mix, Combine/Separate XYZ and Color, Principled BSDF, Emission, and
-Background. Graphs using other nodes continue through the asynchronous CPU UV-bake path, and the
-renderer logs which node prevented real-time compilation. In the real-time path, unconnected
-texture vector inputs use per-fragment object-space positions, so meshes without UV maps still show
-procedural patterns; explicit coordinate links take precedence. The CPU bake fallback still relies
-on UVs. Use **Bake** when an image texture is needed for export.
+## Main workflows currently implemented
 
-Color Ramp supports up to 32 stops, Blender's RGB/HSV/HSL color modes, hue direction, and
-Linear/Ease/B-Spline/Cardinal/Constant interpolation. Stop handles can be selected and dragged;
-position, alpha, color, and stop count are editable. Ramps using HSV/HSL or more than four stops use
-the CPU bake path to stay within the real-time uniform-buffer limit. Shader nodes can be moved
-by dragging their body or title and resized from their edges; their layout is saved with the material.
-Drag empty canvas to pan, or use middle mouse anywhere in the canvas. Drag an output socket to an
-input socket to connect them; right-click a visible wire to remove it. Socket clicks can also be
-used to select the two ends of a connection.
+### Scene and object editing
 
-Wave exposes Bands/Rings, direction, profile, and distortion detail controls; Brick exposes
-offset/frequency and squash/frequency settings; Magic exposes its iteration depth. White Noise
-matches Blender's 1D-4D dimension choices and has no Scale or Detail input: use a Mapping node to
-change its feature size.
+- Blender-style startup scene with a Cube, Sun Light, and Camera.
+- Add mesh primitives, cameras, lights, empties, and image planes.
+- Object selection, transforms, parenting, undo/redo, and `.forge` project save/load.
+- Edit Mode with vertex, edge, and face selection; component transforms; delete; and a growing set of mesh operators.
+- Non-destructive modifier stack with basic Subdivision, Array, Mirror, Solidify, Bevel, and Boolean implementations.
 
-This is an EEVEE-style real-time implementation, not exact Blender EEVEE parity. Procedural
-functions, texture mode details, and lighting are BlendCraft implementations. Image Texture, Bump,
-Normal Map, other shader closures, Cycles-only behavior, and some coordinate semantics still use
-the baked fallback or are unsupported. Blender's EEVEE and Cycles are different rendering engines,
-so a single mode cannot match both. Run `cargo run --release -p forge-app`, open the Shading
-workspace, and try the **Noise Demo** (Noise → Color Ramp → Principled) to see the live GPU path.
-See the [Blender Shader Nodes manual](https://docs.blender.org/manual/en/latest/render/shader_nodes/index.html)
-for Blender's reference behavior.
+The mesh data and most Edit Mode operators are triangle-based. Some operations are approximations and may not preserve complex topology. The project still needs a robust shared vertex/edge/face topology model before it can provide reliable n-gon modeling and full BMesh-style behavior.
 
-## Compositing
-The **Compositing** workspace captures the current frame and evaluates a saved image node graph
-off the UI thread. The initial graph passes Render Layers to Composite and Viewer. Supported nodes
-are Brightness/Contrast, Exposure, Blur, Glare, and Invert; render results can be previewed and
-saved as PNG. Nodes can be added, moved, connected by dragging their sockets, and deleted; pan the
-canvas by dragging empty space or middle-drag, zoom with the wheel, and right-click a wire to remove
-it. The graph is stored in `.forge` projects. Projects are stored as FRGA; older formats (FRG3-FRG9) remain readable, and cloth settings from
-FRG7-FRG9 files are migrated.
+### UV Editing and Texture Paint
 
-This is a functional starter compositor, not full Blender compositor parity. It currently uses
-8-bit RGBA CPU image operations and does not implement Blender's full node catalog, multi-input
-compositing, masks, multilayer render passes, or color-management pipeline.
+UV Editing provides a 2D UV editor alongside a 3D view, with basic selection and transforms, projections, packing, and save/load/export workflows. Texture Paint provides a 2D painting canvas and a 3D model view, basic brush settings, draw and erase tools, and local image saving.
 
-## Rigid-body physics
+Texture Paint requires usable UV coordinates. The eraser restores the texture snapshot captured when Paint Mode is entered, so it works with an existing loaded image as well as a generated paint atlas. Advanced brushes, masks, layers, and a complete image-management workflow are not implemented.
 
-BlendCraft includes a local, Rust-native 3D rigid-body simulation powered by the embedded
-Rapier3D library. It does not send scene data to a server and does not call an online physics
-service; simulation, playback and baking are performed on the user's computer. Rapier is a
-build-time Rust dependency, not a runtime network service.
+### Shading and materials
 
-In **Object Mode**, select a mesh and open the **Physics** tab in the Properties editor. Add an
-**Active** or **Passive** rigid body. Object settings include dynamic/animated behavior, mass,
-collision shape (Convex Hull, Box, Sphere, Capsule, Cylinder, Cone or Mesh), friction, bounciness,
-collision margin, linear/angular damping, deactivation and continuous collision detection.
-Mesh collision is intended for static/passive bodies; active mesh bodies use a convex hull.
+The Shading workspace includes an editable node graph, node links, movement, resizing, and graph persistence. A supported subset of nodes is compiled to a real-time WGSL shader; other graphs may use a CPU UV-bake fallback or remain unsupported. This is a BlendCraft renderer, not Blender EEVEE/Cycles parity.
 
-The **Scene** properties tab exposes the Rigid Body World settings: gravity, simulation speed,
-substeps, solver iterations and cache range. Its Cache controls bake transforms for the configured
-frame range and delete a bake. The constraint editor supports Fixed, Point, Hinge and Slider joints between two objects
-that both have rigid bodies, with collision disabling, anchors, axes and optional limits. Animated
-rigid bodies are driven by object keyframes and can affect simulated bodies. Playback advances the
-solver frame-by-frame, including catch-up frames, and baked frames are used when a cache exists.
+### Rendering and output
 
-This is a functional rigid-body foundation, not full Blender physics parity. It does not yet
-implement Bullet-identical simulation, Blender's full rigid-body constraint catalog (including
-piston, generic spring and motor variants), soft-body fidelity,
-fracture, or a complete Blender-compatible physics API. Physics behavior and cross-platform
-builds still need testing on each target OS and architecture.
+The application includes a Workbench-style viewport, a real-time PBR renderer, and a progressive CPU path tracer. Render Image uses the Output settings for dimensions and supports PNG, JPEG, and OpenEXR file output. JPEG drops alpha. OpenEXR currently receives values converted from the 8-bit render buffer; it is an EXR container, not a true high-dynamic-range render pipeline.
 
-## Cloth
-Select a mesh, open **Physics**, add **＋ Cloth** and press **Bake**. Pick a **Fabric** to set every
-physical value at once; any value can still be edited afterwards (the fabric then switches to
-*Custom*).
+Rendering features, image formats, and GPU behavior still require testing across supported operating systems and graphics hardware.
 
-| Fabric  | Mass kg/m² | Tension N/m | Bending mN·m | Notes |
-|---------|-----------:|------------:|-------------:|-------|
-| Silk    | 0.06 | 600  | 0.05 | floats, flutters, tiny wrinkles |
-| Cotton  | 0.20 | 800  | 1    | everyday fabric |
-| Linen   | 0.25 | 1500 | 5    | crisper folds |
-| Wool    | 0.35 | 400  | 3    | heavy, stretchy, grippy |
-| Denim   | 0.40 | 2000 | 15   | stiff, wide folds |
-| Leather | 0.80 | 3000 | 200  | very stiff, barely stretches |
-| Rubber  | 1.20 | 120  | 60   | elastic, high friction |
+### Compositing
 
-The solver is XPBD with sub-stepping: resolution-independent stretch/compression stiffness,
-dihedral-angle bending driven by a real bending rigidity, aerodynamic drag (light fabrics float,
-heavy ones fall fast) and a hard strain limit. Cloth collides with every other visible mesh
-(floors, spheres, characters), supports optional self collision, and reacts to **Wind, Force,
-Vortex and Turbulence** force-field objects (Add > Force Field). Pin the **Boundary**, **Top Edge**
-or **Top Corners**; raise **Pin Depth** to clamp several rows so stiff fabrics stick out of their pins.
+The Compositing workspace supports a basic image-node graph with Render Layers, Composite, Viewer, Brightness/Contrast, Exposure, Blur, Glare, and Invert. Image operations currently use 8-bit RGBA CPU buffers. Blender's full node catalog, render passes, masks, multi-input compositing, and full color management are not implemented.
 
-Low-poly meshes (like the default plane) are refined automatically while baking (**Sim Edge
-Length**, default 4 cm; 0 disables it), so cloth drapes without manual subdividing. The baked cache
-holds the refined mesh; **Free Bake** restores the rest pose. Colliders are taken at the current
-frame (animated colliders are not followed yet) and pins do not follow animated transforms.
+### Animation
 
-## Cycles viewport
-The Cycles engine is a progressive CPU path tracer: a binned-SAH BVH, all CPU cores, up to 1920 px
-on the long side, a quick low-resolution preview while the camera moves (the resolution adapts to
-the machine speed), smooth shading normals, GGX specular with correct roughness/metallic, soft
-shadows, spot cones, emissive surfaces and per-group materials. Image textures and
-transparency/refraction are not traced yet.
+The timeline supports frame range, frame rate, playback, and basic object transform keyframes. A simple Dope Sheet view is available. A full Graph Editor, NLA system, drivers, and complete animation data workflows are not implemented.
 
-## Water physics (Fluid)
-Select a mesh, open **Physics > Fluid** and choose a role, as in Blender:
+### Armatures
 
-- **Domain** - a box that bounds the simulation. Settings: resolution divisions, particles per cell,
-  viscosity, surface tension, gravity (scene or custom), time scale, substeps, solver iterations,
-  particle budget, surface-mesh generation (scale, smoothing), open/closed walls and the cache range.
-- **Flow** - emits water from a closed mesh: *Geometry* (initial volume), *Inflow* (continuous, with a
-  frame range) or *Outflow* (sink). Optional initial velocity and plane initialization (fill below an open plane).
-- **Effector** - a collision mesh. Keyframed, rigid-body-baked or mesh-cached effectors push the water.
+Basic armature creation/editing, bones, Pose Mode transforms, and automatic skin weights exist. Automatic weights use a simplified distance-based method rather than Blender's heat weighting. Advanced constraints, IK, editable vertex groups, and a complete Weight Paint workflow are not implemented.
 
-**Bake Water** simulates the cache range (a little each UI frame, with a progress bar and Cancel) and stores one
-surface mesh per frame on a "Fluid Mesh" object. It plays back on the timeline and exports with Alembic.
-The solver is a local CPU Position Based Fluids implementation (parallelised with std threads), not Mantaflow/FLIP:
-the workflow matches Blender, the exact motion does not. Spray/foam/bubble particles, viscosity presets, guides,
-obstacles with surface friction and gas/smoke are not implemented. The old settings-only Fluid component is converted
-to a Domain when an older project is opened.
+### Physics and simulation
 
-## Alembic (.abc)
-File > Import accepts `.abc` (also by drag and drop); File > Export > Alembic writes the scene or the selection.
-Import reads PolyMesh/SubD objects and Xform hierarchies, including per-frame meshes whose topology changes
-(water surfaces). Animated meshes become a **Mesh Sequence Cache** on the object (Physics tab: offset, speed, remove)
-and the timeline range is set to the cache. Animated transforms become keyframes. Polygons are triangulated; normals
-are recomputed; UVs, cameras, curves, points and custom attributes are skipped. Export samples animation, rigid-body
-bakes and mesh sequences over the timeline range (static scenes are written as one sample). The Ogawa container and
-Alembic layer are implemented in pure Rust (`crates/io/src/alembic.rs`). Property headers respect the official
-variable-width integer encoding (size hint), so files written by Blender and other Alembic 1.7/1.8 tools import
-correctly. The exporter follows the structure of a real Blender-written file (no hash after property headers, a hash
-block after every object, empty dimension blocks for rank-1 arrays, uniform time sampling). HDF5-based archives from very old Alembic versions are not supported. Large water caches are held in
-memory, one mesh per frame.
+- Rigid-body simulation uses the embedded Rapier3D library.
+- Cloth uses a local XPBD-based solver.
+- Fluid uses a local CPU Position Based Fluids implementation.
 
-## Scripting
-The **Scripting** workspace runs Python in an embedded **RustPython** interpreter from a
-background worker, so scripts do not block the UI. BlendCraft itself and its scene bridge remain
-Rust; the small `bpy`-named compatibility module is implemented natively in Rust (plus a thin
-pure-Python helper layer) and is not copied from Blender.
+These are independent implementations and are not expected to reproduce Blender's physics solvers exactly. Simulation and cross-platform behavior need broader validation.
 
-RustPython is a pure-Rust Python 3 interpreter. Because it does not depend on a system CPython
-or on platform-specific CPython development libraries, the same binary builds and runs on
-Windows, Linux, macOS, FreeBSD and any other target that the Rust toolchain supports. No separate
-Python installation and no bundled `python/` directory are required.
+### Scripting
 
-The `python-scripting` Cargo feature is enabled by default. Disable it only when you intentionally
-want a build without scripting support.
+The Scripting workspace embeds RustPython and provides a limited Blender-like Python bridge. The supported API subset includes basic object access, transforms, selection, primitive creation, and simple material operations. It is not full `bpy` compatibility; unsupported calls are not silently emulated.
 
-The implemented subset includes object lookup (name/index lookup, iteration, membership),
-context scene/active/selected objects, object names and transforms, selection methods, and
-`mathutils.Vector`, `Euler`, and `Quaternion` basics. Supported operators are object select-all
-(select/deselect/invert) and mesh add for cube, plane, UV sphere, ico sphere, cylinder,
-cone, torus, and monkey. Basic materials support lookup/creation, name, diffuse color,
-metallic/roughness, and one material slot per object.
+### File formats
 
-This is not full `bpy` compatibility: mesh editing, multiple material slots, node trees, modifiers,
-collections/linking, cameras/lights creation, animation, rendering, UI context, Blender-specific
-modules, and many other Blender systems are not implemented. Unsupported API calls fail rather
-than being silently emulated. Successful scene changes are applied together as one undoable
-operation.
+The project supports its native `.forge` format and has import/export paths for formats including glTF/GLB, OBJ, FBX, and Alembic. Format coverage varies: some attributes and object types are skipped or simplified. Native `.blend` import/export is not implemented.
 
-## Navigation
-- Middle mouse drag: orbit
-- Shift + Middle / Right drag: pan
-- Scroll: zoom
-- Left drag (when not on a gizmo handle): orbit (or pan with Shift)
-- Ctrl + Left drag: orbit (Unity-style)
-- View > Camera view (or 0) to look through a camera object
+## Navigation controls
 
-## Shadows & render
-- **Real-time shadows**: on by default. 2048² shadow map from the primary Sun (preferred) or Spot light, with 3×3 PCF soft shadows. Toggle and adjust softness under **View**.
-- **Render Image**: **View > Render Image…** captures the current 3D view (no UI) to a PNG you choose.
+- Middle mouse drag: orbit.
+- Shift + middle mouse / right mouse drag: pan.
+- Scroll: zoom.
+- Left drag away from a gizmo: orbit; Shift + left drag pans.
+- Ctrl + left drag: orbit (Unity-style).
+- `0` or View → Camera View: look through the active camera.
 
-## Modifiers
-Objects have a classic non-destructive **modifier stack** (Properties → Modifiers, or Tools → Modifiers):
+## Edit Mode controls
 
-- **Subdivision Surface** – simple midpoint levels (viewport + render levels)
-- **Array** – count, relative/absolute offset, optional merge
-- **Mirror** – X/Y/Z axes, optional merge at the plane
-- **Solidify** – thickness + offset, side walls on boundary edges
-- **Bevel** – amount, segments, angle limit (chamfer-style)
-- **Boolean** – union / difference / intersect against another mesh object
+- `Tab`: toggle Edit Mode.
+- `1`, `2`, `3`: Vertex, Edge, and Face selection domains.
+- Click: select a component.
+- Shift-click: add or toggle a component in the selection.
+- `A`: select all; `Alt+A`: deselect all.
+- `G`, `R`, `S`: move, rotate, and scale selected components.
+- `M`: merge selected vertices at center.
+- `Shift+M`: merge selected coincident vertices by distance.
+- `Alt+S`: Shrink/Fatten.
+- `N`: Flip Normals.
 
-The stack is evaluated before Geometry Nodes. Apply order can be changed with ▲/▼; each modifier can be toggled for viewport and render independently. Old projects load with an empty stack.
+## Known limitations
 
-## Not yet there
-Full Edit Mode parity (many BMesh operators), Curves/NURBS editing depth, native .blend import/export.
-Point-light omnidirectional shadows, cascaded shadow maps for large scenes.
-Vertex/Weight paint, full animation editors (NLA/drivers), Game-dev helpers (LODs, collider gen, lightmap UVs).
+- No full Blender/BMesh-compatible mesh topology or complete Edit Mode parity.
+- No native `.blend` import/export.
+- Vertex Paint and Weight Paint are not implemented.
+- Advanced UV seams, pinning, and unwrap tools are not implemented.
+- Sculpt masks, face sets, and advanced remeshing are not implemented.
+- Full animation editors, NLA, and drivers are not implemented.
+- The shader, compositor, modifier, physics, and file-format implementations are subsets.
+- Cross-platform builds and hardware-specific rendering still need validation on each target.
 
-## Gizmo
-Select an object (Move tool is default), then drag the colored handles. Press G / R / S for modal move/rotate/scale, Q returns to select mode. Every drag is one undo step.
+## Development notes
 
-## Object types (Add menu)
-- Mesh: Plane, Cube, Circle, UV Sphere, Ico Sphere, Cylinder, Cone, Torus, Grid, Capsule (parameters stay editable)
-- Empty: Plain Axes, Arrows, Single Arrow, Circle, Cube, Sphere, Cone
-- Light: Point, Sun, Spot (real-time; up to 8 lights). Directional/Spot shadows supported.
-- Camera: Perspective / Orthographic. Press 0 (or View > Camera view) to look through it.
-- Image as Plane: textured upright quad from a PNG/JPG
-- GLB export includes cameras, lights (KHR_lights_punctual) and empties.
-- Greyed out in the menu (need bigger systems first): Curves, Surface, Metaball, Text, Volume, Grease Pencil,
-  Armature, Lattice, Area light, Light Probe, Speaker, Force Field, Collection Instance.
-
-## Object mode (complete set)
-- Selection: click, Shift+click, Box / Lasso / Circle tools, Select All / None / Invert / Random,
-  Select Children / Parent / Similar (type, collection, material, linked).
-- Transform: gizmo (Move / Rotate / Scale) and modal G / R / S with axis constraints, plane constraints,
-  numeric input, snapping (increment or vertex), pivot points, transform orientations (Global / Local / View),
-  3D cursor (Shift+Right click).
-- Duplicate (Shift+D), linked duplicate (Alt+D), single user, delete, hide / show.
-- Parenting (Ctrl+P or Outliner context menu → Set Parent / Clear Parent), collections (flat), outliner tree with filter, rename (F2 / double click).
-- Set origin, geometry to origin, apply / clear transforms, align objects, snap selection / cursor.
-- Join (Ctrl+J, mixed materials become slots) and Separate (by loose parts, by material).
-- Constraints: Copy Location / Rotation / Scale / Transforms, Track To, Limit Location / Rotation / Scale,
-  Limit Distance, Floor.
-- Help > Keyboard Shortcuts (or F1) lists every live shortcut and is generated from the key table.
-
-## Export
-File > Export has glTF Binary and Wavefront OBJ, each also as "selected only".
-- OBJ does not support lights/cameras (format limitation); use GLB for those.
-- GLB uses KHR_lights_punctual; intensity is stored in candela / lux units. If lights appear too weak in other apps, raise intensity in the Properties panel before export.
-- For broader format support (FBX, Collada, etc.) the recommended path is: export GLB → convert with Blender or assimp / gltf-pipeline. Native multi-format export is planned.
-
-## Rendering
-- Viewport is real-time with optional shadows.
-- **View > Render Image…** saves a PNG of the current 3D view (resolution configurable in the Render panel).
-- **View > Render Animation…** renders the current timeline range to `animation.avi` (Motion-JPEG).
-  The encoder is the pure-Rust `forge-video` crate: frames are JPEG-compressed on a pool of worker threads
-  while the GPU renders the next frame, and streamed straight to disk. There is no C/C++ code, no `ffmpeg`
-  and no extra build tools, so it builds and runs on every target the rest of the app supports.
-  The AVI opens in VLC, mpv, QuickTime, Windows players and video editors (Blender, DaVinci, Premiere).
-  Need an H.264 MP4? `ffmpeg -i animation.avi -c:v libx264 -crf 18 animation.mp4`.
-
-## Recent files
-File > Open Recent lists the last 10 projects you opened or saved. The list is stored in `recent.txt` in your config folder (APPDATA\BlendCraft on Windows, ~/Library/Application Support/BlendCraft on macOS, ~/.config/BlendCraft on Linux).
-
-## Multi-platform builds (GitHub Actions)
-
-Push to `main` / open a PR, or run **Actions → Build → Run workflow**.
-
-| Target | Arch | Runner / method |
-|--------|------|------------------|
-| Linux | x64, x86, ARM64, ARMv7 | `ubuntu-latest` (+ `cross` where needed) |
-| Windows | x64, x86, ARM64 | `windows-latest` |
-| macOS | x64 (Intel), ARM64 (Apple Silicon) | `macos-13` / `macos-14` |
-| FreeBSD | x64 | FreeBSD VM action |
-| WebAssembly | wasm32 | `cargo check` for core/io; full GUI app needs web entry |
-
-Artifacts appear under the workflow run. Tag a release as `v0.1.0` (etc.) to attach binaries to the GitHub Release.
-
-### Local targets
-
-```bash
-rustup target add x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu \
-  x86_64-pc-windows-msvc aarch64-apple-darwin wasm32-unknown-unknown
-
-cargo build --release -p forge-app --target x86_64-unknown-linux-gnu
-```
-
-Cross-compiling to other OS/arch pairs is easiest with [cross](https://github.com/cross-rs/cross):
-
-```bash
-cargo install cross --git https://github.com/cross-rs/cross
-cross build --release -p forge-app --target aarch64-unknown-linux-gnu
-```
-
-## Offline operation
-
-BlendCraft's modeling, UV editing, project saving, and texture painting are local operations. The optional font catalog is shown as offline reference information only; fonts must be imported from files on the local computer. The application no longer includes the `ureq` HTTP client or a font-download action, and it does not upload project, mesh, UV, or texture data to a server.
+When a feature is completed, update the relevant row in **Project status** to **Finished** and remove its remaining-work description. Keep this README synchronized with the actual source code; do not mark a feature finished merely because a UI control or placeholder exists.

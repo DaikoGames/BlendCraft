@@ -3,7 +3,7 @@
 //! Evaluation is a DAG over image sockets, not a single forced chain.
 
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum CompositorNodeKind {

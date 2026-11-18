@@ -3362,12 +3362,11 @@ fn draw_texture_paint_editor(
         if let Some(pos) = response.interact_pointer_pos() {
             doc.checkpoint();
             let uv = to_uv(pos);
-            let color = if ts.tool == Tool::PaintErase {
-                [0.78, 0.78, 0.78, 1.0]
+            if ts.tool == Tool::PaintErase {
+                doc.erase_stroke_uv(&[uv], ts.paint_radius, ts.paint_strength);
             } else {
-                ts.paint_color
-            };
-            doc.paint_at_uv(uv, color, ts.paint_radius, ts.paint_strength);
+                doc.paint_at_uv(uv, ts.paint_color, ts.paint_radius, ts.paint_strength);
+            }
         }
     }
     if response.dragged() {
@@ -3380,12 +3379,11 @@ fn draw_texture_paint_editor(
             let samples: Vec<glam::Vec2> = (1..=steps)
                 .map(|i| previous.lerp(current, i as f32 / steps as f32))
                 .collect();
-            let color = if ts.tool == Tool::PaintErase {
-                [0.78, 0.78, 0.78, 1.0]
+            if ts.tool == Tool::PaintErase {
+                doc.erase_stroke_uv(&samples, ts.paint_radius, ts.paint_strength);
             } else {
-                ts.paint_color
-            };
-            doc.paint_stroke_uv(&samples, color, ts.paint_radius, ts.paint_strength);
+                doc.paint_stroke_uv(&samples, ts.paint_color, ts.paint_radius, ts.paint_strength);
+            }
             st.paint_canvas_last_uv = Some(current);
         }
     }
@@ -9050,6 +9048,16 @@ fn menu_bar(
                 Action::MakeSingleUser,
                 has_sel,
             );
+            ui.separator();
+            ui.add_enabled_ui(doc.in_edit_mode(), |ui| {
+                ui.menu_button("Mesh Editing", |ui| {
+                    mi(ui, actions, b, "Merge Vertices at Center", Action::MergeVerts, true);
+                    mi(ui, actions, b, "Merge by Distance", Action::WeldVerts, true);
+                    mi(ui, actions, b, "Smooth Vertices", Action::SmoothVerts, true);
+                    mi(ui, actions, b, "Shrink/Fatten", Action::ShrinkFatten, true);
+                    mi(ui, actions, b, "Flip Normals", Action::FlipNormals, true);
+                });
+            });
             ui.separator();
             mi(
                 ui,
