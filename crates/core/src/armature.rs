@@ -503,33 +503,38 @@ impl ArmatureData {
     /// Pick against rest-pose bone segments (Armature Edit Mode).
     pub fn pick_bone_rest(&self, ray_o: Vec3, ray_d: Vec3, thresh: f32) -> Option<u32> {
         let dir = ray_d.normalize_or_zero();
-        let mut best: Option<(u32, f32)> = None;
+        // Prefer small perpendicular distance; break ties by closer depth along the ray.
+        let mut best: Option<(u32, f32, f32)> = None; // (idx, dist, depth)
         for (i, b) in self.bones.iter().enumerate() {
-            if let Some(d) = ray_segment_dist(ray_o, dir, b.head_v(), b.tail_v()) {
-                if d < thresh && best.map_or(true, |(_, bd)| d < bd) {
-                    best = Some((i as u32, d));
+            if let Some((d, depth)) = ray_segment_dist_depth(ray_o, dir, b.head_v(), b.tail_v()) {
+                if d < thresh
+                    && best.map_or(true, |(_, bd, bt)| d < bd - 1e-5 || (d <= bd + 1e-5 && depth < bt))
+                {
+                    best = Some((i as u32, d, depth));
                 }
             }
         }
-        best.map(|(i, _)| i)
+        best.map(|(i, _, _)| i)
     }
 
     pub fn pick_bone(&self, ray_o: Vec3, ray_d: Vec3, thresh: f32) -> Option<u32> {
         let dir = ray_d.normalize_or_zero();
         let deform = self.deform_matrices_hierarchical();
-        let mut best: Option<(u32, f32)> = None;
+        let mut best: Option<(u32, f32, f32)> = None;
         for (i, b) in self.bones.iter().enumerate() {
             let rest = Self::rest_matrix(b);
             let pose = deform[i] * rest;
             let head = pose.transform_point3(Vec3::ZERO);
             let tip = pose.transform_point3(Vec3::new(0.0, b.length().max(0.05), 0.0));
-            if let Some(d) = ray_segment_dist(ray_o, dir, head, tip) {
-                if d < thresh && best.map_or(true, |(_, bd)| d < bd) {
-                    best = Some((i as u32, d));
+            if let Some((d, depth)) = ray_segment_dist_depth(ray_o, dir, head, tip) {
+                if d < thresh
+                    && best.map_or(true, |(_, bd, bt)| d < bd - 1e-5 || (d <= bd + 1e-5 && depth < bt))
+                {
+                    best = Some((i as u32, d, depth));
                 }
             }
         }
-        best.map(|(i, _)| i)
+        best.map(|(i, _, _)| i)
     }
 
 
@@ -579,6 +584,34 @@ impl ArmatureData {
             self.active = Some(i);
         }
     }
+}
+
+fn ray_segment_dist_depth(ro: Vec3, rd: Vec3, a: Vec3, b: Vec3) -> Option<(f32, f32)> {
+    let ab = b - a;
+    let ab2 = ab.length_squared();
+    if ab2 < 1e-12 {
+        let t = (a - ro).dot(rd);
+        if t < 0.0 {
+            return None;
+        }
+        return Some(((ro + rd * t - a).length(), t));
+    }
+    let ao = a - ro;
+    let rd_ab = rd.dot(ab);
+    let det = 1.0 - rd_ab * rd_ab / ab2;
+    let (t, u) = if det.abs() < 1e-8 {
+        let t = ao.dot(rd);
+        let u = ((ro + rd * t - a).dot(ab) / ab2).clamp(0.0, 1.0);
+        (t, u)
+    } else {
+        let t = (ao.dot(rd) - ao.dot(ab) * rd_ab / ab2) / det;
+        let u = ((ao.dot(ab) - t * rd_ab) / ab2).clamp(0.0, 1.0);
+        (t, u)
+    };
+    if t < 0.0 {
+        return None;
+    }
+    Some(((ro + rd * t - (a + ab * u)).length(), t))
 }
 
 fn ray_segment_dist(ro: Vec3, rd: Vec3, a: Vec3, b: Vec3) -> Option<f32> {

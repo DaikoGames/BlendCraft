@@ -445,33 +445,28 @@ pub fn draw(
                             .any(|o| o.id == *id && o.kind.is_mesh())
                     });
 
-                // Mode selector (Blender style)
+                // Mode selector — horizontal buttons in classic Blender order
+                // (Object / Edit / Sculpt primary; paint modes after separator)
                 let in_sculpt = doc.sculpt_mode;
-
-                // Object Mode: default transform workspace
                 let in_object = !in_edit
                     && !in_pose
                     && !in_sculpt
                     && !doc.uv_mode
                     && !doc.paint_mode
+                    && !doc.vertex_paint_mode
+                    && !doc.weight_paint_mode
                     && !st.shading_mode
                     && !st.animation_mode
                     && !st.rendering_mode
                     && !st.compositing_mode
                     && !st.scripting_mode;
+
                 if ui
                     .add_enabled(
-                        mesh_ok
-                            || has_armature
-                            || in_edit
-                            || in_pose
-                            || in_sculpt
-                            || doc.uv_mode
-                            || doc.paint_mode
-                            || st.animation_mode
-                            || st.rendering_mode
-                            || st.compositing_mode
-                            || st.scripting_mode,
+                        mesh_ok || has_armature || in_edit || in_pose || in_sculpt
+                            || doc.uv_mode || doc.paint_mode || doc.vertex_paint_mode
+                            || doc.weight_paint_mode || st.animation_mode
+                            || st.rendering_mode || st.compositing_mode || st.scripting_mode,
                         egui::SelectableLabel::new(in_object, "Object Mode"),
                     )
                     .clicked()
@@ -482,29 +477,214 @@ pub fn draw(
                     st.compositing_mode = false;
                     st.geometry_nodes_mode = false;
                     st.scripting_mode = false;
-                    if in_edit {
-                        actions.push(Action::ToggleEditMode);
-                    }
-                    if in_pose {
-                        actions.push(Action::TogglePoseMode);
-                    }
-                    if in_sculpt {
-                        actions.push(Action::ToggleSculptMode);
-                    }
-                    if doc.uv_mode {
-                        actions.push(Action::ToggleUvMode);
-                    }
-                    if doc.paint_mode {
-                        actions.push(Action::TogglePaintMode);
+                    if in_edit { actions.push(Action::ToggleEditMode); }
+                    if in_pose { actions.push(Action::TogglePoseMode); }
+                    if in_sculpt { actions.push(Action::ToggleSculptMode); }
+                    if doc.uv_mode { actions.push(Action::ToggleUvMode); }
+                    if doc.paint_mode { actions.push(Action::TogglePaintMode); }
+                    if doc.vertex_paint_mode { actions.push(Action::ToggleVertexPaintMode); }
+                    if doc.weight_paint_mode { actions.push(Action::ToggleWeightPaintMode); }
+                }
+                if ui
+                    .add_enabled(mesh_ok || has_armature || in_edit, egui::SelectableLabel::new(in_edit, "Edit Mode"))
+                    .clicked()
+                {
+                    st.shading_mode = false;
+                    st.animation_mode = false;
+                    st.rendering_mode = false;
+                    st.compositing_mode = false;
+                    st.geometry_nodes_mode = false;
+                    st.scripting_mode = false;
+                    if in_pose { actions.push(Action::TogglePoseMode); }
+                    if in_sculpt { actions.push(Action::ToggleSculptMode); }
+                    if doc.uv_mode { actions.push(Action::ToggleUvMode); }
+                    if doc.paint_mode { actions.push(Action::TogglePaintMode); }
+                    if doc.vertex_paint_mode { actions.push(Action::ToggleVertexPaintMode); }
+                    if doc.weight_paint_mode { actions.push(Action::ToggleWeightPaintMode); }
+                    if !in_edit { actions.push(Action::ToggleEditMode); }
+                }
+                if has_armature {
+                    if ui
+                        .add_enabled(true, egui::SelectableLabel::new(in_pose, "Pose Mode"))
+                        .clicked()
+                    {
+                        st.shading_mode = false;
+                        st.animation_mode = false;
+                        st.rendering_mode = false;
+                        st.compositing_mode = false;
+                        st.geometry_nodes_mode = false;
+                        st.scripting_mode = false;
+                        if in_edit { actions.push(Action::ToggleEditMode); }
+                        if in_sculpt { actions.push(Action::ToggleSculptMode); }
+                        if doc.uv_mode { actions.push(Action::ToggleUvMode); }
+                        if doc.paint_mode { actions.push(Action::TogglePaintMode); }
+                        if doc.vertex_paint_mode { actions.push(Action::ToggleVertexPaintMode); }
+                        if doc.weight_paint_mode { actions.push(Action::ToggleWeightPaintMode); }
+                        if !in_pose { actions.push(Action::TogglePoseMode); }
                     }
                 }
-                // Animation workspace (Blender Animation tab structure)
+                if ui
+                    .add_enabled(mesh_ok || in_sculpt, egui::SelectableLabel::new(in_sculpt, "Sculpt Mode"))
+                    .clicked()
+                {
+                    st.shading_mode = false;
+                    st.animation_mode = false;
+                    st.rendering_mode = false;
+                    st.compositing_mode = false;
+                    st.geometry_nodes_mode = false;
+                    st.scripting_mode = false;
+                    if in_edit { actions.push(Action::ToggleEditMode); }
+                    if in_pose { actions.push(Action::TogglePoseMode); }
+                    if doc.uv_mode { actions.push(Action::ToggleUvMode); }
+                    if doc.paint_mode { actions.push(Action::TogglePaintMode); }
+                    if doc.vertex_paint_mode { actions.push(Action::ToggleVertexPaintMode); }
+                    if doc.weight_paint_mode { actions.push(Action::ToggleWeightPaintMode); }
+                    if !in_sculpt { actions.push(Action::ToggleSculptMode); }
+                }
+
+                ui.separator();
+
+                // Paint modes (under separator)
+                if ui
+                    .add_enabled(
+                        mesh_ok || doc.vertex_paint_mode,
+                        egui::SelectableLabel::new(doc.vertex_paint_mode, "Vertex Paint"),
+                    )
+                    .clicked()
+                {
+                    st.shading_mode = false;
+                    st.animation_mode = false;
+                    st.rendering_mode = false;
+                    st.compositing_mode = false;
+                    st.geometry_nodes_mode = false;
+                    st.scripting_mode = false;
+                    if in_edit { actions.push(Action::ToggleEditMode); }
+                    if in_pose { actions.push(Action::TogglePoseMode); }
+                    if in_sculpt { actions.push(Action::ToggleSculptMode); }
+                    if doc.uv_mode { actions.push(Action::ToggleUvMode); }
+                    if doc.paint_mode { actions.push(Action::TogglePaintMode); }
+                    if doc.weight_paint_mode { actions.push(Action::ToggleWeightPaintMode); }
+                    if !doc.vertex_paint_mode { actions.push(Action::ToggleVertexPaintMode); }
+                }
+                if ui
+                    .add_enabled(
+                        mesh_ok || doc.weight_paint_mode,
+                        egui::SelectableLabel::new(doc.weight_paint_mode, "Weight Paint"),
+                    )
+                    .clicked()
+                {
+                    st.shading_mode = false;
+                    st.animation_mode = false;
+                    st.rendering_mode = false;
+                    st.compositing_mode = false;
+                    st.geometry_nodes_mode = false;
+                    st.scripting_mode = false;
+                    if in_edit { actions.push(Action::ToggleEditMode); }
+                    if in_pose { actions.push(Action::TogglePoseMode); }
+                    if in_sculpt { actions.push(Action::ToggleSculptMode); }
+                    if doc.uv_mode { actions.push(Action::ToggleUvMode); }
+                    if doc.paint_mode { actions.push(Action::TogglePaintMode); }
+                    if doc.vertex_paint_mode { actions.push(Action::ToggleVertexPaintMode); }
+                    if !doc.weight_paint_mode { actions.push(Action::ToggleWeightPaintMode); }
+                }
+                if ui
+                    .add_enabled(
+                        mesh_ok || doc.paint_mode,
+                        egui::SelectableLabel::new(doc.paint_mode, "Texture Paint"),
+                    )
+                    .clicked()
+                {
+                    st.shading_mode = false;
+                    st.animation_mode = false;
+                    st.rendering_mode = false;
+                    st.compositing_mode = false;
+                    st.geometry_nodes_mode = false;
+                    st.scripting_mode = false;
+                    if in_edit { actions.push(Action::ToggleEditMode); }
+                    if in_pose { actions.push(Action::TogglePoseMode); }
+                    if in_sculpt { actions.push(Action::ToggleSculptMode); }
+                    if doc.uv_mode { actions.push(Action::ToggleUvMode); }
+                    if doc.vertex_paint_mode { actions.push(Action::ToggleVertexPaintMode); }
+                    if doc.weight_paint_mode { actions.push(Action::ToggleWeightPaintMode); }
+                    if !doc.paint_mode { actions.push(Action::TogglePaintMode); }
+                }
+
+                // --- Vertex / Weight paint brush settings (header strip) ---
+                if doc.vertex_paint_mode {
+                    ui.separator();
+                    ui.color_edit_button_rgba_unmultiplied(&mut ts.vpaint_color);
+                    ui.add(
+                        egui::Slider::new(&mut ts.vpaint_radius, 0.01..=5.0)
+                            .text("Radius")
+                            .logarithmic(true),
+                    );
+                    ui.add(egui::Slider::new(&mut ts.vpaint_strength, 0.01..=1.0).text("Strength"));
+                }
+                if doc.weight_paint_mode {
+                    ui.separator();
+                    ui.add(egui::Slider::new(&mut ts.wpaint_weight, 0.0..=1.0).text("Weight"));
+                    ui.add(
+                        egui::Slider::new(&mut ts.wpaint_radius, 0.01..=5.0)
+                            .text("Radius")
+                            .logarithmic(true),
+                    );
+                    ui.add(egui::Slider::new(&mut ts.wpaint_strength, 0.01..=1.0).text("Strength"));
+                    ui.checkbox(&mut ts.wpaint_normalize, "Normalize");
+                    // Active vertex group selector
+                    if let Some(idx) = doc.active_index() {
+                        let (names, active): (Vec<String>, usize) = {
+                            let mesh = &doc.scene.objects[idx].mesh;
+                            let names: Vec<String> =
+                                mesh.vertex_groups.iter().map(|g| g.name.clone()).collect();
+                            let mut active = mesh.active_vertex_group.max(0) as usize;
+                            if !names.is_empty() && active >= names.len() {
+                                active = 0;
+                            }
+                            (names, active)
+                        };
+                        if !names.is_empty() {
+                            let cur = names[active].clone();
+                            let mut chosen: Option<usize> = None;
+                            egui::ComboBox::from_id_salt("wpaint_active_group")
+                                .selected_text(&cur)
+                                .width(100.0)
+                                .show_ui(ui, |ui| {
+                                    for (gi, name) in names.iter().enumerate() {
+                                        if ui.selectable_label(gi == active, name).clicked() {
+                                            chosen = Some(gi);
+                                        }
+                                    }
+                                });
+                            if let Some(gi) = chosen {
+                                if let Some(o) = doc.scene.objects.get_mut(idx) {
+                                    let m = std::sync::Arc::make_mut(&mut o.mesh);
+                                    m.active_vertex_group = gi as i32;
+                                    m.apply_weight_visualization();
+                                }
+                                doc.touch();
+                            }
+                            if ui.small_button("+ Group").clicked() {
+                                let _ = doc.add_vertex_group_to_active("Group");
+                            }
+                        } else if ui.small_button("+ Group").clicked() {
+                            let _ = doc.add_vertex_group_to_active("Group");
+                        }
+                    }
+                }
+
+                ui.separator();
+
+                // Workspace tabs (Animation / Rendering / etc.) stay as horizontal buttons
+                let in_uv = doc.uv_mode;
+                let in_paint = doc.paint_mode;
                 let in_anim = st.animation_mode
                     && !in_edit
                     && !in_pose
                     && !in_sculpt
                     && !doc.uv_mode
                     && !doc.paint_mode
+                    && !doc.vertex_paint_mode
+                    && !doc.weight_paint_mode
                     && !st.shading_mode
                     && !st.rendering_mode
                     && !st.compositing_mode
@@ -516,29 +696,22 @@ pub fn draw(
                     st.geometry_nodes_mode = false;
                     st.scripting_mode = false;
                     st.animation_mode = true;
-                    if in_edit {
-                        actions.push(Action::ToggleEditMode);
-                    }
-                    if in_pose {
-                        actions.push(Action::TogglePoseMode);
-                    }
-                    if in_sculpt {
-                        actions.push(Action::ToggleSculptMode);
-                    }
-                    if doc.uv_mode {
-                        actions.push(Action::ToggleUvMode);
-                    }
-                    if doc.paint_mode {
-                        actions.push(Action::TogglePaintMode);
-                    }
+                    if in_edit { actions.push(Action::ToggleEditMode); }
+                    if in_pose { actions.push(Action::TogglePoseMode); }
+                    if in_sculpt { actions.push(Action::ToggleSculptMode); }
+                    if doc.uv_mode { actions.push(Action::ToggleUvMode); }
+                    if doc.paint_mode { actions.push(Action::TogglePaintMode); }
+                    if doc.vertex_paint_mode { actions.push(Action::ToggleVertexPaintMode); }
+                    if doc.weight_paint_mode { actions.push(Action::ToggleWeightPaintMode); }
                 }
-                // Rendering workspace (Blender Rendering tab)
                 let in_render_ws = st.rendering_mode
                     && !in_edit
                     && !in_pose
                     && !in_sculpt
                     && !doc.uv_mode
                     && !doc.paint_mode
+                    && !doc.vertex_paint_mode
+                    && !doc.weight_paint_mode
                     && !st.shading_mode
                     && !st.animation_mode
                     && !st.compositing_mode
@@ -550,211 +723,14 @@ pub fn draw(
                     st.geometry_nodes_mode = false;
                     st.scripting_mode = false;
                     st.rendering_mode = true;
-                    st.properties_tab = PropertiesTab::Render;
-                    if in_edit {
-                        actions.push(Action::ToggleEditMode);
-                    }
-                    if in_pose {
-                        actions.push(Action::TogglePoseMode);
-                    }
-                    if in_sculpt {
-                        actions.push(Action::ToggleSculptMode);
-                    }
-                    if doc.uv_mode {
-                        actions.push(Action::ToggleUvMode);
-                    }
-                    if doc.paint_mode {
-                        actions.push(Action::TogglePaintMode);
-                    }
+                    if in_edit { actions.push(Action::ToggleEditMode); }
+                    if in_pose { actions.push(Action::TogglePoseMode); }
+                    if in_sculpt { actions.push(Action::ToggleSculptMode); }
+                    if doc.uv_mode { actions.push(Action::ToggleUvMode); }
+                    if doc.paint_mode { actions.push(Action::TogglePaintMode); }
+                    if doc.vertex_paint_mode { actions.push(Action::ToggleVertexPaintMode); }
+                    if doc.weight_paint_mode { actions.push(Action::ToggleWeightPaintMode); }
                 }
-                // Always labeled "Edit Mode" (including when editing armatures)
-                if ui
-                    .add_enabled(
-                        mesh_ok || in_edit || doc.active_armature().is_some(),
-                        egui::SelectableLabel::new(in_edit, "Edit Mode"),
-                    )
-                    .clicked()
-                {
-                    st.shading_mode = false;
-                    st.animation_mode = false;
-                    st.rendering_mode = false;
-                    st.compositing_mode = false;
-                    st.geometry_nodes_mode = false;
-                    st.scripting_mode = false;
-                    if in_sculpt {
-                        actions.push(Action::ToggleSculptMode);
-                    }
-                    if in_pose {
-                        actions.push(Action::TogglePoseMode);
-                        actions.push(Action::ToggleEditMode);
-                    } else if !in_edit {
-                        actions.push(Action::ToggleEditMode);
-                    }
-                }
-                if ui
-                    .add_enabled(
-                        has_armature,
-                        egui::SelectableLabel::new(in_pose, "Pose Mode"),
-                    )
-                    .clicked()
-                {
-                    st.shading_mode = false;
-                    st.animation_mode = false;
-                    st.rendering_mode = false;
-                    st.compositing_mode = false;
-                    st.geometry_nodes_mode = false;
-                    st.scripting_mode = false;
-                    if in_edit && doc.armature_edit {
-                        actions.push(Action::TogglePoseMode);
-                    } else if !in_pose {
-                        actions.push(Action::TogglePoseMode);
-                    }
-                }
-                if ui
-                    .add_enabled(
-                        mesh_ok || in_sculpt,
-                        egui::SelectableLabel::new(in_sculpt, "Sculpt Mode"),
-                    )
-                    .clicked()
-                {
-                    st.shading_mode = false;
-                    st.animation_mode = false;
-                    st.rendering_mode = false;
-                    st.compositing_mode = false;
-                    st.geometry_nodes_mode = false;
-                    st.scripting_mode = false;
-                    if in_edit {
-                        actions.push(Action::ToggleEditMode);
-                    }
-                    if doc.uv_mode {
-                        actions.push(Action::ToggleUvMode);
-                    }
-                    if !in_sculpt {
-                        actions.push(Action::ToggleSculptMode);
-                    }
-                }
-                let in_uv = doc.uv_mode;
-                if ui
-                    .add_enabled(
-                        mesh_ok || in_uv,
-                        egui::SelectableLabel::new(in_uv, "UV Editing"),
-                    )
-                    .clicked()
-                {
-                    st.shading_mode = false;
-                    st.animation_mode = false;
-                    st.rendering_mode = false;
-                    st.compositing_mode = false;
-                    st.geometry_nodes_mode = false;
-                    st.scripting_mode = false;
-                    if in_edit {
-                        actions.push(Action::ToggleEditMode);
-                    }
-                    if in_sculpt {
-                        actions.push(Action::ToggleSculptMode);
-                    }
-                    if doc.paint_mode {
-                        actions.push(Action::TogglePaintMode);
-                    }
-                    if !in_uv {
-                        actions.push(Action::ToggleUvMode);
-                    }
-                }
-                let in_paint = doc.paint_mode;
-                if ui
-                    .add_enabled(
-                        mesh_ok || in_paint,
-                        egui::SelectableLabel::new(in_paint, "Texture Paint"),
-                    )
-                    .clicked()
-                {
-                    if in_edit {
-                        actions.push(Action::ToggleEditMode);
-                    }
-                    if in_sculpt {
-                        actions.push(Action::ToggleSculptMode);
-                    }
-                    if in_uv {
-                        actions.push(Action::ToggleUvMode);
-                    }
-                    if !in_paint {
-                        actions.push(Action::TogglePaintMode);
-                    }
-                    st.shading_mode = false;
-                    st.animation_mode = false;
-                    st.rendering_mode = false;
-                    st.compositing_mode = false;
-                    st.geometry_nodes_mode = false;
-                    st.scripting_mode = false;
-                }
-
-                let in_vpaint = doc.vertex_paint_mode;
-                if ui
-                    .add_enabled(
-                        mesh_ok || in_vpaint,
-                        egui::SelectableLabel::new(in_vpaint, "Vertex Paint"),
-                    )
-                    .clicked()
-                {
-                    if in_edit {
-                        actions.push(Action::ToggleEditMode);
-                    }
-                    if in_sculpt {
-                        actions.push(Action::ToggleSculptMode);
-                    }
-                    if in_uv {
-                        actions.push(Action::ToggleUvMode);
-                    }
-                    if in_paint {
-                        actions.push(Action::TogglePaintMode);
-                    }
-                    if doc.weight_paint_mode {
-                        actions.push(Action::ToggleWeightPaintMode);
-                    }
-                    if !in_vpaint {
-                        actions.push(Action::ToggleVertexPaintMode);
-                    }
-                    st.shading_mode = false;
-                    st.animation_mode = false;
-                    st.rendering_mode = false;
-                    st.compositing_mode = false;
-                    st.geometry_nodes_mode = false;
-                    st.scripting_mode = false;
-                }
-                let in_wpaint = doc.weight_paint_mode;
-                if ui
-                    .add_enabled(
-                        mesh_ok || in_wpaint,
-                        egui::SelectableLabel::new(in_wpaint, "Weight Paint"),
-                    )
-                    .clicked()
-                {
-                    if in_edit {
-                        actions.push(Action::ToggleEditMode);
-                    }
-                    if in_sculpt {
-                        actions.push(Action::ToggleSculptMode);
-                    }
-                    if in_uv {
-                        actions.push(Action::ToggleUvMode);
-                    }
-                    if in_paint {
-                        actions.push(Action::TogglePaintMode);
-                    }
-                    if doc.vertex_paint_mode {
-                        actions.push(Action::ToggleVertexPaintMode);
-                    }
-                    if !in_wpaint {
-                        actions.push(Action::ToggleWeightPaintMode);
-                    }
-                    st.shading_mode = false;
-                    st.animation_mode = false;
-                    st.rendering_mode = false;
-                    st.compositing_mode = false;
-                    st.geometry_nodes_mode = false;
-                    st.scripting_mode = false;
-                }
-
                 if ui
                     .selectable_label(st.compositing_mode, "Compositing")
                     .clicked()
@@ -13198,11 +13174,12 @@ fn properties(ui: &mut egui::Ui, doc: &mut Document, st: &mut UiState, actions: 
                         actions.push(crate::keymap::Action::ArmatureClearPose);
                     }
                     if ui.button("Bind selected meshes").on_hover_text(
-                        "Select Armature + Mesh(es), then bind for skinning"
+                        "Select Armature (active) + Mesh(es), then bind.\nParents meshes under armature, creates bone vertex groups, and enables Pose deformation."
                     ).clicked() {
                         actions.push(crate::keymap::Action::ArmatureBindMeshes);
                     }
                 });
+                ui.weak("Workflow: Add Armature → Edit bones → select Armature+Mesh → Bind → Weight Paint groups → Pose Mode (R/G) to deform.");
                 ui.add_space(4.0);
                 ui.label(RichText::new("Bones").strong());
                 egui::ScrollArea::vertical().max_height(160.0).show(ui, |ui| {

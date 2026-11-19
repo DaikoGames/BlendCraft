@@ -751,12 +751,34 @@ impl Document {
         self.checkpoint();
         let worlds = self.scene.world_matrices();
         let w = worlds[child];
+        let child_id = self.scene.objects[child].id;
+        let is_mesh = self.scene.objects[child].kind.is_mesh();
         self.scene.objects[child].parent = parent;
         self.scene.set_world(child, w, &worlds);
+        // Auto-skin when parenting a mesh under an armature
+        if is_mesh {
+            if let Some(pid) = parent {
+                if matches!(
+                    self.scene.objects.iter().find(|o| o.id == pid).map(|o| &o.kind),
+                    Some(ObjectKind::Armature(_))
+                ) {
+                    let _ = self.bind_mesh_to_armature(child_id, pid);
+                    self.apply_all_skinning();
+                }
+            } else {
+                // Unparent: drop skin so we stop deforming
+                if let Some(o) = self.scene.objects.iter_mut().find(|o| o.id == child_id) {
+                    o.skin = None;
+                }
+            }
+        }
+        self.touch();
         Ok(())
     }
 
     /// Selected objects become children of the active object.
+    /// If the active parent is an Armature, meshes are auto-bound with automatic
+    /// weights so Pose Mode deforms them immediately (Blender "parent with automatic weights" feel).
     pub fn parent_set(&mut self) -> Result<(), String> {
         let Some(ai) = self.active_index() else {
             return Err("No active object (select the parent last)".into());
@@ -772,7 +794,9 @@ impl Document {
         self.checkpoint();
         let worlds = self.scene.world_matrices();
         let pid = self.scene.objects[ai].id;
+        let parent_is_armature = matches!(self.scene.objects[ai].kind, ObjectKind::Armature(_));
         let mut n = 0;
+        let mut mesh_ids = Vec::new();
         for ci in children {
             if self.scene.is_ancestor(ci, ai) {
                 continue; // would create a loop
@@ -780,11 +804,22 @@ impl Document {
             let w = worlds[ci];
             self.scene.objects[ci].parent = Some(pid);
             self.scene.set_world(ci, w, &worlds);
+            if parent_is_armature && self.scene.objects[ci].kind.is_mesh() {
+                mesh_ids.push(self.scene.objects[ci].id);
+            }
             n += 1;
         }
         if n == 0 {
             return Err("Nothing parented (parent loop)".into());
         }
+        // Auto-skin every mesh parented to an armature
+        for mid in mesh_ids {
+            let _ = self.bind_mesh_to_armature(mid, pid);
+        }
+        if parent_is_armature {
+            self.apply_all_skinning();
+        }
+        self.touch();
         Ok(())
     }
 
@@ -2288,15 +2323,54 @@ impl Document {
         settings: &crate::WeightPaintSettings,
     ) -> bool {
         let Some(id) = self.active else { return false };
-        let Some(o) = self.scene.objects.iter_mut().find(|o| o.id == id) else {
-            return false;
+        let changed = {
+            let Some(o) = self.scene.objects.iter_mut().find(|o| o.id == id) else {
+                return false;
+            };
+            let mesh = Arc::make_mut(&mut o.mesh);
+            crate::paint::weight_paint_stroke(mesh, local_points, settings)
         };
-        let mesh = Arc::make_mut(&mut o.mesh);
-        let changed = crate::paint::weight_paint_stroke(mesh, local_points, settings);
         if changed {
+            self.sync_skin_from_vertex_groups(id);
             self.touch();
         }
         changed
+    }
+
+    /// Public entry: sync mesh skin weights from vertex groups using armature bone names.
+    pub fn sync_skin_from_vertex_groups(&mut self, mesh_id: u64) {
+        let arm_id = self
+            .scene
+            .objects
+            .iter()
+            .find(|o| o.id == mesh_id)
+            .and_then(|o| o.skin.as_ref().map(|s| s.armature_id));
+        let Some(arm_id) = arm_id else { return };
+        let bone_names: Vec<String> = self
+            .scene
+            .objects
+            .iter()
+            .find(|o| o.id == arm_id)
+            .and_then(|o| match &o.kind {
+                ObjectKind::Armature(a) => Some(a.bones.iter().map(|b| b.name.clone()).collect()),
+                _ => None,
+            })
+            .unwrap_or_default();
+        if bone_names.is_empty() {
+            return;
+        }
+        let Some(o) = self.scene.objects.iter_mut().find(|o| o.id == mesh_id) else {
+            return;
+        };
+        let Some(skin) = o.skin.as_mut() else { return };
+        if let Some((joints, weights)) =
+            crate::paint::groups_to_skin_hint(&o.mesh, &bone_names)
+        {
+            if joints.len() == skin.joints.len() {
+                skin.joints = joints;
+                skin.weights = weights;
+            }
+        }
     }
 
     pub fn add_vertex_group_to_active(&mut self, name: &str) -> Result<(), String> {
@@ -2865,6 +2939,11 @@ impl Document {
         } else {
             self.pose_mode = !self.pose_mode;
         }
+        if self.pose_mode {
+            // Parent-only setups still get automatic weights so the mesh deforms.
+            self.ensure_armature_children_skinned();
+            self.apply_all_skinning();
+        }
         self.touch();
         Ok(())
     }
@@ -2945,6 +3024,118 @@ impl Document {
         self.touch();
     }
 
+    /// Bind a single mesh to an armature with automatic weights + bone vertex groups.
+    /// Safe to call repeatedly; replaces existing skin for that mesh.
+    pub fn bind_mesh_to_armature(&mut self, mesh_id: u64, arm_id: u64) -> Result<(), String> {
+        let arm_idx = self
+            .scene
+            .index_of(arm_id)
+            .ok_or_else(|| "Armature not found".to_string())?;
+        let arm = match &self.scene.objects[arm_idx].kind {
+            ObjectKind::Armature(a) => a.clone(),
+            _ => return Err("Parent is not an Armature".into()),
+        };
+        if arm.bones.is_empty() {
+            return Err("Armature has no bones — add a bone first".into());
+        }
+        let mi = self
+            .scene
+            .index_of(mesh_id)
+            .ok_or_else(|| "Mesh not found".to_string())?;
+        if !self.scene.objects[mi].kind.is_mesh() {
+            return Err("Object is not a mesh".into());
+        }
+        let worlds = self.scene.world_matrices();
+        let arm_world = worlds[arm_idx];
+        let mesh_world = worlds[mi];
+        // Bones into mesh-local space for weighting
+        let to_mesh = mesh_world.inverse() * arm_world;
+        let mut arm_local = arm.clone();
+        for b in &mut arm_local.bones {
+            let h = to_mesh.transform_point3(glam::Vec3::from(b.head));
+            let t = to_mesh.transform_point3(glam::Vec3::from(b.tail));
+            b.head = h.to_array();
+            b.tail = t.to_array();
+        }
+        let mesh = self.scene.objects[mi].mesh.clone();
+        if mesh.vertices.is_empty() {
+            return Err("Mesh has no vertices".into());
+        }
+        let positions: Vec<[f32; 3]> = mesh.vertices.iter().map(|v| v.position).collect();
+        let normals: Vec<[f32; 3]> = mesh.vertices.iter().map(|v| v.normal).collect();
+        let skin = SkinBinding::auto_weights(arm_id, &arm_local, &positions, &normals);
+        // Vertex groups named after bones for Weight Paint
+        {
+            let mesh_mut = Arc::make_mut(&mut self.scene.objects[mi].mesh);
+            mesh_mut.vertex_groups.clear();
+            for bone in &arm_local.bones {
+                mesh_mut.add_vertex_group(&bone.name);
+            }
+            let n = mesh_mut.vertices.len();
+            for vi in 0..n.min(skin.joints.len()) {
+                let js = skin.joints[vi];
+                let ws = skin.weights[vi];
+                for slot in 0..4 {
+                    let bi = js[slot] as usize;
+                    let w = ws[slot];
+                    if bi < mesh_mut.vertex_groups.len()
+                        && vi < mesh_mut.vertex_groups[bi].weights.len()
+                        && w > mesh_mut.vertex_groups[bi].weights[vi]
+                    {
+                        mesh_mut.vertex_groups[bi].weights[vi] = w;
+                    }
+                }
+            }
+            if !mesh_mut.vertex_groups.is_empty() {
+                mesh_mut.active_vertex_group = 0;
+            }
+        }
+        self.scene.objects[mi].skin = Some(skin);
+        // Ensure parented under armature with preserved world transform
+        self.scene.objects[mi].parent = Some(arm_id);
+        let local = arm_world.inverse() * mesh_world;
+        let (s, r, t) = local.to_scale_rotation_translation();
+        self.scene.objects[mi].scale = s;
+        self.scene.objects[mi].rotation = r;
+        self.scene.objects[mi].translation = t;
+        Ok(())
+    }
+
+    /// Ensure every mesh child of an armature has a SkinBinding (auto-weights if missing).
+    pub fn ensure_armature_children_skinned(&mut self) {
+        let pairs: Vec<(u64, u64)> = {
+            let arms: Vec<u64> = self
+                .scene
+                .objects
+                .iter()
+                .filter(|o| matches!(o.kind, ObjectKind::Armature(_)))
+                .map(|o| o.id)
+                .collect();
+            let mut out = Vec::new();
+            for o in &self.scene.objects {
+                if !o.kind.is_mesh() {
+                    continue;
+                }
+                if o.skin.is_some() {
+                    continue;
+                }
+                if let Some(pid) = o.parent {
+                    if arms.contains(&pid) {
+                        out.push((o.id, pid));
+                    }
+                }
+            }
+            out
+        };
+        if pairs.is_empty() {
+            return;
+        }
+        for (mid, aid) in pairs {
+            let _ = self.bind_mesh_to_armature(mid, aid);
+        }
+        self.apply_all_skinning();
+    }
+
     /// Bind every selected mesh to the active armature (auto weights).
     pub fn bind_selected_to_armature(&mut self) -> Result<usize, String> {
         let arm_id = self
@@ -2998,9 +3189,39 @@ impl Document {
             let positions: Vec<[f32; 3]> = mesh.vertices.iter().map(|v| v.position).collect();
             let normals: Vec<[f32; 3]> = mesh.vertices.iter().map(|v| v.normal).collect();
             let skin = SkinBinding::auto_weights(arm_id, &arm_local, &positions, &normals);
+            // Create/overwrite vertex groups named after bones so Weight Paint can edit them.
+            {
+                let mesh_mut = Arc::make_mut(&mut self.scene.objects[mi].mesh);
+                mesh_mut.vertex_groups.clear();
+                for bone in &arm_local.bones {
+                    mesh_mut.add_vertex_group(&bone.name);
+                }
+                let n = mesh_mut.vertices.len();
+                for vi in 0..n {
+                    if vi >= skin.joints.len() {
+                        break;
+                    }
+                    let js = skin.joints[vi];
+                    let ws = skin.weights[vi];
+                    for slot in 0..4 {
+                        let bi = js[slot] as usize;
+                        let w = ws[slot];
+                        if bi < mesh_mut.vertex_groups.len() && vi < mesh_mut.vertex_groups[bi].weights.len() {
+                            // Keep max when multiple slots map to same bone (shouldn't, but safe)
+                            let cur = mesh_mut.vertex_groups[bi].weights[vi];
+                            if w > cur {
+                                mesh_mut.vertex_groups[bi].weights[vi] = w;
+                            }
+                        }
+                    }
+                }
+                if !mesh_mut.vertex_groups.is_empty() {
+                    mesh_mut.active_vertex_group = 0;
+                }
+            }
             // Remember the mesh->armature transform used at bind time for deform
             self.scene.objects[mi].skin = Some(skin);
-            // Parent under armature (optional hierarchy)
+            // Parent under armature so hierarchy + pose move the mesh
             self.scene.objects[mi].parent = Some(arm_id);
             let local = arm_world.inverse() * mesh_world;
             let (s, r, t) = local.to_scale_rotation_translation();

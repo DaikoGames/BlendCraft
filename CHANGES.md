@@ -56,3 +56,9 @@ Please run:
 - Removed **Max Size** and **Match viewport size** (they were a second, conflicting resolution).
 - Fixed: viewport samples / pixel size defaults were only set once the Render panel had been
   drawn, so the Cycles view was noisy/low-res until you opened it.
+
+## Sculpt mirror performance + mode UI (2026-11-19)
+
+- **Sculpt Mirror XYZ lag fixed**: `apply_brush` no longer recursively re-applies the stroke for every mirror combination (which caused multi-second freezes on dense meshes). Centers are collected once and influences are applied in a single vertex pass; normals are recomputed only once at the end.
+- **Mode selector**: Blender-style ComboBox at the start of the header. Primary modes (Object / Edit / Sculpt / Pose) stay at the top; Vertex Paint, Weight Paint and Texture Paint appear under a separator, matching the classic mode menu layout.
+- Stage 2 weight normalization marked Finished in the README (normalize_vertex_groups + WeightPaintSettings.normalize already present and wired).

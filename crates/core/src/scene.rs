@@ -375,8 +375,14 @@ impl Scene {
 
     /// Nearest visible object hit by a world-space ray, with the ray parameter.
     pub fn pick_hit(&self, origin: Vec3, dir: Vec3) -> Option<(usize, f32)> {
+        self.pick_all_hits(origin, dir).into_iter().next()
+    }
+
+    /// All selectable object hits along a ray, sorted near→far.
+    /// Used for Alt-click / repeated-click cycling through overlapping objects.
+    pub fn pick_all_hits(&self, origin: Vec3, dir: Vec3) -> Vec<(usize, f32)> {
         let worlds = self.world_matrices();
-        let mut best: Option<(usize, f32)> = None;
+        let mut hits: Vec<(usize, f32)> = Vec::new();
         for (i, o) in self.objects.iter().enumerate() {
             if !self.is_selectable(i) {
                 continue;
@@ -385,9 +391,7 @@ impl Scene {
             if !o.kind.is_mesh() {
                 if let Some(t) = ray_sphere(origin, dir, m.w_axis.truncate(), helper_radius(o, &m))
                 {
-                    if best.map_or(true, |(_, bt)| t < bt) {
-                        best = Some((i, t));
-                    }
+                    hits.push((i, t));
                 }
                 continue;
             }
@@ -403,16 +407,21 @@ impl Scene {
                 }
             }
             let verts = &o.mesh.vertices;
+            let mut best_t: Option<f32> = None;
             for t in o.mesh.indices.chunks_exact(3) {
                 let p = |k: u32| Vec3::from(verts[k as usize].position);
                 if let Some(h) = ray_tri(ro, rd, p(t[0]), p(t[1]), p(t[2])) {
-                    if best.map_or(true, |(_, bt)| h < bt) {
-                        best = Some((i, h));
+                    if best_t.map_or(true, |bt| h < bt) {
+                        best_t = Some(h);
                     }
                 }
             }
+            if let Some(h) = best_t {
+                hits.push((i, h));
+            }
         }
-        best
+        hits.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        hits
     }
 
     pub fn pick(&self, origin: Vec3, dir: Vec3) -> Option<usize> {

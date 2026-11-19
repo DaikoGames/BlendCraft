@@ -32,7 +32,7 @@ This README is the project progress record. A feature is marked **Finished** onl
 | Vertex Paint brush tools | **Finished** | Draw, Soften, Blur, Smear. |
 | Editable vertex groups | **Finished** | Named groups with per-vertex weights; add/remove/active selection. |
 | Weight Paint mode and weight visualization | **Finished** | Weight Paint mode, heat-map visualization, Draw/Blur/Average/Smear, optional normalize. |
-| Weight normalization and practical weight editing | **Not finished** |
+| Weight normalization and practical weight editing | **Finished** | Per-vertex normalize across groups; toggle on Weight Paint strokes; visualization sync. |
 | Expanded Texture Paint brushes and image workflow | **Partially finished** — Draw, Erase, Soften, Smear, and Fill; eraser restores entry snapshot. Layers/masks still incomplete. |
 
 ### Stage 3 — intermediate modeling and animation tools

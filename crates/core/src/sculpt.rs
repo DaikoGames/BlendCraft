@@ -267,21 +267,40 @@ pub fn apply_brush(
     let sign = if settings.invert { -1.0 } else { 1.0 };
     let n_hit = hit_normal.normalize_or_zero();
 
-    // Average plane height in brush for Flatten/Fill/Scrape
-    let mut plane_h = 0.0;
-    let mut plane_n = 0u32;
-    for v in &mesh.vertices {
-        let p = Vec3::from(v.position);
-        if (p - hit).length() < radius {
-            plane_h += (p - hit).dot(n_hit);
-            plane_n += 1;
+    // Build the full set of stroke centers once (original + all mirror combinations).
+    // This avoids the previous recursive multi-pass that caused freezes with XYZ mirror.
+    let mut centers: Vec<(Vec3, Vec3, Option<Vec3>)> = Vec::with_capacity(8);
+    centers.push((hit, n_hit, grab_delta));
+    if sym.any() {
+        for signs in sym.mirror_signs() {
+            let m_hit = crate::symmetry::apply_signs(hit, signs);
+            if m_hit.distance(hit) <= 1e-6 {
+                continue;
+            }
+            let m_n = crate::symmetry::apply_signs(n_hit, signs).normalize_or_zero();
+            let m_grab = grab_delta.map(|d| crate::symmetry::apply_signs(d, signs));
+            centers.push((m_hit, m_n, m_grab));
         }
     }
-    let avg_h = if plane_n > 0 {
-        plane_h / plane_n as f32
-    } else {
-        0.0
-    };
+
+    // Pre-compute average plane height per center (for Flatten / Fill / Scrape / Clay / Thumb).
+    let mut avg_hs: Vec<f32> = Vec::with_capacity(centers.len());
+    for &(c_hit, c_n, _) in &centers {
+        let mut plane_h = 0.0f32;
+        let mut plane_n = 0u32;
+        for v in &mesh.vertices {
+            let p = Vec3::from(v.position);
+            if (p - c_hit).length() < radius {
+                plane_h += (p - c_hit).dot(c_n);
+                plane_n += 1;
+            }
+        }
+        avg_hs.push(if plane_n > 0 {
+            plane_h / plane_n as f32
+        } else {
+            0.0
+        });
+    }
 
     match settings.brush {
         SculptBrush::Draw
@@ -290,74 +309,85 @@ pub fn apply_brush(
         | SculptBrush::ClayStrips
         | SculptBrush::Layer => {
             for v in &mut mesh.vertices {
-                let p = Vec3::from(v.position);
-                let d = (p - hit).length();
-                let w = match settings.brush {
-                    SculptBrush::DrawSharp => falloff_sharp(d, radius),
-                    SculptBrush::ClayStrips => falloff_square(d, radius),
-                    _ => falloff(d, radius),
-                };
-                if w <= 0.0 {
-                    continue;
+                let p0 = Vec3::from(v.position);
+                let mut p = p0;
+                for (ci, &(c_hit, c_n, _)) in centers.iter().enumerate() {
+                    let d = (p0 - c_hit).length();
+                    let w = match settings.brush {
+                        SculptBrush::DrawSharp => falloff_sharp(d, radius),
+                        SculptBrush::ClayStrips => falloff_square(d, radius),
+                        _ => falloff(d, radius),
+                    };
+                    if w <= 0.0 {
+                        continue;
+                    }
+                    let mut disp = c_n * (strength * w * radius * 0.35 * sign);
+                    if matches!(settings.brush, SculptBrush::Clay | SculptBrush::ClayStrips) {
+                        let h = (p0 - c_hit).dot(c_n);
+                        let flatten = c_n * ((avg_hs[ci] - h) * 0.25 * w * strength);
+                        disp = disp * 0.85 + flatten;
+                    }
+                    if settings.brush == SculptBrush::Layer {
+                        let max_h = radius * 0.25 * strength;
+                        let h = (p0 - c_hit).dot(c_n);
+                        let target = max_h * sign;
+                        let step = (target - h).clamp(-max_h * 0.15, max_h * 0.15) * w;
+                        disp = c_n * step;
+                    }
+                    p += disp;
                 }
-                let mut disp = n_hit * (strength * w * radius * 0.35 * sign);
-                // Clay: slightly flatten toward plane while drawing
-                if matches!(settings.brush, SculptBrush::Clay | SculptBrush::ClayStrips) {
-                    let h = (p - hit).dot(n_hit);
-                    let flatten = n_hit * ((avg_h - h) * 0.25 * w * strength);
-                    disp = disp * 0.85 + flatten;
-                }
-                // Layer: cap displacement magnitude
-                if settings.brush == SculptBrush::Layer {
-                    let max_h = radius * 0.25 * strength;
-                    let h = (p - hit).dot(n_hit);
-                    let target = max_h * sign;
-                    let step = (target - h).clamp(-max_h * 0.15, max_h * 0.15) * w;
-                    disp = n_hit * step;
-                }
-                v.position = (p + disp).to_array();
+                v.position = p.to_array();
             }
         }
         SculptBrush::Inflate => {
             for v in &mut mesh.vertices {
-                let p = Vec3::from(v.position);
-                let d = (p - hit).length();
-                let w = falloff(d, radius);
-                if w <= 0.0 {
-                    continue;
-                }
+                let p0 = Vec3::from(v.position);
+                let mut p = p0;
                 let n = Vec3::from(v.normal).normalize_or_zero();
-                v.position = (p + n * (strength * w * radius * 0.35 * sign)).to_array();
+                for &(c_hit, _, _) in &centers {
+                    let d = (p0 - c_hit).length();
+                    let w = falloff(d, radius);
+                    if w <= 0.0 {
+                        continue;
+                    }
+                    p += n * (strength * w * radius * 0.35 * sign);
+                }
+                v.position = p.to_array();
             }
         }
         SculptBrush::Blob => {
-            // Push toward/away from a sphere centered above the hit
-            let center = hit + n_hit * (radius * 0.5 * sign);
             for v in &mut mesh.vertices {
-                let p = Vec3::from(v.position);
-                let d = (p - hit).length();
-                let w = falloff(d, radius);
-                if w <= 0.0 {
-                    continue;
+                let p0 = Vec3::from(v.position);
+                let mut p = p0;
+                for &(c_hit, c_n, _) in &centers {
+                    let d = (p0 - c_hit).length();
+                    let w = falloff(d, radius);
+                    if w <= 0.0 {
+                        continue;
+                    }
+                    let center = c_hit + c_n * (radius * 0.5 * sign);
+                    let dir = (p0 - center).normalize_or_zero();
+                    p += dir * (strength * w * radius * 0.3 * sign);
                 }
-                let dir = (p - center).normalize_or_zero();
-                v.position = (p + dir * (strength * w * radius * 0.3 * sign)).to_array();
+                v.position = p.to_array();
             }
         }
         SculptBrush::Crease => {
             for v in &mut mesh.vertices {
-                let p = Vec3::from(v.position);
-                let d = (p - hit).length();
-                let w = falloff_sharp(d, radius);
-                if w <= 0.0 {
-                    continue;
+                let p0 = Vec3::from(v.position);
+                let mut p = p0;
+                for &(c_hit, c_n, _) in &centers {
+                    let d = (p0 - c_hit).length();
+                    let w = falloff_sharp(d, radius);
+                    if w <= 0.0 {
+                        continue;
+                    }
+                    let draw = c_n * (strength * w * radius * 0.3 * sign);
+                    let to_c = (c_hit - p0).normalize_or_zero();
+                    let pinch = to_c * (strength * w * radius * 0.2);
+                    p += draw + pinch;
                 }
-                // Draw component
-                let draw = n_hit * (strength * w * radius * 0.3 * sign);
-                // Pinch toward center
-                let to_c = (hit - p).normalize_or_zero();
-                let pinch = to_c * (strength * w * radius * 0.2);
-                v.position = (p + draw + pinch).to_array();
+                v.position = p.to_array();
             }
         }
         SculptBrush::Smooth => {
@@ -382,115 +412,132 @@ pub fn apply_brush(
                 })
                 .collect();
             for (i, v) in mesh.vertices.iter_mut().enumerate() {
-                let p = Vec3::from(v.position);
-                let d = (p - hit).length();
-                let w = falloff(d, radius);
-                if w <= 0.0 {
-                    continue;
+                let p0 = Vec3::from(v.position);
+                let mut p = p0;
+                let target_base = targets[i];
+                for &(c_hit, _, _) in &centers {
+                    let d = (p0 - c_hit).length();
+                    let w = falloff(d, radius);
+                    if w <= 0.0 {
+                        continue;
+                    }
+                    let t = (strength * w).clamp(0.0, 1.0);
+                    let target = if settings.invert {
+                        p0 + (p0 - target_base)
+                    } else {
+                        target_base
+                    };
+                    p = p.lerp(target, t);
                 }
-                let t = (strength * w).clamp(0.0, 1.0);
-                // invert = enhance details
-                let target = if settings.invert {
-                    p + (p - targets[i])
-                } else {
-                    targets[i]
-                };
-                v.position = p.lerp(target, t).to_array();
+                v.position = p.to_array();
             }
         }
         SculptBrush::Flatten | SculptBrush::Fill | SculptBrush::Scrape => {
             for v in &mut mesh.vertices {
-                let p = Vec3::from(v.position);
-                let d = (p - hit).length();
-                let w = falloff(d, radius);
-                if w <= 0.0 {
-                    continue;
+                let p0 = Vec3::from(v.position);
+                let mut p = p0;
+                for (ci, &(c_hit, c_n, _)) in centers.iter().enumerate() {
+                    let d = (p0 - c_hit).length();
+                    let w = falloff(d, radius);
+                    if w <= 0.0 {
+                        continue;
+                    }
+                    let h = (p0 - c_hit).dot(c_n);
+                    let delta_h = avg_hs[ci] - h;
+                    let apply = match settings.brush {
+                        SculptBrush::Fill => delta_h > 0.0,
+                        SculptBrush::Scrape => delta_h < 0.0,
+                        _ => true,
+                    };
+                    if apply {
+                        p += c_n * (delta_h * strength * w);
+                    }
                 }
-                let h = (p - hit).dot(n_hit);
-                let delta_h = avg_h - h;
-                let apply = match settings.brush {
-                    SculptBrush::Fill => delta_h > 0.0,   // only raise low points
-                    SculptBrush::Scrape => delta_h < 0.0, // only lower high points
-                    _ => true,                            // Flatten both ways
-                };
-                if apply {
-                    v.position = (p + n_hit * (delta_h * strength * w)).to_array();
-                }
+                v.position = p.to_array();
             }
         }
         SculptBrush::Pinch => {
             for v in &mut mesh.vertices {
-                let p = Vec3::from(v.position);
-                let d = (p - hit).length();
-                let w = falloff(d, radius);
-                if w <= 0.0 {
-                    continue;
+                let p0 = Vec3::from(v.position);
+                let mut p = p0;
+                for &(c_hit, _, _) in &centers {
+                    let d = (p0 - c_hit).length();
+                    let w = falloff(d, radius);
+                    if w <= 0.0 {
+                        continue;
+                    }
+                    let to_c = (c_hit - p0) * (strength * w * sign);
+                    p += to_c;
                 }
-                let to_c = (hit - p) * (strength * w * sign);
-                v.position = (p + to_c).to_array();
+                v.position = p.to_array();
             }
         }
         SculptBrush::Grab | SculptBrush::SnakeHook => {
-            let delta = grab_delta.unwrap_or(Vec3::ZERO);
-            if delta.length_squared() < 1e-12 {
+            // Grab is directional; only apply when a grab delta exists.
+            let any_delta = centers.iter().any(|(_, _, g)| g.map(|d| d.length_squared() > 1e-12).unwrap_or(false));
+            if !any_delta {
                 return;
             }
             for v in &mut mesh.vertices {
-                let p = Vec3::from(v.position);
-                let d = (p - hit).length();
-                let w = falloff(d, radius);
-                if w <= 0.0 {
-                    continue;
+                let p0 = Vec3::from(v.position);
+                let mut p = p0;
+                for &(c_hit, _, c_grab) in &centers {
+                    let delta = c_grab.unwrap_or(Vec3::ZERO);
+                    if delta.length_squared() < 1e-12 {
+                        continue;
+                    }
+                    let d = (p0 - c_hit).length();
+                    let w = falloff(d, radius);
+                    if w <= 0.0 {
+                        continue;
+                    }
+                    p += delta * w * strength;
                 }
-                v.position = (p + delta * w * strength).to_array();
+                v.position = p.to_array();
             }
         }
         SculptBrush::Nudge => {
-            let delta = grab_delta.unwrap_or(n_hit * 0.0);
-            let dir = if delta.length_squared() > 1e-12 {
-                delta.normalize_or_zero()
-            } else {
-                n_hit
-            };
             for v in &mut mesh.vertices {
-                let p = Vec3::from(v.position);
-                let d = (p - hit).length();
-                let w = falloff(d, radius);
-                if w <= 0.0 {
-                    continue;
+                let p0 = Vec3::from(v.position);
+                let mut p = p0;
+                for &(c_hit, c_n, c_grab) in &centers {
+                    let delta = c_grab.unwrap_or(Vec3::ZERO);
+                    let dir = if delta.length_squared() > 1e-12 {
+                        delta.normalize_or_zero()
+                    } else {
+                        c_n
+                    };
+                    let d = (p0 - c_hit).length();
+                    let w = falloff(d, radius);
+                    if w <= 0.0 {
+                        continue;
+                    }
+                    p += dir * (strength * w * radius * 0.25);
                 }
-                v.position = (p + dir * (strength * w * radius * 0.25)).to_array();
+                v.position = p.to_array();
             }
         }
         SculptBrush::Thumb => {
-            // Flatten a bit + slide along stroke
-            let delta = grab_delta.unwrap_or(Vec3::ZERO);
             for v in &mut mesh.vertices {
-                let p = Vec3::from(v.position);
-                let d = (p - hit).length();
-                let w = falloff(d, radius);
-                if w <= 0.0 {
-                    continue;
+                let p0 = Vec3::from(v.position);
+                let mut p = p0;
+                for (ci, &(c_hit, c_n, c_grab)) in centers.iter().enumerate() {
+                    let delta = c_grab.unwrap_or(Vec3::ZERO);
+                    let d = (p0 - c_hit).length();
+                    let w = falloff(d, radius);
+                    if w <= 0.0 {
+                        continue;
+                    }
+                    let h = (p0 - c_hit).dot(c_n);
+                    let flatten = c_n * ((avg_hs[ci] - h) * 0.5 * w * strength);
+                    let slide = delta * (w * strength * 0.5);
+                    p += flatten + slide;
                 }
-                let h = (p - hit).dot(n_hit);
-                let flatten = n_hit * ((avg_h - h) * 0.5 * w * strength);
-                let slide = delta * (w * strength * 0.5);
-                v.position = (p + flatten + slide).to_array();
+                v.position = p.to_array();
             }
         }
     }
+    // Single normal update after all mirrored influences have been applied.
     mesh.compute_normals();
-
-    // Blender sculpt symmetry: mirror stroke across each enabled axis combination
-    if sym.any() {
-        for signs in sym.mirror_signs() {
-            let m_hit = crate::symmetry::apply_signs(hit, signs);
-            if m_hit.distance(hit) <= 1e-6 {
-                continue;
-            }
-            let m_n = crate::symmetry::apply_signs(n_hit, signs).normalize_or_zero();
-            let m_grab = grab_delta.map(|d| crate::symmetry::apply_signs(d, signs));
-            apply_brush(mesh, settings, m_hit, m_n, m_grab, crate::symmetry::MeshSymmetry::default());
-        }
-    }
 }
+

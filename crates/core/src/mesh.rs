@@ -376,23 +376,41 @@ impl MeshData {
         VertexGroup::normalize_all(&mut self.vertex_groups, n);
     }
 
-    /// Heat-map color for a weight in [0,1] (blue→cyan→green→yellow→red).
+    /// Blender-style weight paint heat map:
+    /// 0 blue → cyan → green → yellow → 1 red.
     pub fn weight_to_color(w: f32) -> [f32; 4] {
+        // Matches Blender's common weight-paint ramp (smoothstep blends between stops).
         let t = w.clamp(0.0, 1.0);
-        let (r, g, b) = if t < 0.25 {
-            let u = t / 0.25;
-            (0.0, u, 1.0)
-        } else if t < 0.5 {
-            let u = (t - 0.25) / 0.25;
-            (0.0, 1.0, 1.0 - u)
-        } else if t < 0.75 {
-            let u = (t - 0.5) / 0.25;
-            (u, 1.0, 0.0)
+        // Stops: (t, r, g, b)
+        const STOPS: [(f32, f32, f32, f32); 5] = [
+            (0.00, 0.00, 0.00, 1.00), // blue
+            (0.25, 0.00, 1.00, 1.00), // cyan
+            (0.50, 0.00, 1.00, 0.00), // green
+            (0.75, 1.00, 1.00, 0.00), // yellow
+            (1.00, 1.00, 0.00, 0.00), // red
+        ];
+        let mut i = 0;
+        while i + 1 < STOPS.len() && t > STOPS[i + 1].0 {
+            i += 1;
+        }
+        if i + 1 >= STOPS.len() {
+            return [1.0, 0.0, 0.0, 1.0];
+        }
+        let (t0, r0, g0, b0) = STOPS[i];
+        let (t1, r1, g1, b1) = STOPS[i + 1];
+        let u = if (t1 - t0).abs() < 1e-8 {
+            0.0
         } else {
-            let u = (t - 0.75) / 0.25;
-            (1.0, 1.0 - u, 0.0)
+            ((t - t0) / (t1 - t0)).clamp(0.0, 1.0)
         };
-        [r, g, b, 1.0]
+        // smoothstep for a softer Blender-like blend
+        let u = u * u * (3.0 - 2.0 * u);
+        [
+            r0 + (r1 - r0) * u,
+            g0 + (g1 - g0) * u,
+            b0 + (b1 - b0) * u,
+            1.0,
+        ]
     }
 
     /// Apply active vertex-group weights as vertex colors for visualization.

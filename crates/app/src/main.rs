@@ -195,6 +195,10 @@ struct App {
     view_anim: Option<ViewAnim>,
     title: String,
     initial: Option<PathBuf>,
+    /// Cycle through overlapping objects under the cursor (Alt-click or re-click).
+    pick_cycle_hits: Vec<usize>,
+    pick_cycle_index: usize,
+    pick_cycle_cursor: (i32, i32),
 }
 
 fn highlights(doc: &Document) -> Vec<Highlight> {
@@ -411,6 +415,9 @@ impl App {
             view_anim: None,
             title: String::new(),
             initial,
+            pick_cycle_hits: Vec::new(),
+            pick_cycle_index: 0,
+            pick_cycle_cursor: (i32::MIN, i32::MIN),
         }
     }
 
@@ -1249,12 +1256,60 @@ impl App {
             return;
         }
         let [vx, vy, vw, vh] = self.viewport;
+        if vw < 1.0 || vh < 1.0 {
+            return;
+        }
         let nx = (self.cursor.0 as f32 - vx) / vw * 2.0 - 1.0;
         let ny = 1.0 - (self.cursor.1 as f32 - vy) / vh * 2.0;
         let (o, d) = self.camera.ray((nx, ny), vw / vh);
-        match (self.doc.scene.pick(o, d), extend) {
+        let hits = self.doc.scene.pick_all_hits(o, d);
+        let cursor_key = (self.cursor.0 as i32 / 4, self.cursor.1 as i32 / 4);
+        let alt = self.mods.alt_key();
+        // Cycle when Alt is held, or when clicking the same spot again with multiple hits.
+        let same_spot = cursor_key == self.pick_cycle_cursor;
+        let cycle = !extend
+            && hits.len() > 1
+            && (alt || (same_spot && !self.pick_cycle_hits.is_empty()));
+        let chosen = if hits.is_empty() {
+            self.pick_cycle_hits.clear();
+            self.pick_cycle_index = 0;
+            None
+        } else if cycle {
+            let hit_ids: Vec<usize> = hits.iter().map(|(i, _)| *i).collect();
+            if hit_ids != self.pick_cycle_hits {
+                self.pick_cycle_hits = hit_ids;
+                self.pick_cycle_index = 0;
+            } else {
+                self.pick_cycle_index = (self.pick_cycle_index + 1) % self.pick_cycle_hits.len();
+            }
+            self.pick_cycle_cursor = cursor_key;
+            Some(self.pick_cycle_hits[self.pick_cycle_index])
+        } else {
+            self.pick_cycle_hits = hits.iter().map(|(i, _)| *i).collect();
+            self.pick_cycle_index = 0;
+            self.pick_cycle_cursor = cursor_key;
+            Some(hits[0].0)
+        };
+        match (chosen, extend) {
             (Some(i), true) => self.doc.select_toggle(i),
-            (Some(i), false) => self.doc.select_only(i),
+            (Some(i), false) => {
+                self.doc.select_only(i);
+                if self.pick_cycle_hits.len() > 1 {
+                    let name = self
+                        .doc
+                        .scene
+                        .objects
+                        .get(i)
+                        .map(|o| o.name.as_str())
+                        .unwrap_or("?");
+                    self.status(format!(
+                        "Selected {} ({}/{}) — Alt+click or re-click to cycle",
+                        name,
+                        self.pick_cycle_index + 1,
+                        self.pick_cycle_hits.len()
+                    ));
+                }
+            }
             (None, false) => self.doc.select_none(),
             (None, true) => {}
         }
@@ -1895,7 +1950,8 @@ impl App {
         let dist = (world.w_axis.truncate() - self.camera.target)
             .length()
             .max(0.5);
-        let thresh = dist * 0.12;
+        // Generous threshold so bones inside / behind meshes are still easy to click
+        let thresh = (dist * 0.22).max(0.15);
         let pick = if self.doc.armature_edit {
             session_arm.pick_bone_rest(local_o, local_d, thresh)
         } else {
@@ -2686,14 +2742,38 @@ impl App {
             // Edit Mode owns a working mesh copy. Commit it before serializing so
             // UV edits and geometry changes cannot be omitted from the project.
             self.doc.sync_edit_mesh();
-            match project::to_bytes(&self.doc.scene)
-                .and_then(|b| std::fs::write(&path, b).map_err(Into::into))
-            {
+            // Weight Paint temporarily overwrites vertex colors with the heat map.
+            // Restore real colors (and keep groups/skin) so paintings save correctly.
+            let was_weight = self.doc.weight_paint_mode;
+            if was_weight {
+                self.doc.exit_weight_paint_mode();
+            }
+            // Sync any painted vertex groups into skin before writing the file.
+            let skinned: Vec<u64> = self
+                .doc
+                .scene
+                .objects
+                .iter()
+                .filter(|o| o.skin.is_some())
+                .map(|o| o.id)
+                .collect();
+            for id in skinned {
+                self.doc.sync_skin_from_vertex_groups(id);
+            }
+            let result = project::to_bytes(&self.doc.scene)
+                .and_then(|b| std::fs::write(&path, b).map_err(Into::into));
+            if was_weight {
+                let _ = self.doc.enter_weight_paint_mode();
+            }
+            match result {
                 Ok(()) => {
                     self.doc.path = Some(path.clone());
                     self.doc.dirty = false;
                     self.recent.add(&path);
-                    self.status(format!("Saved {}", path.display()));
+                    self.status(format!(
+                        "Saved {} (vertex colors, weight groups & skin bindings included)",
+                        path.display()
+                    ));
                 }
                 Err(e) => self.status(format!("Save failed: {e:#}")),
             }
@@ -3447,7 +3527,23 @@ impl App {
                 Ok(()) => {
                     if self.doc.vertex_paint_mode {
                         self.ts.tool = Tool::VertexPaintDraw;
-                        self.status("Vertex Paint – LMB paint · Ctrl+Shift+V toggle");
+                        // Sensible brush size from mesh bounds so the first stroke is visible
+                        if let Some(i) = self.doc.active_index() {
+                            let mesh = &self.doc.scene.objects[i].mesh;
+                            if !mesh.vertices.is_empty() {
+                                let mut min = glam::Vec3::splat(f32::INFINITY);
+                                let mut max = glam::Vec3::splat(f32::NEG_INFINITY);
+                                for v in &mesh.vertices {
+                                    let p = glam::Vec3::from(v.position);
+                                    min = min.min(p);
+                                    max = max.max(p);
+                                }
+                                let extent = (max - min).length().max(1e-3);
+                                // ~8% of diagonal — similar to Blender's default feel on a unit cube
+                                self.ts.vpaint_radius = (extent * 0.08).clamp(0.02, 5.0);
+                            }
+                        }
+                        self.status("Vertex Paint – LMB paint · adjust Radius/Color in header");
                     } else {
                         self.ts.tool = Tool::Select;
                         self.status("Object Mode");
@@ -3459,7 +3555,21 @@ impl App {
                 Ok(()) => {
                     if self.doc.weight_paint_mode {
                         self.ts.tool = Tool::WeightPaintDraw;
-                        self.status("Weight Paint – LMB paint weights · Ctrl+Shift+W toggle");
+                        if let Some(i) = self.doc.active_index() {
+                            let mesh = &self.doc.scene.objects[i].mesh;
+                            if !mesh.vertices.is_empty() {
+                                let mut min = glam::Vec3::splat(f32::INFINITY);
+                                let mut max = glam::Vec3::splat(f32::NEG_INFINITY);
+                                for v in &mesh.vertices {
+                                    let p = glam::Vec3::from(v.position);
+                                    min = min.min(p);
+                                    max = max.max(p);
+                                }
+                                let extent = (max - min).length().max(1e-3);
+                                self.ts.wpaint_radius = (extent * 0.08).clamp(0.02, 5.0);
+                            }
+                        }
+                        self.status("Weight Paint – LMB paint · Weight/Radius/Group in header");
                     } else {
                         self.ts.tool = Tool::Select;
                         self.status("Object Mode");
