@@ -847,7 +847,9 @@ fn import_mesh(ar: &Archive, obj: &ObjRef, chain: &[XformReader], parent_name: O
         let mut mesh = MeshData { name: obj.name.clone(), ..Default::default() };
         mesh.vertices = positions
             .iter()
-            .map(|p| Vertex { position: (*p * scale).to_array(), normal: [0.0, 1.0, 0.0], uv: [0.0, 0.0] })
+            .map(|p| Vertex { position: (*p * scale).to_array(), normal: [0.0, 1.0, 0.0], uv: [0.0, 0.0],
+            color: [1.0, 1.0, 1.0, 1.0],
+        })
             .collect();
         mesh.indices = indices;
         mesh.compute_normals();

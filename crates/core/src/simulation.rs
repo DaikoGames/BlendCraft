@@ -281,6 +281,7 @@ fn mesh_from_positions(base: &MeshData, positions: &[Vec3]) -> MeshData {
         vertices: base.vertices.clone(),
         indices: base.indices.clone(),
         groups: base.groups.clone(),
+        ..Default::default()
     };
     for (i, p) in positions.iter().enumerate() {
         if i < mesh.vertices.len() {
@@ -509,7 +510,8 @@ impl ParticleSim {
                     position: pos.to_array(),
                     normal: o.normalize_or_zero().to_array(),
                     uv: [0.0, 0.0],
-                });
+            color: [1.0, 1.0, 1.0, 1.0],
+        });
             }
             for tri in [[0, 1, 2], [0, 1, 3], [1, 2, 3], [2, 0, 3]] {
                 indices.push(base + tri[0]);
@@ -522,7 +524,8 @@ impl ParticleSim {
             vertices,
             indices,
             groups: Vec::new(),
-        }
+        ..Default::default()
+    }
     }
 }
 

@@ -318,6 +318,7 @@ fn subdivide_once(mesh: &MeshData) -> MeshData {
             position: ((Vec3::from(va.position) + Vec3::from(vb.position)) * 0.5).to_array(),
             normal: n.to_array(),
             uv: [(va.uv[0] + vb.uv[0]) * 0.5, (va.uv[1] + vb.uv[1]) * 0.5],
+            color: [1.0, 1.0, 1.0, 1.0],
         };
         let index = vertices.len() as u32;
         vertices.push(v);
@@ -345,6 +346,7 @@ fn subdivide_once(mesh: &MeshData) -> MeshData {
         vertices,
         indices,
         groups,
+        ..Default::default()
     }
 }
 
@@ -1107,7 +1109,8 @@ impl ClothSim {
             vertices: self.template.vertices.clone(),
             indices: self.template.indices.clone(),
             groups: self.template.groups.clone(),
-        };
+        ..Default::default()
+    };
         for (i, v) in mesh.vertices.iter_mut().enumerate() {
             let src = self.pos[self.rep[i] as usize];
             v.position = inv_world.transform_point3(src).to_array();

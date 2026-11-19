@@ -1035,7 +1035,9 @@ pub fn mesh_from_particles(particles: &[Vec3], bmin: Vec3, bmax: Vec3, h0: f32, 
 
     mesh.vertices = vertices
         .iter()
-        .map(|p| Vertex { position: p.to_array(), normal: [0.0, 1.0, 0.0], uv: [0.0, 0.0] })
+        .map(|p| Vertex { position: p.to_array(), normal: [0.0, 1.0, 0.0], uv: [0.0, 0.0],
+            color: [1.0, 1.0, 1.0, 1.0],
+        })
         .collect();
     mesh.indices = indices;
     mesh.compute_normals();
@@ -1506,7 +1508,9 @@ fn particles_as_mesh(points: &[Vec3], radius: f32, name: &str) -> MeshData {
     for p in points {
         let base = mesh.vertices.len() as u32;
         for d in dirs.iter() {
-            mesh.vertices.push(Vertex { position: (*p + *d * radius).to_array(), normal: d.to_array(), uv: [0.0, 0.0] });
+            mesh.vertices.push(Vertex { position: (*p + *d * radius).to_array(), normal: d.to_array(), uv: [0.0, 0.0],
+            color: [1.0, 1.0, 1.0, 1.0],
+        });
         }
         for f in faces.iter() {
             mesh.indices.extend_from_slice(&[base + f[0] as u32, base + f[1] as u32, base + f[2] as u32]);

@@ -281,6 +281,7 @@ fn subdivide_once(mesh: &MeshData) -> MeshData {
             position: pm.to_array(),
             normal: nm.to_array(),
             uv: um,
+            color: [1.0, 1.0, 1.0, 1.0],
         });
         edge_mid.insert(key, idx);
         idx
@@ -298,6 +299,7 @@ fn subdivide_once(mesh: &MeshData) -> MeshData {
         vertices,
         indices,
         groups: mesh.groups.clone(),
+        ..Default::default()
     };
     out.compute_normals();
     out
@@ -356,6 +358,7 @@ fn apply_array(
         vertices,
         indices,
         groups: vec![],
+        ..Default::default()
     };
     if merge && merge_distance > 0.0 {
         out = merge_by_distance(&out, merge_distance);
@@ -424,6 +427,7 @@ fn apply_mirror(
         vertices,
         indices,
         groups: vec![],
+        ..Default::default()
     };
     if merge && threshold > 0.0 {
         out = merge_by_distance(&out, threshold);
@@ -503,6 +507,7 @@ fn apply_solidify(mesh: &MeshData, thickness: f32, offset: f32, _even: bool) -> 
         vertices,
         indices,
         groups: vec![],
+        ..Default::default()
     };
     out.compute_normals();
     out
@@ -584,6 +589,7 @@ fn bevel_once(mesh: &MeshData, amount: f32, angle_limit: f32) -> MeshData {
         vertices,
         indices: mesh.indices.clone(),
         groups: mesh.groups.clone(),
+        ..Default::default()
     };
     out.compute_normals();
     out
@@ -667,6 +673,7 @@ fn apply_boolean(a: &MeshData, b: &MeshData, op: BooleanOperation) -> MeshData {
         vertices,
         indices,
         groups: vec![],
+        ..Default::default()
     };
     out.compute_normals();
     out
@@ -755,6 +762,7 @@ fn merge_by_distance(mesh: &MeshData, dist: f32) -> MeshData {
         vertices: unique,
         indices,
         groups: vec![],
+        ..Default::default()
     }
 }
 

@@ -7,7 +7,7 @@ mod settings;
 mod shader_graph_wgsl;
 mod texture;
 
-pub use settings::{Highlight, RenderEngine, ShadingMode, ViewSettings, WireMode};
+pub use settings::{Highlight, RenderEngine, ShadingMode, ViewSettings, ViewportShading, WireMode};
 
 pub fn supports_shader_graph(graph: &forge_core::ShaderGraph) -> bool {
     shader_graph_wgsl::compile(graph).is_ok()
@@ -99,8 +99,8 @@ struct GpuMaterial {
     graph_pipeline: Option<Arc<wgpu::RenderPipeline>>,
 }
 
-const MESH_ATTRS: [wgpu::VertexAttribute; 3] =
-    wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2];
+const MESH_ATTRS: [wgpu::VertexAttribute; 4] =
+    wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2, 3 => Float32x4];
 const POS_ATTRS: [wgpu::VertexAttribute; 1] = wgpu::vertex_attr_array![0 => Float32x3];
 const LINE_ATTRS: [wgpu::VertexAttribute; 2] =
     wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3];
@@ -2158,7 +2158,8 @@ fn model_uniform(world: &Mat4, hl: Highlight) -> ModelUniform {
     let c = match hl {
         Highlight::Active => [1.0, 0.75, 0.2],
         Highlight::Selected => [0.9, 0.35, 0.0],
-        Highlight::None => [0.05, 0.05, 0.07],
+        // Pure black wires — readable on both light and shaded surfaces
+        Highlight::None => [0.0, 0.0, 0.0],
     };
     ModelUniform {
         matrix: world.to_cols_array_2d(),

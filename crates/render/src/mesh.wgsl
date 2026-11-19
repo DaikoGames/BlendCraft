@@ -23,6 +23,7 @@ struct VsIn {
     @location(0) pos: vec3<f32>,
     @location(1) normal: vec3<f32>,
     @location(2) uv: vec2<f32>,
+    @location(3) color: vec4<f32>,
 };
 struct VsOut {
     @builtin(position) clip: vec4<f32>,
@@ -30,6 +31,7 @@ struct VsOut {
     @location(1) world: vec3<f32>,
     @location(2) uv: vec2<f32>,
     @location(3) local_pos: vec3<f32>,
+    @location(4) color: vec4<f32>,
 };
 struct GraphSurface {
     base_color: vec4<f32>,
@@ -48,6 +50,7 @@ fn vs_main(v: VsIn) -> VsOut {
     o.normal = (model.normal_matrix * vec4<f32>(v.normal, 0.0)).xyz;
     o.world = wp.xyz;
     o.uv = v.uv;
+    o.color = v.color;
     o.local_pos = v.pos;
     return o;
 }
@@ -132,7 +135,7 @@ fn fs_main(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f
     let is_mask = (flags & 2u) != 0u;
     let is_blend = (flags & 4u) != 0u;
 
-    var base = u_mat.base_color * base_s;
+    var base = u_mat.base_color * base_s * in.color;
     var metallic = clamp(u_mat.params.x * mr_s.b, 0.0, 1.0);
     var roughness = clamp(u_mat.params.y * mr_s.g, 0.045, 1.0);
     var ao = 1.0 + u_mat.params.w * (ao_s - 1.0);

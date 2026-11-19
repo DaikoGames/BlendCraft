@@ -453,6 +453,7 @@ mod tests {
             position,
             normal: [0.0, 0.0, 1.0],
             uv,
+            color: [1.0, 1.0, 1.0, 1.0],
         }
     }
 

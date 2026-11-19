@@ -69,8 +69,16 @@ pub struct Document {
     pub uv_mode: bool,
     /// Texture Paint Mode.
     pub paint_mode: bool,
+    /// Vertex Paint Mode (paint per-vertex colors).
+    pub vertex_paint_mode: bool,
+    /// Weight Paint Mode (paint vertex group weights).
+    pub weight_paint_mode: bool,
+    /// Blender-style X-axis mesh/bone symmetry ("butterfly").
+    pub mesh_symmetry: crate::symmetry::MeshSymmetry,
     /// Original pixels captured when a texture enters Paint Mode; used by the eraser.
     paint_base_textures: HashMap<usize, Vec<u8>>,
+    /// Vertex colors snapshot when entering Weight Paint (to restore on exit).
+    weight_paint_color_backup: Option<Vec<[f32; 4]>>,
     /// Selected vertex indices for UV editing.
     pub uv_selection: std::collections::BTreeSet<u32>,
     rng: u32,
@@ -135,7 +143,11 @@ impl Document {
             sculpt_mode: false,
             uv_mode: false,
             paint_mode: false,
+            vertex_paint_mode: false,
+            weight_paint_mode: false,
+            mesh_symmetry: crate::symmetry::MeshSymmetry::default(),
             paint_base_textures: HashMap::new(),
+            weight_paint_color_backup: None,
             uv_selection: std::collections::BTreeSet::new(),
             rng: 0x9E37_79B9,
             undo: Vec::new(),
@@ -507,22 +519,26 @@ impl Document {
                     position: [-hw, hh, 0.0],
                     normal: n,
                     uv: [0.0, 0.0],
-                },
+            color: [1.0, 1.0, 1.0, 1.0],
+        },
                 Vertex {
                     position: [hw, hh, 0.0],
                     normal: n,
                     uv: [1.0, 0.0],
-                },
+            color: [1.0, 1.0, 1.0, 1.0],
+        },
                 Vertex {
                     position: [hw, -hh, 0.0],
                     normal: n,
                     uv: [1.0, 1.0],
-                },
+            color: [1.0, 1.0, 1.0, 1.0],
+        },
                 Vertex {
                     position: [-hw, -hh, 0.0],
                     normal: n,
                     uv: [0.0, 1.0],
-                },
+            color: [1.0, 1.0, 1.0, 1.0],
+        },
             ],
             indices: vec![0, 3, 2, 0, 2, 1],
             ..Default::default()
@@ -1238,6 +1254,12 @@ impl Document {
         if self.uv_mode {
             self.exit_uv_mode();
         }
+        if self.vertex_paint_mode {
+            self.exit_vertex_paint_mode();
+        }
+        if self.weight_paint_mode {
+            self.exit_weight_paint_mode();
+        }
         self.armature_edit = false;
         self.pose_mode = false;
         let id = self
@@ -1410,6 +1432,299 @@ impl Document {
     ) -> bool {
         self.paint_stroke_uv_impl(uvs, [0.0; 4], radius_uv, strength, true)
     }
+    /// Soften/blur texture under the brush (box blur weighted by falloff).
+    pub fn soften_stroke_uv(
+        &mut self,
+        uvs: &[glam::Vec2],
+        radius_uv: f32,
+        strength: f32,
+    ) -> bool {
+        if uvs.is_empty() {
+            return false;
+        }
+        let id = match self.active {
+            Some(i) => i,
+            None => return false,
+        };
+        let mat_idx = self
+            .scene
+            .objects
+            .iter()
+            .find(|o| o.id == id)
+            .and_then(|o| o.material)
+            .unwrap_or(0);
+        let tex_idx = match self
+            .scene
+            .materials
+            .get(mat_idx)
+            .and_then(|m| m.base_color_tex)
+        {
+            Some(t) => t,
+            None => return false,
+        };
+        let mut textures = (*self.scene.textures).clone();
+        let Some(tex) = textures.get_mut(tex_idx) else {
+            return false;
+        };
+        let (w, h) = (tex.width as i32, tex.height as i32);
+        if w < 1 || h < 1 || tex.rgba8.len() != (w as usize * h as usize * 4) {
+            return false;
+        }
+        let src = tex.rgba8.clone();
+        let radius_uv = radius_uv.clamp(0.0001, 1.0);
+        let radius_px = (radius_uv * w.min(h) as f32).max(1.0);
+        let radius_i = radius_px.ceil() as i32;
+        let strength = strength.clamp(0.0, 1.0);
+        let mut changed = false;
+        for uv in uvs {
+            if !uv.is_finite() || uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0 {
+                continue;
+            }
+            let cx = uv.x * (w - 1) as f32;
+            let cy = uv.y * (h - 1) as f32;
+            let x0 = (cx.floor() as i32 - radius_i).max(0);
+            let y0 = (cy.floor() as i32 - radius_i).max(0);
+            let x1 = (cx.ceil() as i32 + radius_i).min(w - 1);
+            let y1 = (cy.ceil() as i32 + radius_i).min(h - 1);
+            for y in y0..=y1 {
+                for x in x0..=x1 {
+                    let dx = x as f32 - cx;
+                    let dy = y as f32 - cy;
+                    let d = (dx * dx + dy * dy).sqrt();
+                    if d > radius_px {
+                        continue;
+                    }
+                    let t = (1.0 - d / radius_px).clamp(0.0, 1.0);
+                    let falloff = t * t * (3.0 - 2.0 * t);
+                    let alpha = (falloff * strength).clamp(0.0, 1.0);
+                    if alpha <= 0.0 {
+                        continue;
+                    }
+                    // Sample 3x3 neighborhood average from src
+                    let mut acc = [0.0f32; 4];
+                    let mut cnt = 0.0f32;
+                    for oy in -1i32..=1 {
+                        for ox in -1i32..=1 {
+                            let sx = (x + ox).clamp(0, w - 1);
+                            let sy = (y + oy).clamp(0, h - 1);
+                            let si = ((sy * w + sx) * 4) as usize;
+                            for c in 0..4 {
+                                acc[c] += src[si + c] as f32;
+                            }
+                            cnt += 1.0;
+                        }
+                    }
+                    let i = ((y * w + x) * 4) as usize;
+                    for c in 0..4 {
+                        let avg = acc[c] / cnt;
+                        let dst = tex.rgba8[i + c] as f32;
+                        tex.rgba8[i + c] =
+                            (dst * (1.0 - alpha) + avg * alpha).round().clamp(0.0, 255.0) as u8;
+                    }
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            self.scene.textures = std::sync::Arc::new(textures);
+            self.touch();
+        }
+        changed
+    }
+
+    /// Smear texture pixels along the stroke direction.
+    pub fn smear_stroke_uv(
+        &mut self,
+        uvs: &[glam::Vec2],
+        radius_uv: f32,
+        strength: f32,
+    ) -> bool {
+        if uvs.len() < 2 {
+            return false;
+        }
+        let id = match self.active {
+            Some(i) => i,
+            None => return false,
+        };
+        let mat_idx = self
+            .scene
+            .objects
+            .iter()
+            .find(|o| o.id == id)
+            .and_then(|o| o.material)
+            .unwrap_or(0);
+        let tex_idx = match self
+            .scene
+            .materials
+            .get(mat_idx)
+            .and_then(|m| m.base_color_tex)
+        {
+            Some(t) => t,
+            None => return false,
+        };
+        let mut textures = (*self.scene.textures).clone();
+        let Some(tex) = textures.get_mut(tex_idx) else {
+            return false;
+        };
+        let (w, h) = (tex.width as i32, tex.height as i32);
+        if w < 1 || h < 1 {
+            return false;
+        }
+        let src = tex.rgba8.clone();
+        let radius_uv = radius_uv.clamp(0.0001, 1.0);
+        let radius_px = (radius_uv * w.min(h) as f32).max(1.0);
+        let radius_i = radius_px.ceil() as i32;
+        let strength = strength.clamp(0.0, 1.0);
+        let dir = (uvs[uvs.len() - 1] - uvs[0]).normalize_or_zero();
+        let sample_uv = uvs[0] - dir * radius_uv * 0.5;
+        let sx = (sample_uv.x.clamp(0.0, 1.0) * (w - 1) as f32).round() as i32;
+        let sy = (sample_uv.y.clamp(0.0, 1.0) * (h - 1) as f32).round() as i32;
+        let si = ((sy.clamp(0, h - 1) * w + sx.clamp(0, w - 1)) * 4) as usize;
+        let sample = [
+            src[si],
+            src[si + 1],
+            src[si + 2],
+            src[si + 3],
+        ];
+        let mut changed = false;
+        for uv in uvs {
+            if !uv.is_finite() || uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0 {
+                continue;
+            }
+            let cx = uv.x * (w - 1) as f32;
+            let cy = uv.y * (h - 1) as f32;
+            let x0 = (cx.floor() as i32 - radius_i).max(0);
+            let y0 = (cy.floor() as i32 - radius_i).max(0);
+            let x1 = (cx.ceil() as i32 + radius_i).min(w - 1);
+            let y1 = (cy.ceil() as i32 + radius_i).min(h - 1);
+            for y in y0..=y1 {
+                for x in x0..=x1 {
+                    let dx = x as f32 - cx;
+                    let dy = y as f32 - cy;
+                    let d = (dx * dx + dy * dy).sqrt();
+                    if d > radius_px {
+                        continue;
+                    }
+                    let t = (1.0 - d / radius_px).clamp(0.0, 1.0);
+                    let falloff = t * t * (3.0 - 2.0 * t);
+                    let alpha = (falloff * strength * 0.5).clamp(0.0, 1.0);
+                    if alpha <= 0.0 {
+                        continue;
+                    }
+                    let i = ((y * w + x) * 4) as usize;
+                    for c in 0..4 {
+                        let dst = tex.rgba8[i + c] as f32;
+                        tex.rgba8[i + c] =
+                            (dst * (1.0 - alpha) + sample[c] as f32 * alpha)
+                                .round()
+                                .clamp(0.0, 255.0) as u8;
+                    }
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            self.scene.textures = std::sync::Arc::new(textures);
+            self.touch();
+        }
+        changed
+    }
+
+    /// Flood-fill from the first UV sample with the given color (4-connected in image space).
+    pub fn fill_uv(
+        &mut self,
+        uv: glam::Vec2,
+        color: [f32; 4],
+        tolerance: u8,
+    ) -> bool {
+        if !uv.is_finite() || uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0 {
+            return false;
+        }
+        let id = match self.active {
+            Some(i) => i,
+            None => return false,
+        };
+        let mat_idx = self
+            .scene
+            .objects
+            .iter()
+            .find(|o| o.id == id)
+            .and_then(|o| o.material)
+            .unwrap_or(0);
+        let tex_idx = match self
+            .scene
+            .materials
+            .get(mat_idx)
+            .and_then(|m| m.base_color_tex)
+        {
+            Some(t) => t,
+            None => return false,
+        };
+        let mut textures = (*self.scene.textures).clone();
+        let Some(tex) = textures.get_mut(tex_idx) else {
+            return false;
+        };
+        let (w, h) = (tex.width as i32, tex.height as i32);
+        if w < 1 || h < 1 {
+            return false;
+        }
+        let sx = (uv.x * (w - 1) as f32).round() as i32;
+        let sy = (uv.y * (h - 1) as f32).round() as i32;
+        let si = ((sy * w + sx) * 4) as usize;
+        let target = [
+            tex.rgba8[si],
+            tex.rgba8[si + 1],
+            tex.rgba8[si + 2],
+            tex.rgba8[si + 3],
+        ];
+        let fill = [
+            (color[0].clamp(0.0, 1.0) * 255.0).round() as u8,
+            (color[1].clamp(0.0, 1.0) * 255.0).round() as u8,
+            (color[2].clamp(0.0, 1.0) * 255.0).round() as u8,
+            255u8,
+        ];
+        if target == fill {
+            return false;
+        }
+        let matches = |px: &[u8]| {
+            (0..3).all(|c| {
+                let d = (px[c] as i16 - target[c] as i16).unsigned_abs() as u8;
+                d <= tolerance
+            })
+        };
+        let mut stack = vec![(sx, sy)];
+        let mut visited = vec![false; (w * h) as usize];
+        let mut changed = false;
+        while let Some((x, y)) = stack.pop() {
+            if x < 0 || y < 0 || x >= w || y >= h {
+                continue;
+            }
+            let idx = (y * w + x) as usize;
+            if visited[idx] {
+                continue;
+            }
+            visited[idx] = true;
+            let i = idx * 4;
+            if !matches(&tex.rgba8[i..i + 4]) {
+                continue;
+            }
+            tex.rgba8[i] = fill[0];
+            tex.rgba8[i + 1] = fill[1];
+            tex.rgba8[i + 2] = fill[2];
+            tex.rgba8[i + 3] = fill[3];
+            changed = true;
+            stack.push((x + 1, y));
+            stack.push((x - 1, y));
+            stack.push((x, y + 1));
+            stack.push((x, y - 1));
+        }
+        if changed {
+            self.scene.textures = std::sync::Arc::new(textures);
+            self.touch();
+        }
+        changed
+    }
+
 
     fn paint_stroke_uv_impl(
         &mut self,
@@ -1805,6 +2120,259 @@ impl Document {
         }
     }
 
+    pub fn enter_vertex_paint_mode(&mut self) -> Result<(), String> {
+        if self.vertex_paint_mode {
+            return Ok(());
+        }
+        if self.edit.is_some() {
+            self.exit_edit_mode(true);
+        }
+        self.exit_sculpt_mode();
+        self.exit_paint_mode();
+        self.exit_weight_paint_mode();
+        self.armature_edit = false;
+        self.pose_mode = false;
+        self.uv_mode = false;
+        let id = self
+            .active
+            .or_else(|| self.selection.iter().copied().next())
+            .ok_or_else(|| "Select a mesh object first".to_string())?;
+        let obj = self
+            .scene
+            .objects
+            .iter()
+            .find(|o| o.id == id)
+            .ok_or_else(|| "Object not found".to_string())?;
+        if !matches!(obj.kind, crate::ObjectKind::Mesh) {
+            return Err("Only mesh objects can enter Vertex Paint Mode".into());
+        }
+        if obj.mesh.vertices.is_empty() {
+            return Err("Mesh has no vertices".into());
+        }
+        self.checkpoint();
+        self.selection.clear();
+        self.selection.insert(id);
+        self.active = Some(id);
+        if let Some(o) = self.scene.objects.iter_mut().find(|o| o.id == id) {
+            Arc::make_mut(&mut o.mesh).ensure_vertex_colors();
+        }
+        self.vertex_paint_mode = true;
+        self.touch();
+        Ok(())
+    }
+
+    pub fn exit_vertex_paint_mode(&mut self) {
+        self.vertex_paint_mode = false;
+    }
+
+    pub fn toggle_vertex_paint_mode(&mut self) -> Result<(), String> {
+        if self.vertex_paint_mode {
+            self.exit_vertex_paint_mode();
+            Ok(())
+        } else {
+            self.enter_vertex_paint_mode()
+        }
+    }
+
+    pub fn enter_weight_paint_mode(&mut self) -> Result<(), String> {
+        if self.weight_paint_mode {
+            return Ok(());
+        }
+        if self.edit.is_some() {
+            self.exit_edit_mode(true);
+        }
+        self.exit_sculpt_mode();
+        self.exit_paint_mode();
+        self.exit_vertex_paint_mode();
+        self.armature_edit = false;
+        self.pose_mode = false;
+        self.uv_mode = false;
+        let id = self
+            .active
+            .or_else(|| self.selection.iter().copied().next())
+            .ok_or_else(|| "Select a mesh object first".to_string())?;
+        let obj = self
+            .scene
+            .objects
+            .iter()
+            .find(|o| o.id == id)
+            .ok_or_else(|| "Object not found".to_string())?;
+        if !matches!(obj.kind, crate::ObjectKind::Mesh) {
+            return Err("Only mesh objects can enter Weight Paint Mode".into());
+        }
+        if obj.mesh.vertices.is_empty() {
+            return Err("Mesh has no vertices".into());
+        }
+        self.checkpoint();
+        self.selection.clear();
+        self.selection.insert(id);
+        self.active = Some(id);
+        if let Some(o) = self.scene.objects.iter_mut().find(|o| o.id == id) {
+            let mesh = Arc::make_mut(&mut o.mesh);
+            mesh.ensure_vertex_group_sizes();
+            if mesh.vertex_groups.is_empty() {
+                mesh.add_vertex_group("Group");
+            }
+            if mesh.active_vertex_group < 0 {
+                mesh.active_vertex_group = 0;
+            }
+            self.weight_paint_color_backup =
+                Some(mesh.vertices.iter().map(|v| v.color).collect());
+            mesh.apply_weight_visualization();
+        }
+        self.weight_paint_mode = true;
+        self.touch();
+        Ok(())
+    }
+
+    pub fn exit_weight_paint_mode(&mut self) {
+        if !self.weight_paint_mode {
+            return;
+        }
+        if let Some(id) = self.active {
+            if let Some(o) = self.scene.objects.iter_mut().find(|o| o.id == id) {
+                let mesh = Arc::make_mut(&mut o.mesh);
+                if let Some(backup) = self.weight_paint_color_backup.take() {
+                    for (v, c) in mesh.vertices.iter_mut().zip(backup.iter()) {
+                        v.color = *c;
+                    }
+                } else {
+                    mesh.clear_weight_visualization();
+                }
+            }
+        }
+        self.weight_paint_mode = false;
+        self.weight_paint_color_backup = None;
+    }
+
+    pub fn toggle_weight_paint_mode(&mut self) -> Result<(), String> {
+        if self.weight_paint_mode {
+            self.exit_weight_paint_mode();
+            Ok(())
+        } else {
+            self.enter_weight_paint_mode()
+        }
+    }
+
+    /// Vertex-paint brush stroke at local-space sample positions.
+    pub fn vertex_paint_at(
+        &mut self,
+        local_points: &[glam::Vec3],
+        settings: &crate::VertexPaintSettings,
+    ) -> bool {
+        let Some(id) = self.active else { return false };
+        let Some(o) = self.scene.objects.iter_mut().find(|o| o.id == id) else {
+            return false;
+        };
+        let mesh = Arc::make_mut(&mut o.mesh);
+        let changed = crate::paint::vertex_paint_stroke(mesh, local_points, settings);
+        if changed {
+            self.touch();
+        }
+        changed
+    }
+
+    /// Weight-paint brush stroke at local-space sample positions.
+    pub fn weight_paint_at(
+        &mut self,
+        local_points: &[glam::Vec3],
+        settings: &crate::WeightPaintSettings,
+    ) -> bool {
+        let Some(id) = self.active else { return false };
+        let Some(o) = self.scene.objects.iter_mut().find(|o| o.id == id) else {
+            return false;
+        };
+        let mesh = Arc::make_mut(&mut o.mesh);
+        let changed = crate::paint::weight_paint_stroke(mesh, local_points, settings);
+        if changed {
+            self.touch();
+        }
+        changed
+    }
+
+    pub fn add_vertex_group_to_active(&mut self, name: &str) -> Result<(), String> {
+        let id = self.active.ok_or_else(|| "No active object".to_string())?;
+        let is_mesh = self
+            .scene
+            .objects
+            .iter()
+            .find(|o| o.id == id)
+            .map(|o| matches!(o.kind, crate::ObjectKind::Mesh))
+            .unwrap_or(false);
+        if !is_mesh {
+            return Err("Only mesh objects have vertex groups".into());
+        }
+        self.checkpoint();
+        if let Some(o) = self.scene.objects.iter_mut().find(|o| o.id == id) {
+            Arc::make_mut(&mut o.mesh).add_vertex_group(name);
+        }
+        self.touch();
+        Ok(())
+    }
+
+    pub fn remove_active_vertex_group(&mut self) -> Result<(), String> {
+        let id = self.active.ok_or_else(|| "No active object".to_string())?;
+        let idx = self
+            .scene
+            .objects
+            .iter()
+            .find(|o| o.id == id)
+            .map(|o| o.mesh.active_vertex_group)
+            .unwrap_or(-1);
+        if idx < 0 {
+            return Err("No active vertex group".into());
+        }
+        self.checkpoint();
+        if let Some(o) = self.scene.objects.iter_mut().find(|o| o.id == id) {
+            let mesh = Arc::make_mut(&mut o.mesh);
+            mesh.remove_vertex_group(idx as usize);
+            if self.weight_paint_mode {
+                mesh.apply_weight_visualization();
+            }
+        }
+        self.touch();
+        Ok(())
+    }
+
+    pub fn set_active_vertex_group(&mut self, index: i32) {
+        let Some(id) = self.active else { return };
+        let Some(o) = self.scene.objects.iter_mut().find(|o| o.id == id) else {
+            return;
+        };
+        let mesh = Arc::make_mut(&mut o.mesh);
+        if index < 0 || (index as usize) >= mesh.vertex_groups.len() {
+            return;
+        }
+        mesh.active_vertex_group = index;
+        if self.weight_paint_mode {
+            if let Some(backup) = &self.weight_paint_color_backup {
+                for (v, c) in mesh.vertices.iter_mut().zip(backup.iter()) {
+                    v.color = *c;
+                }
+            }
+            mesh.apply_weight_visualization();
+        }
+        self.touch();
+    }
+
+    pub fn normalize_active_vertex_groups(&mut self) {
+        let Some(id) = self.active else { return };
+        if !self.scene.objects.iter().any(|o| o.id == id) {
+            return;
+        }
+        self.checkpoint();
+        if let Some(o) = self.scene.objects.iter_mut().find(|o| o.id == id) {
+            let mesh = Arc::make_mut(&mut o.mesh);
+            mesh.normalize_vertex_groups();
+            if self.weight_paint_mode {
+                mesh.apply_weight_visualization();
+            }
+        }
+        self.touch();
+    }
+
+
+
     /// Apply a sculpt brush sample in world-space ray; mutates active mesh.
     pub fn sculpt_stroke(
         &mut self,
@@ -1833,7 +2401,20 @@ impl Document {
             let _ =
                 crate::dyntopo_refine(&mut mesh, hit_p, settings.radius, settings.dyntopo_detail);
         }
-        crate::apply_brush(&mut mesh, settings, hit_p, hit_n, local_grab);
+        if settings.dyntopo && self.mesh_symmetry.any() {
+            for signs in self.mesh_symmetry.mirror_signs() {
+                let m_hit = crate::symmetry::apply_signs(hit_p, signs);
+                if m_hit.distance(hit_p) > 1e-5 {
+                    let _ = crate::dyntopo_refine(
+                        &mut mesh,
+                        m_hit,
+                        settings.radius,
+                        settings.dyntopo_detail,
+                    );
+                }
+            }
+        }
+        crate::apply_brush(&mut mesh, settings, hit_p, hit_n, local_grab, self.mesh_symmetry);
         if let Some(obj) = self.scene.objects.iter_mut().find(|o| o.id == id) {
             obj.mesh = std::sync::Arc::new(mesh);
             obj.primitive = None;

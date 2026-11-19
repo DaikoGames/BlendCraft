@@ -648,6 +648,7 @@ fn merge_by_distance(mesh: &MeshData, dist: f32) -> MeshData {
         vertices,
         indices,
         groups: vec![],
+        ..Default::default()
     }
 }
 
@@ -677,6 +678,7 @@ fn subdivide_once(mesh: &MeshData) -> MeshData {
             position: pm.to_array(),
             normal: nm.to_array(),
             uv: um,
+            color: [1.0, 1.0, 1.0, 1.0],
         });
         edge_mid.insert(key, idx);
         idx
@@ -694,5 +696,6 @@ fn subdivide_once(mesh: &MeshData) -> MeshData {
         vertices,
         indices,
         groups: vec![],
+        ..Default::default()
     }
 }

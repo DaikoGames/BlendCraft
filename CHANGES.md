@@ -1,3 +1,19 @@
+
+## X Mirror (butterfly) + Pose bone connections
+
+- **X Mirror**: toggle via header **🦋 X Mirror** or **M**. Mirrors Edit Mode transforms, Sculpt strokes, Armature Edit, and Pose bone transforms across the local X axis (L/R bone names `.L`/`.R` supported).
+- **Pose Mode connections**: hierarchical pose evaluation snaps connected child heads to the parent tip so chains stay attached while posing.
+
+
+## Stage 2 paint systems (local / offline)
+
+- **Vertex colors** on `Vertex` + `MeshData` vertex groups (`VertexGroup`).
+- **Vertex Paint mode** (`Ctrl+Shift+V`): Draw / Soften / Blur / Smear brushes.
+- **Weight Paint mode** (`Ctrl+Shift+W`): Draw / Blur / Average / Smear, heat-map visualization, optional weight normalization.
+- **Editable vertex groups**: add/remove/set active on the active mesh.
+- **Texture Paint brushes**: Soften, Smear, Fill in addition to Draw/Erase.
+- All painting runs fully offline (no server APIs).
+
 # Changes: Cycles engine + cloth
 
 Please run:

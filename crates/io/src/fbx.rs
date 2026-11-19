@@ -682,6 +682,7 @@ fn geom_to_mesh(g: &Geom) -> Result<MeshData> {
             position: p,
             normal,
             uv,
+            color: [1.0, 1.0, 1.0, 1.0],
         });
     }
 
@@ -690,7 +691,8 @@ fn geom_to_mesh(g: &Geom) -> Result<MeshData> {
         vertices,
         indices: tri_indices,
         groups: Vec::new(),
-    };
+            ..Default::default()
+        };
     if g.normals.is_empty() {
         md.compute_normals();
     }

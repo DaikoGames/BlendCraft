@@ -54,6 +54,7 @@ pub fn load_obj(path: &Path) -> Result<Scene> {
                 } else {
                     [0.0; 2]
                 },
+                color: [1.0, 1.0, 1.0, 1.0],
             })
             .collect();
         let mut md = MeshData {

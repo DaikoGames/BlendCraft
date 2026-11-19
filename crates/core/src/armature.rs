@@ -318,7 +318,7 @@ impl ArmatureData {
 
     /// World-space (armature-local) rest matrix for bone: maps bone-local to armature space.
     /// Bone local: origin at head, +Y toward tail.
-    fn rest_matrix(bone: &Bone) -> Mat4 {
+    pub(crate) fn rest_matrix(bone: &Bone) -> Mat4 {
         let head = bone.head_v();
         let dir = bone.direction();
         let rot = if dir.length_squared() < 1e-10 {
@@ -356,42 +356,60 @@ impl ArmatureData {
     }
 
     /// Apply hierarchical pose so child bones follow parents.
+    /// Connected children (rest head at parent tip) stay glued in Pose Mode.
     pub fn deform_matrices_hierarchical(&self) -> Vec<Mat4> {
         let n = self.bones.len();
         let mut rest_world = vec![Mat4::IDENTITY; n];
         let mut pose_world = vec![Mat4::IDENTITY; n];
-        // Order: parents before children (bones are usually ordered that way; fix with topo)
         let order = self.topo_order();
+        // Generous epsilon: floating point + edited joints still count as connected
+        const CONNECT_EPS: f32 = 1.0e-3;
+
         for &i in &order {
             let b = &self.bones[i];
-            let local_rest = Self::rest_matrix(b);
-            let local_pose = Self::pose_matrix(b);
+            rest_world[i] = Self::rest_matrix(b);
+            let dir = b.direction();
+            let rest_rot = if dir.length_squared() < 1e-10 {
+                Quat::IDENTITY
+            } else {
+                Quat::from_rotation_arc(Vec3::Y, dir)
+            };
+
             if let Some(p) = b.parent {
                 let pi = p as usize;
-                // Child rest is already in armature space (absolute head/tail).
-                // For hierarchy: pose inherits parent pose delta.
-                let parent_delta = pose_world[pi] * rest_world[pi].inverse();
-                rest_world[i] = local_rest;
-                // Pose: apply parent delta to rest head, then local pose offset
-                let posed_head = parent_delta.transform_point3(b.head_v()) + b.pose_loc_v();
-                let dir = b.direction();
-                let rest_rot = if dir.length_squared() < 1e-10 {
-                    Quat::IDENTITY
+                let parent = &self.bones[pi];
+                let parent_len = parent.length().max(1e-5);
+                let at_parent_tip = b.head_v().distance(parent.tail_v()) <= CONNECT_EPS.max(parent_len * 1e-4);
+                let at_parent_head = b.head_v().distance(parent.head_v()) <= CONNECT_EPS.max(parent_len * 1e-4);
+
+                let (_, parent_pose_rot, _) = pose_world[pi].to_scale_rotation_translation();
+                let (_, parent_rest_rot, _) = rest_world[pi].to_scale_rotation_translation();
+                let local_rest_rot = (parent_rest_rot.inverse() * rest_rot).normalize();
+                let rot = (parent_pose_rot * local_rest_rot * b.pose_rot_q()).normalize();
+                let (ps, _, _) = pose_world[pi].to_scale_rotation_translation();
+                let scale = ps * b.pose_scale_v();
+
+                let posed_head = if at_parent_tip {
+                    // Always glued to parent tip — this is Blender's connected joint
+                    pose_world[pi].transform_point3(Vec3::new(0.0, parent_len, 0.0))
+                } else if at_parent_head {
+                    pose_world[pi].transform_point3(Vec3::ZERO)
                 } else {
-                    Quat::from_rotation_arc(Vec3::Y, dir)
+                    // Offset child: inherit parent transform, then apply pose_loc in armature space
+                    let parent_delta = pose_world[pi] * rest_world[pi].inverse();
+                    parent_delta.transform_point3(b.head_v()) + b.pose_loc_v()
                 };
-                let (parent_scale, parent_rot, _) = parent_delta.to_scale_rotation_translation();
-                let rot = parent_rot * rest_rot * b.pose_rot_q();
-                pose_world[i] = Mat4::from_scale_rotation_translation(
-                    parent_scale * b.pose_scale_v(),
-                    rot,
-                    posed_head,
-                );
+
+                pose_world[i] = Mat4::from_scale_rotation_translation(scale, rot, posed_head);
             } else {
-                rest_world[i] = local_rest;
-                pose_world[i] = local_pose;
+                pose_world[i] = Mat4::from_scale_rotation_translation(
+                    b.pose_scale_v(),
+                    (rest_rot * b.pose_rot_q()).normalize(),
+                    b.head_v() + b.pose_loc_v(),
+                );
             }
         }
+
         (0..n)
             .map(|i| pose_world[i] * rest_world[i].inverse())
             .collect()
@@ -512,6 +530,36 @@ impl ArmatureData {
             }
         }
         best.map(|(i, _)| i)
+    }
+
+
+    /// Index of the L/R counterpart bone, if any (by name suffix or rest-head X mirror).
+    pub fn mirror_bone_index(&self, index: u32) -> Option<u32> {
+        let i = index as usize;
+        if i >= self.bones.len() {
+            return None;
+        }
+        let name = &self.bones[i].name;
+        if let Some(other) = crate::symmetry::mirror_bone_name(name) {
+            if let Some((j, _)) = self.bones.iter().enumerate().find(|(_, b)| b.name == other) {
+                if j != i {
+                    return Some(j as u32);
+                }
+            }
+        }
+        // Fallback: nearest bone whose rest head mirrors across X
+        let target = crate::symmetry::mirror_x_point(self.bones[i].head_v());
+        let mut best: Option<(u32, f32)> = None;
+        for (j, b) in self.bones.iter().enumerate() {
+            if j == i {
+                continue;
+            }
+            let d = b.head_v().distance(target);
+            if d < 0.05 && best.map_or(true, |(_, bd)| d < bd) {
+                best = Some((j as u32, d));
+            }
+        }
+        best.map(|(j, _)| j)
     }
 
     pub fn select_bone(&mut self, i: u32, extend: bool) {
@@ -684,6 +732,35 @@ mod connected_joint_tests {
     }
 
     #[test]
+    fn connected_bones_stay_glued_when_parent_poses() {
+        let mut arm = ArmatureData {
+            bones: Vec::new(),
+            selected: Default::default(),
+            active: None,
+        };
+        arm.add_bone_chain(3, 1.0);
+        // Pose root: rotate 45 deg around Z and translate
+        arm.bones[0].pose_rot = glam::Quat::from_rotation_z(0.7).to_array();
+        arm.bones[0].pose_rot = {
+            let q = glam::Quat::from_rotation_z(0.7);
+            [q.x, q.y, q.z, q.w]
+        };
+        arm.bones[0].pose_loc = [0.2, 0.0, 0.0];
+        let deform = arm.deform_matrices_hierarchical();
+        // Reconstruct posed head/tip for bone 0 and bone 1
+        let rest0 = super::ArmatureData::rest_matrix(&arm.bones[0]);
+        let pose0 = deform[0] * rest0;
+        let tip0 = pose0.transform_point3(glam::Vec3::new(0.0, arm.bones[0].length(), 0.0));
+        let rest1 = super::ArmatureData::rest_matrix(&arm.bones[1]);
+        let pose1 = deform[1] * rest1;
+        let head1 = pose1.transform_point3(glam::Vec3::ZERO);
+        let dist = tip0.distance(head1);
+        assert!(
+            dist < 1e-3,
+            "connected child head must stick to parent tip, got distance {dist}"
+        );
+    }
+
     fn moving_connected_child_moves_parent_tip() {
         let mut arm = connected_pair();
         let original: Vec<_> = arm.bones.iter().map(|b| (b.head_v(), b.tail_v())).collect();

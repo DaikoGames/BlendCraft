@@ -142,6 +142,13 @@ pub enum Action {
     ToggleSculptMode,
     ToggleUvMode,
     TogglePaintMode,
+    ToggleVertexPaintMode,
+    ToggleWeightPaintMode,
+    ToggleXMirror,
+    ToggleMeshSymmetryX,
+    ToggleMeshSymmetryY,
+    ToggleMeshSymmetryZ,
+    SetMirrorAxis(forge_core::MirrorAxis),
     UvUnwrapSmart,
     UvUnwrapCube,
     UvUnwrapPlanar,
@@ -402,6 +409,27 @@ pub fn bindings() -> Vec<Binding> {
         "s",
         K::Tab,
         A::TogglePaintMode,
+    );
+    b(
+        "Mode",
+        "Toggle Vertex Paint",
+        "cs",
+        K::KeyV,
+        A::ToggleVertexPaintMode,
+    );
+    b(
+        "Mode",
+        "Toggle Weight Paint",
+        "cs",
+        K::KeyW,
+        A::ToggleWeightPaintMode,
+    );
+    b(
+        "Mode",
+        "Toggle X Mirror (butterfly)",
+        "",
+        K::KeyM,
+        A::ToggleXMirror,
     );
     b("UV", "Smart UV Project", "", K::KeyU, A::UvUnwrapSmart);
     b("UV", "Cube Projection", "s", K::KeyU, A::UvUnwrapCube);

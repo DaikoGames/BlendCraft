@@ -4,11 +4,77 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 #[repr(C)]
-#[derive(Clone, Copy, Debug, Default, Pod, Zeroable, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable, Serialize, Deserialize)]
 pub struct Vertex {
     pub position: [f32; 3],
     pub normal: [f32; 3],
     pub uv: [f32; 2],
+    /// Linear RGBA vertex color (1,1,1,1 = white / unpainted).
+    pub color: [f32; 4],
+}
+
+impl Default for Vertex {
+    fn default() -> Self {
+        Self {
+            position: [0.0; 3],
+            normal: [0.0, 1.0, 0.0],
+            uv: [0.0; 2],
+            color: [1.0, 1.0, 1.0, 1.0],
+        }
+    }
+}
+
+impl Vertex {
+    pub fn new(position: [f32; 3], normal: [f32; 3], uv: [f32; 2]) -> Self {
+        Self {
+            position,
+            normal,
+            uv,
+            color: [1.0, 1.0, 1.0, 1.0],
+        }
+    }
+}
+
+/// Named per-vertex weight group (Blender-style vertex group).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct VertexGroup {
+    pub name: String,
+    /// Weight per mesh vertex in [0, 1]. Length matches `MeshData::vertices` when active.
+    pub weights: Vec<f32>,
+    /// Whether this group is locked against paint/edits.
+    pub locked: bool,
+}
+
+impl VertexGroup {
+    pub fn new(name: impl Into<String>, vertex_count: usize) -> Self {
+        Self {
+            name: name.into(),
+            weights: vec![0.0; vertex_count],
+            locked: false,
+        }
+    }
+
+    pub fn resize(&mut self, vertex_count: usize) {
+        self.weights.resize(vertex_count, 0.0);
+    }
+
+    pub fn normalize_all(groups: &mut [VertexGroup], vertex_count: usize) {
+        for vi in 0..vertex_count {
+            let mut sum = 0.0f32;
+            for g in groups.iter() {
+                if vi < g.weights.len() {
+                    sum += g.weights[vi].max(0.0);
+                }
+            }
+            if sum > 1e-8 {
+                for g in groups.iter_mut() {
+                    if vi < g.weights.len() {
+                        g.weights[vi] = (g.weights[vi].max(0.0) / sum).clamp(0.0, 1.0);
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -41,12 +107,35 @@ pub struct MeshGroup {
     pub material: Option<usize>,
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct MeshData {
     pub name: String,
     pub vertices: Vec<Vertex>,
     pub indices: Vec<u32>,
     pub groups: Vec<MeshGroup>,
+    /// Optional named vertex groups for weight paint / armature assignment.
+    #[serde(default)]
+    pub vertex_groups: Vec<VertexGroup>,
+    /// Index of the active vertex group for Weight Paint (-1 = none).
+    #[serde(default = "default_active_vertex_group")]
+    pub active_vertex_group: i32,
+}
+
+fn default_active_vertex_group() -> i32 {
+    -1
+}
+
+impl Default for MeshData {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            vertices: Vec::new(),
+            indices: Vec::new(),
+            groups: Vec::new(),
+            vertex_groups: Vec::new(),
+            active_vertex_group: -1,
+        }
+    }
 }
 
 impl MeshData {
@@ -60,6 +149,7 @@ impl MeshData {
                 position: m.transform_point3(Vec3::from(v.position)).to_array(),
                 normal: (nm * Vec3::from(v.normal)).normalize_or_zero().to_array(),
                 uv: v.uv,
+                color: v.color,
             })
             .collect();
         let mut indices = self.indices.clone();
@@ -73,6 +163,8 @@ impl MeshData {
             vertices,
             indices,
             groups: self.groups.clone(),
+            vertex_groups: self.vertex_groups.clone(),
+            active_vertex_group: self.active_vertex_group,
         }
     }
 
@@ -233,6 +325,98 @@ impl MeshData {
     }
 
     /// Make sure the mesh has explicit material groups (needed before appending other meshes).
+
+    /// Ensure every vertex has a valid white color if colors were zeroed by Default/Pod.
+    pub fn ensure_vertex_colors(&mut self) {
+        for v in &mut self.vertices {
+            if v.color[0] == 0.0 && v.color[1] == 0.0 && v.color[2] == 0.0 && v.color[3] == 0.0 {
+                v.color = [1.0, 1.0, 1.0, 1.0];
+            }
+        }
+    }
+
+    pub fn ensure_vertex_group_sizes(&mut self) {
+        let n = self.vertices.len();
+        for g in &mut self.vertex_groups {
+            g.resize(n);
+        }
+    }
+
+    pub fn add_vertex_group(&mut self, name: impl Into<String>) -> usize {
+        let n = self.vertices.len();
+        self.vertex_groups.push(VertexGroup::new(name, n));
+        let idx = self.vertex_groups.len() - 1;
+        self.active_vertex_group = idx as i32;
+        idx
+    }
+
+    pub fn remove_vertex_group(&mut self, index: usize) {
+        if index >= self.vertex_groups.len() {
+            return;
+        }
+        self.vertex_groups.remove(index);
+        if self.vertex_groups.is_empty() {
+            self.active_vertex_group = -1;
+        } else if self.active_vertex_group as usize >= self.vertex_groups.len() {
+            self.active_vertex_group = (self.vertex_groups.len() - 1) as i32;
+        }
+    }
+
+    pub fn active_group_mut(&mut self) -> Option<&mut VertexGroup> {
+        let i = self.active_vertex_group;
+        if i >= 0 {
+            self.vertex_groups.get_mut(i as usize)
+        } else {
+            None
+        }
+    }
+
+    pub fn normalize_vertex_groups(&mut self) {
+        let n = self.vertices.len();
+        VertexGroup::normalize_all(&mut self.vertex_groups, n);
+    }
+
+    /// Heat-map color for a weight in [0,1] (blue→cyan→green→yellow→red).
+    pub fn weight_to_color(w: f32) -> [f32; 4] {
+        let t = w.clamp(0.0, 1.0);
+        let (r, g, b) = if t < 0.25 {
+            let u = t / 0.25;
+            (0.0, u, 1.0)
+        } else if t < 0.5 {
+            let u = (t - 0.25) / 0.25;
+            (0.0, 1.0, 1.0 - u)
+        } else if t < 0.75 {
+            let u = (t - 0.5) / 0.25;
+            (u, 1.0, 0.0)
+        } else {
+            let u = (t - 0.75) / 0.25;
+            (1.0, 1.0 - u, 0.0)
+        };
+        [r, g, b, 1.0]
+    }
+
+    /// Apply active vertex-group weights as vertex colors for visualization.
+    pub fn apply_weight_visualization(&mut self) {
+        let n = self.vertices.len();
+        let weights: Vec<f32> = if let Some(g) = self.active_group_mut() {
+            let mut w = g.weights.clone();
+            w.resize(n, 0.0);
+            w
+        } else {
+            vec![0.0; n]
+        };
+        for (v, w) in self.vertices.iter_mut().zip(weights.iter()) {
+            v.color = Self::weight_to_color(*w);
+        }
+    }
+
+    /// Restore vertex colors to white (exit weight-viz).
+    pub fn clear_weight_visualization(&mut self) {
+        for v in &mut self.vertices {
+            v.color = [1.0, 1.0, 1.0, 1.0];
+        }
+    }
+
     pub fn ensure_groups(&mut self, material: Option<usize>) {
         if self.groups.is_empty() && !self.indices.is_empty() {
             self.groups.push(MeshGroup {

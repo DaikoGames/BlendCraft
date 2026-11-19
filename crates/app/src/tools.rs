@@ -63,6 +63,19 @@ pub enum Tool {
     // Texture Paint
     PaintBrush,
     PaintErase,
+    PaintSoften,
+    PaintSmear,
+    PaintFill,
+    // Vertex Paint
+    VertexPaintDraw,
+    VertexPaintSoften,
+    VertexPaintBlur,
+    VertexPaintSmear,
+    // Weight Paint
+    WeightPaintDraw,
+    WeightPaintBlur,
+    WeightPaintAverage,
+    WeightPaintSmear,
     // Armature-specific toolbar actions
     BoneAdd,
     BoneExtrude,
@@ -117,7 +130,27 @@ impl Tool {
         Tool::Cursor,
     ];
 
-    pub const PAINT_MODE: [Tool; 2] = [Tool::PaintBrush, Tool::PaintErase];
+    pub const PAINT_MODE: [Tool; 5] = [
+        Tool::PaintBrush,
+        Tool::PaintErase,
+        Tool::PaintSoften,
+        Tool::PaintSmear,
+        Tool::PaintFill,
+    ];
+
+    pub const VERTEX_PAINT_MODE: [Tool; 4] = [
+        Tool::VertexPaintDraw,
+        Tool::VertexPaintSoften,
+        Tool::VertexPaintBlur,
+        Tool::VertexPaintSmear,
+    ];
+
+    pub const WEIGHT_PAINT_MODE: [Tool; 4] = [
+        Tool::WeightPaintDraw,
+        Tool::WeightPaintBlur,
+        Tool::WeightPaintAverage,
+        Tool::WeightPaintSmear,
+    ];
 
     pub const UV_MODE: [Tool; 9] = [
         Tool::UvSelect,
@@ -256,6 +289,17 @@ impl Tool {
             Tool::UvPack => "Pack Islands",
             Tool::PaintBrush => "Draw",
             Tool::PaintErase => "Erase",
+            Tool::PaintSoften => "Soften",
+            Tool::PaintSmear => "Smear",
+            Tool::PaintFill => "Fill",
+            Tool::VertexPaintDraw => "Draw",
+            Tool::VertexPaintSoften => "Soften",
+            Tool::VertexPaintBlur => "Blur",
+            Tool::VertexPaintSmear => "Smear",
+            Tool::WeightPaintDraw => "Draw",
+            Tool::WeightPaintBlur => "Blur",
+            Tool::WeightPaintAverage => "Average",
+            Tool::WeightPaintSmear => "Smear",
             Tool::BoneAdd => "Add Bone",
             Tool::BoneExtrude => "Extrude Bone",
             Tool::BoneDelete => "Delete Bones",
@@ -318,6 +362,17 @@ impl Tool {
             Tool::UvPack => "Pack",
             Tool::PaintBrush => "Brsh",
             Tool::PaintErase => "Eras",
+            Tool::PaintSoften => "Soft",
+            Tool::PaintSmear => "Smear",
+            Tool::PaintFill => "Fill",
+            Tool::VertexPaintDraw => "VDrw",
+            Tool::VertexPaintSoften => "VSft",
+            Tool::VertexPaintBlur => "VBlr",
+            Tool::VertexPaintSmear => "VSmr",
+            Tool::WeightPaintDraw => "WDrw",
+            Tool::WeightPaintBlur => "WBlr",
+            Tool::WeightPaintAverage => "WAvg",
+            Tool::WeightPaintSmear => "WSmr",
             Tool::BoneAdd => "Add",
             Tool::BoneExtrude => "Extr",
             Tool::BoneDelete => "Del",
@@ -378,8 +433,19 @@ impl Tool {
             Tool::UvUnwrapPlanar => "Planar Project",
             Tool::UvReset => "Reset UVs per face",
             Tool::UvPack => "Pack Islands",
-            Tool::PaintBrush => "Draw",
-            Tool::PaintErase => "Erase",
+            Tool::PaintBrush => "Draw paint on the texture",
+            Tool::PaintErase => "Erase toward the original texture",
+            Tool::PaintSoften => "Soften / blur the texture under the brush",
+            Tool::PaintSmear => "Smear texture pixels along the stroke",
+            Tool::PaintFill => "Fill connected UV region with the brush color",
+            Tool::VertexPaintDraw => "Paint vertex colors",
+            Tool::VertexPaintSoften => "Soften vertex colors",
+            Tool::VertexPaintBlur => "Blur neighboring vertex colors",
+            Tool::VertexPaintSmear => "Smear vertex colors along the stroke",
+            Tool::WeightPaintDraw => "Paint vertex group weights",
+            Tool::WeightPaintBlur => "Blur weights",
+            Tool::WeightPaintAverage => "Average neighboring weights",
+            Tool::WeightPaintSmear => "Smear weights along the stroke",
             Tool::BoneAdd => "Add a bone to the active armature",
             Tool::BoneExtrude => "Drag a bone head or tail joint to extrude a connected bone",
             Tool::BoneDelete => "Delete selected bones (X)",
@@ -485,6 +551,15 @@ pub struct ToolState {
     pub paint_color: [f32; 4],
     pub paint_radius: f32,
     pub paint_strength: f32,
+    /// Vertex paint settings.
+    pub vpaint_color: [f32; 4],
+    pub vpaint_radius: f32,
+    pub vpaint_strength: f32,
+    /// Weight paint settings.
+    pub wpaint_weight: f32,
+    pub wpaint_radius: f32,
+    pub wpaint_strength: f32,
+    pub wpaint_normalize: bool,
 }
 
 impl Default for ToolState {
@@ -498,6 +573,13 @@ impl Default for ToolState {
             paint_color: [0.2, 0.45, 0.9, 1.0],
             paint_radius: 0.04,
             paint_strength: 0.85,
+            vpaint_color: [0.2, 0.45, 0.9, 1.0],
+            vpaint_radius: 0.35,
+            vpaint_strength: 0.5,
+            wpaint_weight: 1.0,
+            wpaint_radius: 0.35,
+            wpaint_strength: 0.5,
+            wpaint_normalize: true,
         }
     }
 }

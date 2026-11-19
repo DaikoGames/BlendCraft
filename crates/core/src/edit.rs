@@ -181,46 +181,142 @@ impl EditSession {
     }
 
     pub fn set_vert_positions(&mut self, positions: &[(u32, Vec3)]) {
+        self.set_vert_positions_mirrored(positions, crate::symmetry::MeshSymmetry::default());
+    }
+
+    /// Blender Mesh Symmetry (manual): when an element is transformed, its exact
+    /// local-space mirrored counterpart is transformed to the mirrored position.
+    /// `positions` = desired new positions for the *edited* verts only.
+    pub fn set_vert_positions_mirrored(
+        &mut self,
+        positions: &[(u32, Vec3)],
+        sym: crate::symmetry::MeshSymmetry,
+    ) {
+        if positions.is_empty() {
+            return;
+        }
+        // Snapshot *before* any writes — pairing must use pre-edit coordinates
+        let before: Vec<Vec3> = self
+            .mesh
+            .vertices
+            .iter()
+            .map(|v| Vec3::from(v.position))
+            .collect();
+        let before_arr: Vec<[f32; 3]> = before.iter().map(|p| p.to_array()).collect();
+
+        // Apply edited verts first
         for &(vi, p) in positions {
             if let Some(v) = self.mesh.vertices.get_mut(vi as usize) {
                 v.position = p.to_array();
+            }
+        }
+
+        if !sym.any() {
+            self.mesh.compute_normals();
+            return;
+        }
+
+        let extent = before
+            .iter()
+            .map(|p| p.length())
+            .fold(0.0f32, f32::max)
+            .max(1.0);
+        // Pairing radius: must reach the other side of typical unit meshes (cube half=0.5 → dist 1)
+        let thresh = (extent * 0.5).clamp(0.1, 2.0);
+        let selected: BTreeSet<u32> = positions.iter().map(|(i, _)| *i).collect();
+
+        // For each enabled axis combination, force counterparts to the *exact*
+        // mirrored location of the edited vertex (Blender behavior).
+        for signs in sym.mirror_signs() {
+            let map = crate::symmetry::build_mirror_map_for_signs(&before_arr, thresh, signs);
+            for &(vi, new_p) in positions {
+                let Some(mi) = map.get(vi as usize).copied().flatten() else {
+                    continue;
+                };
+                if mi == vi as usize || selected.contains(&(mi as u32)) {
+                    continue;
+                }
+                // Counterpart must actually sit on the mirrored side of the pre-edit point
+                let orig = before[vi as usize];
+                let expected = crate::symmetry::apply_signs(orig, signs);
+                if before[mi].distance(expected) > thresh {
+                    continue; // reject bad pairs — prevents "one point becomes two"
+                }
+                // Absolute: counterpart = mirror(edited_new_position)
+                let mirrored = crate::symmetry::apply_signs(new_p, signs);
+                if let Some(v) = self.mesh.vertices.get_mut(mi) {
+                    v.position = mirrored.to_array();
+                }
             }
         }
         self.mesh.compute_normals();
     }
 
     pub fn translate_selection(&mut self, delta: Vec3) {
-        for vi in self.selected_vert_indices() {
-            if let Some(v) = self.mesh.vertices.get_mut(vi as usize) {
-                v.position[0] += delta.x;
-                v.position[1] += delta.y;
-                v.position[2] += delta.z;
-            }
-        }
-        self.mesh.compute_normals();
+        self.translate_selection_mirrored(delta, crate::symmetry::MeshSymmetry::default());
+    }
+
+    /// Translate selection; when `x_mirror` is set, also move mirrored counterparts.
+    pub fn translate_selection_mirrored(&mut self, delta: Vec3, sym: crate::symmetry::MeshSymmetry) {
+        let positions: Vec<(u32, Vec3)> = self
+            .selected_vert_indices()
+            .into_iter()
+            .filter_map(|vi| {
+                self.mesh
+                    .vertices
+                    .get(vi as usize)
+                    .map(|v| (vi, Vec3::from(v.position) + delta))
+            })
+            .collect();
+        self.set_vert_positions_mirrored(&positions, sym);
     }
 
     /// Rotate selected verts around `center` by `quat` (object space).
     pub fn rotate_selection(&mut self, center: Vec3, quat: Quat) {
-        for vi in self.selected_vert_indices() {
-            if let Some(v) = self.mesh.vertices.get_mut(vi as usize) {
-                let p = Vec3::from(v.position);
-                v.position = (center + quat * (p - center)).to_array();
-            }
-        }
-        self.mesh.compute_normals();
+        self.rotate_selection_mirrored(center, quat, crate::symmetry::MeshSymmetry::default());
+    }
+
+    pub fn rotate_selection_mirrored(
+        &mut self,
+        center: Vec3,
+        quat: Quat,
+        sym: crate::symmetry::MeshSymmetry,
+    ) {
+        let positions: Vec<(u32, Vec3)> = self
+            .selected_vert_indices()
+            .into_iter()
+            .filter_map(|vi| {
+                self.mesh.vertices.get(vi as usize).map(|v| {
+                    let p = Vec3::from(v.position);
+                    (vi, center + quat * (p - center))
+                })
+            })
+            .collect();
+        self.set_vert_positions_mirrored(&positions, sym);
     }
 
     /// Scale selected verts around `center` by `factor` (uniform or per-axis).
     pub fn scale_selection(&mut self, center: Vec3, factor: Vec3) {
-        for vi in self.selected_vert_indices() {
-            if let Some(v) = self.mesh.vertices.get_mut(vi as usize) {
-                let p = Vec3::from(v.position);
-                let d = p - center;
-                v.position = (center + d * factor).to_array();
-            }
-        }
-        self.mesh.compute_normals();
+        self.scale_selection_mirrored(center, factor, crate::symmetry::MeshSymmetry::default());
+    }
+
+    pub fn scale_selection_mirrored(
+        &mut self,
+        center: Vec3,
+        factor: Vec3,
+        sym: crate::symmetry::MeshSymmetry,
+    ) {
+        let positions: Vec<(u32, Vec3)> = self
+            .selected_vert_indices()
+            .into_iter()
+            .filter_map(|vi| {
+                self.mesh.vertices.get(vi as usize).map(|v| {
+                    let p = Vec3::from(v.position);
+                    (vi, center + (p - center) * factor)
+                })
+            })
+            .collect();
+        self.set_vert_positions_mirrored(&positions, sym);
     }
 
     /// Delete faces or remove verts (and incident faces).
@@ -1482,6 +1578,7 @@ mod operator_tests {
             position,
             normal: [0.0, 0.0, 1.0],
             uv,
+            color: [1.0, 1.0, 1.0, 1.0],
         };
         let mesh = MeshData {
             name: "triangle".into(),
@@ -1492,6 +1589,7 @@ mod operator_tests {
             ],
             indices: vec![0, 1, 2],
             groups: Vec::new(),
+            ..Default::default()
         };
         let mut session = EditSession::new(1, mesh);
         session.selection.domain = EditDomain::Face;
@@ -1527,12 +1625,15 @@ mod operator_tests {
 
     #[test]
     fn weld_coincident_only_changes_selected_vertices() {
-        let vertex = |position: [f32; 3]| Vertex { position, normal: [0.0, 0.0, 1.0], uv: [0.0, 0.0] };
+        let vertex = |position: [f32; 3]| Vertex { position, normal: [0.0, 0.0, 1.0], uv: [0.0, 0.0],
+            color: [1.0, 1.0, 1.0, 1.0],
+        };
         let mesh = MeshData {
             name: "weld test".into(),
             vertices: vec![vertex([0.0,0.0,0.0]), vertex([1.0,0.0,0.0]), vertex([0.0,0.0,0.0]), vertex([0.0,1.0,0.0])],
             indices: vec![0,1,3, 2,1,3],
             groups: Vec::new(),
+            ..Default::default()
         };
         let mut session = EditSession::new(1, mesh);
         session.selection.domain = EditDomain::Vertex;

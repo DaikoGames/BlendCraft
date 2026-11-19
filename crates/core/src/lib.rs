@@ -16,12 +16,14 @@ pub mod kinds;
 pub mod material;
 pub mod meshcache;
 pub mod mesh;
+pub mod paint;
 pub mod modifiers;
 pub mod primitives;
 pub mod physics;
 pub mod project;
 pub mod scene;
 pub mod sculpt;
+pub mod symmetry;
 pub mod simulation;
 pub mod shader_graph;
 pub mod uv;
@@ -54,7 +56,8 @@ pub use kinds::{
     SpeakerData, SurfaceData, VolumeData,
 };
 pub use material::{AlphaMode, Material, TextureData};
-pub use mesh::{Aabb, MeshData, MeshGroup, Vertex};
+pub use mesh::{Aabb, MeshData, MeshGroup, Vertex, VertexGroup};
+pub use paint::{VertexPaintBrush, VertexPaintSettings, WeightPaintBrush, WeightPaintSettings, vertex_paint_stroke, weight_paint_stroke};
 pub use modifiers::{
     evaluate_object_modifiers, evaluate_stack, BooleanOperation, Modifier, ModifierKind,
 };
@@ -69,6 +72,7 @@ pub use simulation::{
     bake_non_rigid_simulations, free_sim_bake, promote_legacy_fluid_components, ClothSettings,
     FluidSettings, ObjectSimulation, ParticleSettings, SimulationSettings, SoftBodySettings,
 };
+pub use symmetry::{apply_mirror_pairs, apply_mirror_pairs_full, apply_signs, bake_mirror_pairs, build_mirror_map_for_signs, build_vertex_mirror_map, build_vertex_mirror_map_axis, mirror_bone_name, mirror_point, mirror_point_sym, mirror_quat, mirror_quat_sym, mirror_vec, mirror_vec_sym, mirror_x_point, mirror_x_quat, mirror_x_vec, MeshSymmetry, MirrorAxis};
 pub use sculpt::{apply_brush, dyntopo_refine, raycast_mesh, SculptBrush, SculptSettings};
 pub use shader_graph::{
     apply_eval_to_material, bake_graph_texture, color_ramp_eval_stops, color_ramp_from_node,

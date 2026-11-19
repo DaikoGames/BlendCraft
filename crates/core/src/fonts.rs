@@ -199,6 +199,7 @@ fn vert(p: [f32; 3], n: [f32; 3]) -> Vertex {
         position: p,
         normal: n,
         uv: [0.0, 0.0],
+        color: [1.0, 1.0, 1.0, 1.0],
     }
 }
 

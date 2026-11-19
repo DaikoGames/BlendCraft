@@ -28,12 +28,12 @@ This README is the project progress record. A feature is marked **Finished** onl
 
 | Feature | Status |
 |---|---|
-| Vertex Paint mode and vertex-color attributes | **Not finished** |
-| Vertex Paint brush tools | **Not finished** |
-| Editable vertex groups | **Not finished** |
-| Weight Paint mode and weight visualization | **Not finished** |
+| Vertex Paint mode and vertex-color attributes | **Finished** | Per-vertex RGBA colors, Vertex Paint mode, Draw/Soften/Blur/Smear brushes. |
+| Vertex Paint brush tools | **Finished** | Draw, Soften, Blur, Smear. |
+| Editable vertex groups | **Finished** | Named groups with per-vertex weights; add/remove/active selection. |
+| Weight Paint mode and weight visualization | **Finished** | Weight Paint mode, heat-map visualization, Draw/Blur/Average/Smear, optional normalize. |
 | Weight normalization and practical weight editing | **Not finished** |
-| Expanded Texture Paint brushes and image workflow | **Partially finished** — basic draw/erase painting exists; the broader brush set and source-image-safe erasing remain incomplete. |
+| Expanded Texture Paint brushes and image workflow | **Partially finished** — Draw, Erase, Soften, Smear, and Fill; eraser restores entry snapshot. Layers/masks still incomplete. |
 
 ### Stage 3 — intermediate modeling and animation tools
 
@@ -166,7 +166,7 @@ The project supports its native `.forge` format and has import/export paths for 
 
 - No full Blender/BMesh-compatible mesh topology or complete Edit Mode parity.
 - No native `.blend` import/export.
-- Vertex Paint and Weight Paint are not implemented.
+- Vertex Paint and Weight Paint are implemented with basic brushes; advanced masks/layers are not.
 - Advanced UV seams, pinning, and unwrap tools are not implemented.
 - Sculpt masks, face sets, and advanced remeshing are not implemented.
 - Full animation editors, NLA, and drivers are not implemented.

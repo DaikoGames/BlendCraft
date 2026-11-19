@@ -371,6 +371,7 @@ fn v(p: Vec3, n: Vec3, uv: [f32; 2]) -> Vertex {
         position: p.to_array(),
         normal: n.to_array(),
         uv,
+        color: [1.0, 1.0, 1.0, 1.0],
     }
 }
 

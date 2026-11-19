@@ -209,6 +209,7 @@ fn visit(node: &gltf::Node, parent: Mat4, buffers: &[gltf::buffer::Data], scene:
                     position: *p,
                     normal: normals.as_ref().map_or([0.0; 3], |n| n[k]),
                     uv: uvs.as_ref().map_or([0.0; 2], |u| u[k]),
+                    color: [1.0, 1.0, 1.0, 1.0],
                 })
                 .collect();
             let mut md = MeshData {

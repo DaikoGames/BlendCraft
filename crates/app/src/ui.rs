@@ -15,7 +15,7 @@ use forge_core::{
     TextureData, VolumeData,
 };
 use forge_core::{CompositorGraph, CompositorNodeKind};
-use forge_render::{ShadingMode, ViewSettings, WireMode};
+use forge_render::{RenderEngine, ShadingMode, ViewSettings, ViewportShading, WireMode};
 use glam::{EulerRot, Quat, Vec3};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -358,6 +358,7 @@ pub fn draw(
 
                 // Mode selector (Blender style)
                 let in_sculpt = doc.sculpt_mode;
+
                 // Object Mode: default transform workspace
                 let in_object = !in_edit
                     && !in_pose
@@ -598,6 +599,73 @@ pub fn draw(
                     st.scripting_mode = false;
                 }
 
+                let in_vpaint = doc.vertex_paint_mode;
+                if ui
+                    .add_enabled(
+                        mesh_ok || in_vpaint,
+                        egui::SelectableLabel::new(in_vpaint, "Vertex Paint"),
+                    )
+                    .clicked()
+                {
+                    if in_edit {
+                        actions.push(Action::ToggleEditMode);
+                    }
+                    if in_sculpt {
+                        actions.push(Action::ToggleSculptMode);
+                    }
+                    if in_uv {
+                        actions.push(Action::ToggleUvMode);
+                    }
+                    if in_paint {
+                        actions.push(Action::TogglePaintMode);
+                    }
+                    if doc.weight_paint_mode {
+                        actions.push(Action::ToggleWeightPaintMode);
+                    }
+                    if !in_vpaint {
+                        actions.push(Action::ToggleVertexPaintMode);
+                    }
+                    st.shading_mode = false;
+                    st.animation_mode = false;
+                    st.rendering_mode = false;
+                    st.compositing_mode = false;
+                    st.geometry_nodes_mode = false;
+                    st.scripting_mode = false;
+                }
+                let in_wpaint = doc.weight_paint_mode;
+                if ui
+                    .add_enabled(
+                        mesh_ok || in_wpaint,
+                        egui::SelectableLabel::new(in_wpaint, "Weight Paint"),
+                    )
+                    .clicked()
+                {
+                    if in_edit {
+                        actions.push(Action::ToggleEditMode);
+                    }
+                    if in_sculpt {
+                        actions.push(Action::ToggleSculptMode);
+                    }
+                    if in_uv {
+                        actions.push(Action::ToggleUvMode);
+                    }
+                    if in_paint {
+                        actions.push(Action::TogglePaintMode);
+                    }
+                    if doc.vertex_paint_mode {
+                        actions.push(Action::ToggleVertexPaintMode);
+                    }
+                    if !in_wpaint {
+                        actions.push(Action::ToggleWeightPaintMode);
+                    }
+                    st.shading_mode = false;
+                    st.animation_mode = false;
+                    st.rendering_mode = false;
+                    st.compositing_mode = false;
+                    st.geometry_nodes_mode = false;
+                    st.scripting_mode = false;
+                }
+
                 if ui
                     .selectable_label(st.compositing_mode, "Compositing")
                     .clicked()
@@ -725,6 +793,7 @@ pub fn draw(
                 {
                     ui.weak("Select a mesh to edit");
                 }
+
             });
         });
 
@@ -807,6 +876,10 @@ pub fn draw(
                         ui.add_space(3.0);
                         let tools = if doc.paint_mode {
                             &Tool::PAINT_MODE[..]
+                        } else if doc.vertex_paint_mode {
+                            &Tool::VERTEX_PAINT_MODE[..]
+                        } else if doc.weight_paint_mode {
+                            &Tool::WEIGHT_PAINT_MODE[..]
                         } else if doc.uv_mode {
                             &Tool::UV_MODE[..]
                         } else if doc.sculpt_mode {
@@ -894,7 +967,7 @@ pub fn draw(
                             } else { tool.tooltip() };
                             resp.on_hover_text(tooltip);
                         }
-                        ui.add_space(3.0);
+                                                ui.add_space(3.0);
                     });
                 });
         });
@@ -1046,6 +1119,283 @@ pub fn draw(
     // Right-clicking inside the 3D viewport opens the exact same Object Mode menu
     // used by Outliner rows. The viewport is the remaining central area after panels.
     let viewport_rect = ctx.available_rect();
+
+    // Viewport header overlays — top of 3D view, toward the right (Blender layout)
+    {
+        let in_edit = doc.in_edit_mode();
+        let in_pose = doc.pose_mode && doc.active_armature().is_some();
+        let can_mirror = in_edit || doc.sculpt_mode || in_pose || doc.armature_edit;
+        // Inset from the right edge (not flush, not on the far left)
+        let bar_w = if can_mirror { 250.0 } else { 160.0 };
+        let origin = egui::pos2(
+            viewport_rect.right() - bar_w - 48.0,
+            viewport_rect.top() + 6.0,
+        );
+        egui::Area::new(egui::Id::new("viewport_header_overlay"))
+            .fixed_pos(origin)
+            .order(egui::Order::Foreground)
+            .show(ctx, |ui| {
+                egui::Frame::none()
+                    .fill(egui::Color32::from_rgba_unmultiplied(28, 28, 30, 210))
+                    .rounding(5.0)
+                    .inner_margin(egui::Margin::symmetric(5.0, 3.0))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 3.0;
+                            let btn = egui::vec2(24.0, 24.0);
+                            let active_bg = egui::Color32::from_rgb(0x4a, 0x6a, 0x9a);
+                            let idle_col = egui::Color32::from_rgb(0xc0, 0xc0, 0xc0);
+                            let active_col = egui::Color32::from_rgb(0xf0, 0xf0, 0xf0);
+
+                            // --- Mesh Symmetry ---
+                            if can_mirror {
+                                let sx = doc.mesh_symmetry.x;
+                                let sy = doc.mesh_symmetry.y;
+                                let sz = doc.mesh_symmetry.z;
+                                let any = sx || sy || sz;
+                                let (icon_rect, icon_resp) =
+                                    ui.allocate_exact_size(btn, egui::Sense::click());
+                                {
+                                    let painter = ui.painter();
+                                    let c = icon_rect.center();
+                                    let s = 7.0_f32;
+                                    let col = if any {
+                                        egui::Color32::from_rgb(0xff, 0xcc, 0x66)
+                                    } else {
+                                        idle_col
+                                    };
+                                    let stroke = egui::Stroke::new(1.4_f32, col);
+                                    painter.line_segment(
+                                        [c + egui::vec2(0.0, -s), c + egui::vec2(0.0, s)],
+                                        stroke,
+                                    );
+                                    painter.add(egui::Shape::convex_polygon(
+                                        vec![
+                                            c + egui::vec2(-1.2, 0.0),
+                                            c + egui::vec2(-s * 1.25, -s * 0.9),
+                                            c + egui::vec2(-s * 1.25, s * 0.9),
+                                        ],
+                                        col.linear_multiply(0.9),
+                                        egui::Stroke::NONE,
+                                    ));
+                                    painter.add(egui::Shape::convex_polygon(
+                                        vec![
+                                            c + egui::vec2(1.2, 0.0),
+                                            c + egui::vec2(s * 1.25, -s * 0.9),
+                                            c + egui::vec2(s * 1.25, s * 0.9),
+                                        ],
+                                        col.linear_multiply(0.9),
+                                        egui::Stroke::NONE,
+                                    ));
+                                }
+                                if icon_resp.clicked() {
+                                    actions.push(Action::ToggleMeshSymmetryX);
+                                }
+                                icon_resp.on_hover_text("Mesh Symmetry");
+                                for (on, label, action) in [
+                                    (sx, "X", Action::ToggleMeshSymmetryX),
+                                    (sy, "Y", Action::ToggleMeshSymmetryY),
+                                    (sz, "Z", Action::ToggleMeshSymmetryZ),
+                                ] {
+                                    let r = ui.add_sized(
+                                        egui::vec2(16.0, 20.0),
+                                        egui::SelectableLabel::new(on, label),
+                                    );
+                                    if r.clicked() {
+                                        actions.push(action);
+                                    }
+                                    r.on_hover_text(format!("Mesh Symmetry {label}"));
+                                }
+                                ui.separator();
+                            }
+
+                            // --- Viewport shading icons (Blender sphere row style) ---
+                            let vs = settings.viewport_shading;
+
+                            // Wireframe: empty circle with cross lines
+                            {
+                                let on = vs == ViewportShading::Wireframe;
+                                let (rect, resp) = ui.allocate_exact_size(btn, egui::Sense::click());
+                                if on {
+                                    ui.painter().rect_filled(rect, 3.0, active_bg);
+                                }
+                                let c = rect.center();
+                                let col = if on { active_col } else { idle_col };
+                                let stroke = egui::Stroke::new(1.3_f32, col);
+                                ui.painter().circle_stroke(c, 7.5, stroke);
+                                // latitude / longitude hints
+                                ui.painter().line_segment(
+                                    [c + egui::vec2(-5.5, 0.0), c + egui::vec2(5.5, 0.0)],
+                                    stroke,
+                                );
+                                ui.painter().line_segment(
+                                    [c + egui::vec2(0.0, -5.5), c + egui::vec2(0.0, 5.5)],
+                                    stroke,
+                                );
+                                if resp.clicked() {
+                                    settings.viewport_shading = ViewportShading::Wireframe;
+                                    settings.wireframe = WireMode::Only;
+                                    settings.engine = RenderEngine::Workbench;
+                                    st.render_engine = 0;
+                                }
+                                resp.on_hover_text("Wireframe");
+                            }
+
+                            // Solid: filled circle
+                            {
+                                let on = vs == ViewportShading::Solid;
+                                let (rect, resp) = ui.allocate_exact_size(btn, egui::Sense::click());
+                                if on {
+                                    ui.painter().rect_filled(rect, 3.0, active_bg);
+                                }
+                                let c = rect.center();
+                                let col = if on { active_col } else { idle_col };
+                                ui.painter().circle_filled(c, 7.5, col.linear_multiply(0.85));
+                                ui.painter().circle_stroke(
+                                    c,
+                                    7.5,
+                                    egui::Stroke::new(1.2_f32, col),
+                                );
+                                if resp.clicked() {
+                                    settings.viewport_shading = ViewportShading::Solid;
+                                    settings.wireframe = WireMode::Off;
+                                    settings.engine = RenderEngine::Workbench;
+                                    settings.shading = ShadingMode::Rendered;
+                                    settings.shadows = false;
+                                    st.render_engine = 0;
+                                }
+                                resp.on_hover_text("Solid");
+                            }
+
+                            // Material Preview: circle with diagonal gradient band
+                            {
+                                let on = vs == ViewportShading::MaterialPreview;
+                                let (rect, resp) = ui.allocate_exact_size(btn, egui::Sense::click());
+                                if on {
+                                    ui.painter().rect_filled(rect, 3.0, active_bg);
+                                }
+                                let c = rect.center();
+                                let col = if on { active_col } else { idle_col };
+                                ui.painter().circle_filled(
+                                    c,
+                                    7.5,
+                                    egui::Color32::from_rgb(0x6a, 0x8a, 0xb8),
+                                );
+                                // highlight crescent
+                                ui.painter().circle_filled(
+                                    c + egui::vec2(-2.5, -2.5),
+                                    3.2,
+                                    egui::Color32::from_rgb(0xc8, 0xd8, 0xf0),
+                                );
+                                ui.painter().circle_stroke(
+                                    c,
+                                    7.5,
+                                    egui::Stroke::new(1.2_f32, col),
+                                );
+                                if resp.clicked() {
+                                    settings.viewport_shading = ViewportShading::MaterialPreview;
+                                    settings.wireframe = WireMode::Off;
+                                    settings.engine = RenderEngine::Eevee;
+                                    settings.shading = ShadingMode::Rendered;
+                                    settings.shadows = false;
+                                    st.render_engine = 1;
+                                }
+                                resp.on_hover_text("Material Preview");
+                            }
+
+                            // Rendered: circle with soft shadow side
+                            {
+                                let on = vs == ViewportShading::Rendered;
+                                let (rect, resp) = ui.allocate_exact_size(btn, egui::Sense::click());
+                                if on {
+                                    ui.painter().rect_filled(rect, 3.0, active_bg);
+                                }
+                                let c = rect.center();
+                                let col = if on { active_col } else { idle_col };
+                                ui.painter().circle_filled(
+                                    c,
+                                    7.5,
+                                    egui::Color32::from_rgb(0x90, 0x90, 0x98),
+                                );
+                                // lit side
+                                ui.painter().circle_filled(
+                                    c + egui::vec2(-2.8, -2.2),
+                                    4.0,
+                                    egui::Color32::from_rgb(0xe8, 0xe8, 0xf0),
+                                );
+                                // shadow side arc
+                                ui.painter().circle_filled(
+                                    c + egui::vec2(3.0, 2.5),
+                                    3.5,
+                                    egui::Color32::from_rgb(0x40, 0x40, 0x48),
+                                );
+                                ui.painter().circle_stroke(
+                                    c,
+                                    7.5,
+                                    egui::Stroke::new(1.2_f32, col),
+                                );
+                                if resp.clicked() {
+                                    settings.viewport_shading = ViewportShading::Rendered;
+                                    settings.wireframe = WireMode::Off;
+                                    settings.engine = RenderEngine::Eevee;
+                                    settings.shading = ShadingMode::Rendered;
+                                    settings.shadows = true;
+                                    st.render_engine = 1;
+                                }
+                                resp.on_hover_text("Rendered — lighting with shadows");
+                            }
+
+                            ui.separator();
+
+                            // X-Ray: dashed circle (see-through)
+                            {
+                                let on = settings.xray;
+                                let (rect, resp) = ui.allocate_exact_size(btn, egui::Sense::click());
+                                if on {
+                                    ui.painter().rect_filled(rect, 3.0, active_bg);
+                                }
+                                let c = rect.center();
+                                let col = if on {
+                                    egui::Color32::from_rgb(0xff, 0xcc, 0x66)
+                                } else {
+                                    idle_col
+                                };
+                                let stroke = egui::Stroke::new(1.3_f32, col);
+                                // outer ring
+                                ui.painter().circle_stroke(c, 7.5, stroke);
+                                // inner ghost circle
+                                ui.painter().circle_stroke(
+                                    c,
+                                    4.0,
+                                    egui::Stroke::new(1.0_f32, col.linear_multiply(0.7)),
+                                );
+                                // small crosshair
+                                ui.painter().line_segment(
+                                    [c + egui::vec2(-3.0, 0.0), c + egui::vec2(3.0, 0.0)],
+                                    stroke,
+                                );
+                                ui.painter().line_segment(
+                                    [c + egui::vec2(0.0, -3.0), c + egui::vec2(0.0, 3.0)],
+                                    stroke,
+                                );
+                                if resp.clicked() {
+                                    settings.xray = !settings.xray;
+                                    if settings.xray {
+                                        if settings.wireframe == WireMode::Off {
+                                            settings.wireframe = WireMode::Overlay;
+                                        }
+                                    } else if settings.viewport_shading != ViewportShading::Wireframe
+                                    {
+                                        settings.wireframe = WireMode::Off;
+                                    }
+                                }
+                                resp.on_hover_text("X-Ray — see through the mesh");
+                            }
+                        });
+                    });
+            });
+    }
+
     if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
         st.viewport_context_menu = None;
         st.viewport_context_menu_rect = None;
@@ -4379,6 +4729,30 @@ fn draw_tool_icon(
                 ],
                 thick,
             );
+        }
+        Tool::PaintSoften | Tool::VertexPaintSoften | Tool::VertexPaintBlur | Tool::WeightPaintBlur
+        | Tool::WeightPaintAverage => {
+            painter.circle_stroke(c, s * 0.75, stroke);
+            painter.circle_stroke(c, s * 0.4, stroke);
+        }
+        Tool::PaintSmear | Tool::VertexPaintSmear | Tool::WeightPaintSmear => {
+            painter.line_segment(
+                [c + egui::vec2(-s * 0.6, s * 0.2), c + egui::vec2(s * 0.6, -s * 0.2)],
+                thick,
+            );
+            painter.circle_filled(c + egui::vec2(s * 0.45, -s * 0.15), s * 0.18, col);
+        }
+        Tool::PaintFill => {
+            painter.rect_stroke(
+                egui::Rect::from_center_size(c, egui::vec2(s * 1.2, s * 1.2)),
+                2.0,
+                stroke,
+            );
+            painter.circle_filled(c, s * 0.2, col);
+        }
+        Tool::VertexPaintDraw | Tool::WeightPaintDraw => {
+            painter.circle_stroke(c, s * 0.75, stroke);
+            painter.circle_filled(c, s * 0.25, col);
         }
     }
 }

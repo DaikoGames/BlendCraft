@@ -38,6 +38,27 @@ impl RenderEngine {
     }
 }
 
+/// Blender 3D Viewport header shading buttons.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum ViewportShading {
+    Wireframe,
+    #[default]
+    Solid,
+    MaterialPreview,
+    Rendered,
+}
+
+impl ViewportShading {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Wireframe => "Wireframe",
+            Self::Solid => "Solid",
+            Self::MaterialPreview => "Material Preview",
+            Self::Rendered => "Rendered",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ShadingMode {
     Rendered = 0,
@@ -88,7 +109,11 @@ impl WireMode {
 #[derive(Clone, Debug)]
 pub struct ViewSettings {
     pub shading: ShadingMode,
+    /// Blender viewport shading (Wireframe / Solid / Material / Rendered).
+    pub viewport_shading: ViewportShading,
     pub wireframe: WireMode,
+    /// See-through mesh display (Blender X-Ray).
+    pub xray: bool,
     pub show_background: bool,
     /// 0 = sharp, 1 = fully blurred environment background
     pub background_blur: f32,
@@ -118,7 +143,9 @@ impl Default for ViewSettings {
     fn default() -> Self {
         Self {
             shading: ShadingMode::Rendered,
+            viewport_shading: ViewportShading::Solid,
             wireframe: WireMode::Off,
+            xray: false,
             show_background: false,
             background_blur: 0.35,
             exposure: 1.0,

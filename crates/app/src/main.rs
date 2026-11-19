@@ -58,6 +58,10 @@ struct EditGizmoDrag {
     start_param: f32,
     verts: Vec<(u32, glam::Vec3)>,
     inv_world: glam::Mat4,
+    /// Fixed (selected, _, signs) pairs baked at drag start
+    mirror_pairs: Vec<(u32, u32, glam::Vec3)>,
+    /// Full mesh positions at drag start (for split-vert symmetry)
+    mesh_snap: Vec<[f32; 3]>,
 }
 
 /// Modal transform for selected mesh components in Edit Mode (G / R / S).
@@ -69,6 +73,10 @@ struct EditXform {
     inv_world: glam::Mat4,
     /// true = drag while holding LMB (click-drag verts); false = modal G/R/S
     confirm_on_release: bool,
+    /// Fixed (selected, _, signs) pairs baked at transform start
+    mirror_pairs: Vec<(u32, u32, glam::Vec3)>,
+    /// Full mesh positions at transform start (for split-vert symmetry)
+    mesh_snap: Vec<[f32; 3]>,
 }
 
 use ui::{Rename, RenderProgressUi, UiState};
@@ -654,11 +662,113 @@ impl App {
 
     fn paint_sample(&mut self) {
         if let Some(uv) = self.paint_sample_at(self.cursor) {
-            if self.ts.tool == Tool::PaintErase {
-                let _ = self.doc.erase_stroke_uv(&[uv], self.ts.paint_radius, self.ts.paint_strength);
-            } else {
-                let _ = self.doc.paint_at_uv(uv, self.ts.paint_color, self.ts.paint_radius, self.ts.paint_strength);
+            match self.ts.tool {
+                Tool::PaintErase => {
+                    let _ = self.doc.erase_stroke_uv(&[uv], self.ts.paint_radius, self.ts.paint_strength);
+                }
+                Tool::PaintSoften => {
+                    let _ = self.doc.soften_stroke_uv(&[uv], self.ts.paint_radius, self.ts.paint_strength);
+                }
+                Tool::PaintSmear => {
+                    let _ = self.doc.smear_stroke_uv(&[uv], self.ts.paint_radius, self.ts.paint_strength);
+                }
+                Tool::PaintFill => {
+                    let _ = self.doc.fill_uv(uv, self.ts.paint_color, 24);
+                }
+                _ => {
+                    let _ = self.doc.paint_at_uv(uv, self.ts.paint_color, self.ts.paint_radius, self.ts.paint_strength);
+                }
             }
+        }
+    }
+
+    fn vertex_paint_settings(&self) -> forge_core::VertexPaintSettings {
+        use forge_core::VertexPaintBrush as B;
+        let brush = match self.ts.tool {
+            Tool::VertexPaintSoften => B::Soften,
+            Tool::VertexPaintBlur => B::Blur,
+            Tool::VertexPaintSmear => B::Smear,
+            _ => B::Draw,
+        };
+        forge_core::VertexPaintSettings {
+            brush,
+            color: self.ts.vpaint_color,
+            radius: self.ts.vpaint_radius,
+            strength: self.ts.vpaint_strength,
+        }
+    }
+
+    fn weight_paint_settings(&self) -> forge_core::WeightPaintSettings {
+        use forge_core::WeightPaintBrush as B;
+        let brush = match self.ts.tool {
+            Tool::WeightPaintBlur => B::Blur,
+            Tool::WeightPaintAverage => B::Average,
+            Tool::WeightPaintSmear => B::Smear,
+            _ => B::Draw,
+        };
+        forge_core::WeightPaintSettings {
+            brush,
+            weight: self.ts.wpaint_weight,
+            radius: self.ts.wpaint_radius,
+            strength: self.ts.wpaint_strength,
+            normalize: self.ts.wpaint_normalize,
+        }
+    }
+
+    fn ray_from_cursor(&self, cursor: (f64, f64)) -> Option<(glam::Vec3, glam::Vec3)> {
+        let (vx, vy, vw, vh) = (
+            self.viewport[0],
+            self.viewport[1],
+            self.viewport[2],
+            self.viewport[3],
+        );
+        if vw < 1.0 || vh < 1.0 {
+            return None;
+        }
+        let nx = ((cursor.0 as f32 - vx) / vw) * 2.0 - 1.0;
+        let ny = 1.0 - ((cursor.1 as f32 - vy) / vh) * 2.0;
+        Some(self.camera.ray((nx, ny), vw / vh))
+    }
+
+    /// Ray-hit active mesh and return object-local position for vertex/weight paint.
+    fn paint_local_hit(&self, cursor: (f64, f64)) -> Option<glam::Vec3> {
+        let id = self.doc.active?;
+        let idx = self.doc.scene.objects.iter().position(|o| o.id == id)?;
+        let (origin, dir) = self.ray_from_cursor(cursor)?;
+        let world = self.doc.scene.world_matrices()[idx];
+        let inv = world.inverse();
+        let o_l = inv.transform_point3(origin);
+        let d_l = inv.transform_vector3(dir).normalize_or_zero();
+        let mesh = &self.doc.scene.objects[idx].mesh;
+        let mut best_t = f32::INFINITY;
+        let mut hit = None;
+        for tri in mesh.indices.chunks_exact(3) {
+            if tri.iter().any(|&i| i as usize >= mesh.vertices.len()) {
+                continue;
+            }
+            let a = glam::Vec3::from(mesh.vertices[tri[0] as usize].position);
+            let b = glam::Vec3::from(mesh.vertices[tri[1] as usize].position);
+            let c = glam::Vec3::from(mesh.vertices[tri[2] as usize].position);
+            if let Some(t) = ray_triangle(o_l, d_l, a, b, c) {
+                if t > 1e-5 && t < best_t {
+                    best_t = t;
+                    hit = Some(o_l + d_l * t);
+                }
+            }
+        }
+        hit
+    }
+
+    fn vertex_or_weight_paint_sample(&mut self) {
+        let Some(hit) = self.paint_local_hit(self.cursor) else {
+            return;
+        };
+        if self.doc.vertex_paint_mode {
+            let s = self.vertex_paint_settings();
+            let _ = self.doc.vertex_paint_at(&[hit], &s);
+        } else if self.doc.weight_paint_mode {
+            let s = self.weight_paint_settings();
+            let _ = self.doc.weight_paint_at(&[hit], &s);
         }
     }
 
@@ -1260,6 +1370,11 @@ impl App {
                 (b * e - c * d) / den
             }
         };
+        let mesh_snap: Vec<[f32; 3]> =
+            session.mesh.vertices.iter().map(|v| v.position).collect();
+        let selected: Vec<u32> = verts.iter().map(|(i, _)| *i).collect();
+        let mirror_pairs =
+            forge_core::bake_mirror_pairs(&mesh_snap, &selected, self.doc.mesh_symmetry);
         self.doc.checkpoint();
         self.edit_gizmo_drag = Some(EditGizmoDrag {
             axis,
@@ -1268,6 +1383,8 @@ impl App {
             start_param: start,
             verts,
             inv_world: world.inverse(),
+            mirror_pairs,
+            mesh_snap,
         });
         true
     }
@@ -1303,8 +1420,26 @@ impl App {
             .iter()
             .map(|(vi, p)| (*vi, *p + delta_local))
             .collect();
+        let pairs = d.mirror_pairs.clone();
+        let mesh_snap = self
+            .edit_gizmo_drag
+            .as_ref()
+            .map(|d| d.mesh_snap.clone())
+            .unwrap_or_default();
         if let Some(session) = self.doc.edit.as_mut() {
             session.set_vert_positions(&positions);
+            if !pairs.is_empty() && !mesh_snap.is_empty() {
+                let mut pos: Vec<[f32; 3]> =
+                    session.mesh.vertices.iter().map(|v| v.position).collect();
+                forge_core::apply_mirror_pairs_full(&mut pos, &mesh_snap, &positions, &pairs);
+                for (i, p) in pos.into_iter().enumerate() {
+                    if let Some(v) = session.mesh.vertices.get_mut(i) {
+                        v.position = p;
+                    }
+                }
+                session.set_vert_positions(&positions);
+                session.mesh.compute_normals();
+            }
         }
         self.doc.sync_edit_mesh();
     }
@@ -1581,8 +1716,18 @@ impl App {
         let selected_bones: std::collections::BTreeSet<u32> =
             snapshots.iter().map(|b| b.0).collect();
         let pose_mode = self.doc.pose_mode;
+        let mesh_symmetry = self.doc.mesh_symmetry;
         if let Some(arm) = self.doc.active_armature_mut() {
-            for (i, head, tail, pose_rot, pose_loc, pose_scale) in snapshots {
+            // Collect mirror targets before mut borrow of individual bones
+            let mirror_pairs: Vec<(u32, Option<u32>)> = if mesh_symmetry.any() {
+                snapshots
+                    .iter()
+                    .map(|(i, ..)| (*i, arm.mirror_bone_index(*i)))
+                    .collect()
+            } else {
+                snapshots.iter().map(|(i, ..)| (*i, None)).collect()
+            };
+            for (i, head, tail, pose_rot, pose_loc, pose_scale) in snapshots.iter().copied() {
                 let Some(b) = arm.bones.get_mut(i as usize) else {
                     continue;
                 };
@@ -1634,6 +1779,73 @@ impl App {
                     };
                     b.head = h.to_array();
                     b.tail = t.to_array();
+                }
+            }
+            // X-mirror: apply mirrored pose/rest transforms to counterpart bones
+            if mesh_symmetry.any() {
+                let mdelta = forge_core::mirror_vec_sym(mesh_symmetry, local_delta);
+                let maxis = forge_core::mirror_vec_sym(mesh_symmetry, local_axis).normalize_or_zero();
+                let mcenter = forge_core::mirror_point_sym(mesh_symmetry, center);
+                for (i, head, tail, pose_rot, pose_loc, pose_scale) in snapshots.iter().copied() {
+                    let Some((_, Some(mi))) = mirror_pairs.iter().find(|(si, _)| *si == i) else {
+                        continue;
+                    };
+                    let mi = *mi;
+                    if selected_bones.contains(&mi) {
+                        continue;
+                    }
+                    let Some(mb) = arm.bones.get_mut(mi as usize) else {
+                        continue;
+                    };
+                    if pose_mode {
+                        match kind {
+                            EditXformKind::Move => {
+                                let p = glam::Vec3::from(pose_loc) + mdelta;
+                                mb.pose_loc = p.to_array();
+                            }
+                            EditXformKind::Rotate => {
+                                let rest_dir = (glam::Vec3::from(tail) - glam::Vec3::from(head))
+                                    .normalize_or_zero();
+                                let rest_rot = if rest_dir.length_squared() < 1e-10 {
+                                    glam::Quat::IDENTITY
+                                } else {
+                                    glam::Quat::from_rotation_arc(glam::Vec3::Y, rest_dir)
+                                };
+                                let bone_axis = rest_rot.conjugate() * maxis;
+                                let bone_delta = glam::Quat::from_axis_angle(bone_axis, angle);
+                                let q = glam::Quat::from_xyzw(
+                                    pose_rot[0],
+                                    pose_rot[1],
+                                    pose_rot[2],
+                                    pose_rot[3],
+                                )
+                                .normalize();
+                                let q = forge_core::mirror_quat_sym(mesh_symmetry, (bone_delta * q).normalize());
+                                mb.pose_rot = [q.x, q.y, q.z, q.w];
+                            }
+                            EditXformKind::Scale => {
+                                mb.pose_scale = (glam::Vec3::from(pose_scale) * factor)
+                                    .clamp(glam::Vec3::splat(0.01), glam::Vec3::splat(100.0))
+                                    .to_array();
+                            }
+                        }
+                    } else {
+                        let h = forge_core::mirror_point_sym(mesh_symmetry, glam::Vec3::from(head));
+                        let t = forge_core::mirror_point_sym(mesh_symmetry, glam::Vec3::from(tail));
+                        let (h, t) = match kind {
+                            EditXformKind::Move => (h + mdelta, t + mdelta),
+                            EditXformKind::Rotate => {
+                                let mrot = forge_core::mirror_quat_sym(mesh_symmetry, rotation);
+                                (mcenter + mrot * (h - mcenter), mcenter + mrot * (t - mcenter))
+                            }
+                            EditXformKind::Scale => (
+                                mcenter + (h - mcenter) * factor,
+                                mcenter + (t - mcenter) * factor,
+                            ),
+                        };
+                        mb.head = h.to_array();
+                        mb.tail = t.to_array();
+                    }
                 }
             }
             if !pose_mode {
@@ -1813,6 +2025,11 @@ impl App {
         };
         let world = self.doc.scene.world_matrices()[idx];
         let inv_world = world.inverse();
+        let mesh_snap: Vec<[f32; 3]> =
+            session.mesh.vertices.iter().map(|v| v.position).collect();
+        let selected: Vec<u32> = verts.iter().map(|(i, _)| *i).collect();
+        let mirror_pairs =
+            forge_core::bake_mirror_pairs(&mesh_snap, &selected, self.doc.mesh_symmetry);
         self.doc.checkpoint();
         self.edit_xform = Some(EditXform {
             kind,
@@ -1821,6 +2038,8 @@ impl App {
             center,
             inv_world,
             confirm_on_release,
+            mirror_pairs,
+            mesh_snap,
         });
         if confirm_on_release {
             self.status("Dragging selection…");
@@ -1878,8 +2097,31 @@ impl App {
                     .collect()
             }
         };
+        // Take pairs out without holding xf borrow across mut session
+        let pairs = self
+            .edit_xform
+            .as_ref()
+            .map(|x| x.mirror_pairs.clone())
+            .unwrap_or_default();
+        let mesh_snap = self
+            .edit_xform
+            .as_ref()
+            .map(|x| x.mesh_snap.clone())
+            .unwrap_or_default();
         if let Some(session) = self.doc.edit.as_mut() {
             session.set_vert_positions(&positions);
+            if !pairs.is_empty() && !mesh_snap.is_empty() {
+                let mut pos: Vec<[f32; 3]> =
+                    session.mesh.vertices.iter().map(|v| v.position).collect();
+                forge_core::apply_mirror_pairs_full(&mut pos, &mesh_snap, &positions, &pairs);
+                for (i, p) in pos.into_iter().enumerate() {
+                    if let Some(v) = session.mesh.vertices.get_mut(i) {
+                        v.position = p;
+                    }
+                }
+                session.set_vert_positions(&positions);
+                session.mesh.compute_normals();
+            }
         }
         self.doc.sync_edit_mesh();
     }
@@ -3201,6 +3443,62 @@ impl App {
                 }
                 Err(e) => self.status(e),
             },
+            A::ToggleVertexPaintMode => match self.doc.toggle_vertex_paint_mode() {
+                Ok(()) => {
+                    if self.doc.vertex_paint_mode {
+                        self.ts.tool = Tool::VertexPaintDraw;
+                        self.status("Vertex Paint – LMB paint · Ctrl+Shift+V toggle");
+                    } else {
+                        self.ts.tool = Tool::Select;
+                        self.status("Object Mode");
+                    }
+                }
+                Err(e) => self.status(e),
+            },
+            A::ToggleWeightPaintMode => match self.doc.toggle_weight_paint_mode() {
+                Ok(()) => {
+                    if self.doc.weight_paint_mode {
+                        self.ts.tool = Tool::WeightPaintDraw;
+                        self.status("Weight Paint – LMB paint weights · Ctrl+Shift+W toggle");
+                    } else {
+                        self.ts.tool = Tool::Select;
+                        self.status("Object Mode");
+                    }
+                }
+                Err(e) => self.status(e),
+            },
+            A::ToggleXMirror => {
+                // Cycle: toggle X (Blender primary default)
+                self.doc.mesh_symmetry = self.doc.mesh_symmetry.toggle_x();
+                self.doc.version = self.doc.version.wrapping_add(1);
+                self.status(format!(
+                    "Mesh Symmetry X={} Y={} Z={}",
+                    self.doc.mesh_symmetry.x, self.doc.mesh_symmetry.y, self.doc.mesh_symmetry.z
+                ));
+            }
+            A::ToggleMeshSymmetryX => {
+                self.doc.mesh_symmetry = self.doc.mesh_symmetry.toggle_x();
+                self.doc.version = self.doc.version.wrapping_add(1);
+                self.status(format!("Mesh Symmetry X={}", self.doc.mesh_symmetry.x));
+            }
+            A::ToggleMeshSymmetryY => {
+                self.doc.mesh_symmetry = self.doc.mesh_symmetry.toggle_y();
+                self.doc.version = self.doc.version.wrapping_add(1);
+                self.status(format!("Mesh Symmetry Y={}", self.doc.mesh_symmetry.y));
+            }
+            A::ToggleMeshSymmetryZ => {
+                self.doc.mesh_symmetry = self.doc.mesh_symmetry.toggle_z();
+                self.doc.version = self.doc.version.wrapping_add(1);
+                self.status(format!("Mesh Symmetry Z={}", self.doc.mesh_symmetry.z));
+            }
+            A::SetMirrorAxis(axis) => {
+                self.doc.mesh_symmetry = axis.to_sym();
+                self.doc.version = self.doc.version.wrapping_add(1);
+                self.status(format!(
+                    "Mesh Symmetry X={} Y={} Z={}",
+                    self.doc.mesh_symmetry.x, self.doc.mesh_symmetry.y, self.doc.mesh_symmetry.z
+                ));
+            }
             A::ToggleUvMode => {
                 match self.doc.toggle_uv_mode() {
                     Ok(()) => {
@@ -4491,6 +4789,21 @@ impl App {
                         self.paint_sample();
                         return;
                     }
+                    // --- Vertex / Weight Paint ---
+                    if self.doc.vertex_paint_mode || self.doc.weight_paint_mode {
+                        let alt = self.mods.alt_key();
+                        if alt {
+                            self.left = true;
+                            self.press = self.cursor;
+                            self.dragged = false;
+                            return;
+                        }
+                        self.doc.checkpoint();
+                        self.paint_stroke = true;
+                        self.paint_last_cursor = Some(self.cursor);
+                        self.vertex_or_weight_paint_sample();
+                        return;
+                    }
                     // --- Sculpt Mode ---
                     if self.doc.sculpt_mode {
                         // Alt+LMB = orbit / Alt+Shift+LMB = pan (Blender "Emulate 3 Button Mouse")
@@ -4730,19 +5043,53 @@ impl App {
             let from = self.paint_last_cursor.unwrap_or((x, y));
             let distance = ((x - from.0).powi(2) + (y - from.1).powi(2)).sqrt();
             let steps = (distance / 4.0).ceil().max(1.0) as usize;
-            let mut uvs = Vec::with_capacity(steps);
-            for step in 1..=steps {
-                let t = step as f64 / steps as f64;
-                let sample = (from.0 + (x - from.0) * t, from.1 + (y - from.1) * t);
-                if let Some(uv) = self.paint_sample_at(sample) {
-                    uvs.push(uv);
+            if self.doc.vertex_paint_mode || self.doc.weight_paint_mode {
+                let mut pts = Vec::with_capacity(steps);
+                for step in 1..=steps {
+                    let t = step as f64 / steps as f64;
+                    let sample = (from.0 + (x - from.0) * t, from.1 + (y - from.1) * t);
+                    if let Some(hit) = self.paint_local_hit(sample) {
+                        pts.push(hit);
+                    }
                 }
-            }
-            if !uvs.is_empty() {
-                if self.ts.tool == Tool::PaintErase {
-                    let _ = self.doc.erase_stroke_uv(&uvs, self.ts.paint_radius, self.ts.paint_strength);
-                } else {
-                    let _ = self.doc.paint_stroke_uv(&uvs, self.ts.paint_color, self.ts.paint_radius, self.ts.paint_strength);
+                if !pts.is_empty() {
+                    if self.doc.vertex_paint_mode {
+                        let s = self.vertex_paint_settings();
+                        let _ = self.doc.vertex_paint_at(&pts, &s);
+                    } else {
+                        let s = self.weight_paint_settings();
+                        let _ = self.doc.weight_paint_at(&pts, &s);
+                    }
+                }
+            } else {
+                let mut uvs = Vec::with_capacity(steps);
+                for step in 1..=steps {
+                    let t = step as f64 / steps as f64;
+                    let sample = (from.0 + (x - from.0) * t, from.1 + (y - from.1) * t);
+                    if let Some(uv) = self.paint_sample_at(sample) {
+                        uvs.push(uv);
+                    }
+                }
+                if !uvs.is_empty() {
+                    match self.ts.tool {
+                        Tool::PaintErase => {
+                            let _ = self.doc.erase_stroke_uv(&uvs, self.ts.paint_radius, self.ts.paint_strength);
+                        }
+                        Tool::PaintSoften => {
+                            let _ = self.doc.soften_stroke_uv(&uvs, self.ts.paint_radius, self.ts.paint_strength);
+                        }
+                        Tool::PaintSmear => {
+                            let _ = self.doc.smear_stroke_uv(&uvs, self.ts.paint_radius, self.ts.paint_strength);
+                        }
+                        Tool::PaintFill => {
+                            if let Some(uv) = uvs.last() {
+                                let _ = self.doc.fill_uv(*uv, self.ts.paint_color, 24);
+                            }
+                        }
+                        _ => {
+                            let _ = self.doc.paint_stroke_uv(&uvs, self.ts.paint_color, self.ts.paint_radius, self.ts.paint_strength);
+                        }
+                    }
                 }
             }
             self.paint_last_cursor = Some((x, y));
@@ -5412,6 +5759,34 @@ impl ApplicationHandler for App {
             WindowEvent::RedrawRequested => self.redraw(el),
             _ => {}
         }
+    }
+}
+
+
+fn ray_triangle(o: glam::Vec3, d: glam::Vec3, v0: glam::Vec3, v1: glam::Vec3, v2: glam::Vec3) -> Option<f32> {
+    let e1 = v1 - v0;
+    let e2 = v2 - v0;
+    let p = d.cross(e2);
+    let det = e1.dot(p);
+    if det.abs() < 1e-8 {
+        return None;
+    }
+    let inv = 1.0 / det;
+    let tvec = o - v0;
+    let u = tvec.dot(p) * inv;
+    if !(0.0..=1.0).contains(&u) {
+        return None;
+    }
+    let q = tvec.cross(e1);
+    let v = d.dot(q) * inv;
+    if v < 0.0 || u + v > 1.0 {
+        return None;
+    }
+    let t = e2.dot(q) * inv;
+    if t > 1e-5 {
+        Some(t)
+    } else {
+        None
     }
 }
 

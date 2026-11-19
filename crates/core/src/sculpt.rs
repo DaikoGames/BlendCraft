@@ -260,6 +260,7 @@ pub fn apply_brush(
     hit: Vec3,
     hit_normal: Vec3,
     grab_delta: Option<Vec3>,
+    sym: crate::symmetry::MeshSymmetry,
 ) {
     let radius = settings.radius.max(1e-5);
     let strength = settings.strength.clamp(0.0, 1.0);
@@ -479,4 +480,17 @@ pub fn apply_brush(
         }
     }
     mesh.compute_normals();
+
+    // Blender sculpt symmetry: mirror stroke across each enabled axis combination
+    if sym.any() {
+        for signs in sym.mirror_signs() {
+            let m_hit = crate::symmetry::apply_signs(hit, signs);
+            if m_hit.distance(hit) <= 1e-6 {
+                continue;
+            }
+            let m_n = crate::symmetry::apply_signs(n_hit, signs).normalize_or_zero();
+            let m_grab = grab_delta.map(|d| crate::symmetry::apply_signs(d, signs));
+            apply_brush(mesh, settings, m_hit, m_n, m_grab, crate::symmetry::MeshSymmetry::default());
+        }
+    }
 }
