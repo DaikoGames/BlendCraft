@@ -159,6 +159,13 @@ pub struct Scene {
     /// Per-frame mesh sequences (fluid bakes, imported Alembic caches), keyed by object id.
     #[serde(default)]
     pub mesh_caches: HashMap<u64, MeshSequence>,
+    /// Viewport filter: bit `ObjectKind::type_index()` set = that object type is hidden.
+    /// View state only — not saved with the project.
+    #[serde(skip)]
+    pub type_hidden: u32,
+    /// Viewport filter: bit set = that object type cannot be selected / picked.
+    #[serde(skip)]
+    pub type_unselectable: u32,
 }
 
 struct Eval<'a> {
@@ -280,7 +287,7 @@ impl Scene {
         let Some(o) = self.objects.get(i) else {
             return false;
         };
-        if !o.visible {
+        if !o.visible || self.type_hidden & (1u32 << o.kind.type_index()) != 0 {
             return false;
         }
         match o.collection {
@@ -291,6 +298,15 @@ impl Scene {
                 .find(|x| x.id == c)
                 .map_or(true, |x| x.visible),
         }
+    }
+
+    /// Visible and not excluded by the viewport "selectable" object-type filter.
+    pub fn is_selectable(&self, i: usize) -> bool {
+        self.is_visible(i)
+            && self
+                .objects
+                .get(i)
+                .map_or(false, |o| self.type_unselectable & (1u32 << o.kind.type_index()) == 0)
     }
 
     pub fn children_of(&self, id: u64) -> Vec<usize> {
@@ -362,7 +378,7 @@ impl Scene {
         let worlds = self.world_matrices();
         let mut best: Option<(usize, f32)> = None;
         for (i, o) in self.objects.iter().enumerate() {
-            if !self.is_visible(i) {
+            if !self.is_selectable(i) {
                 continue;
             }
             let m = worlds[i];

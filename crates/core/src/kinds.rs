@@ -275,7 +275,25 @@ pub enum ObjectKind {
     ForceField(ForceFieldData),
 }
 
+/// Object categories used by the viewport "Selectability & Visibility" filter.
+pub const OBJECT_TYPE_COUNT: usize = 7;
+pub const OBJECT_TYPE_NAMES: [&str; OBJECT_TYPE_COUNT] =
+    ["Meshes", "Surfaces", "Armatures", "Empties", "Cameras", "Lights", "Other"];
+
 impl ObjectKind {
+    /// Index (0..OBJECT_TYPE_COUNT) of this object's filter category.
+    pub fn type_index(&self) -> usize {
+        match self {
+            ObjectKind::Mesh => 0,
+            ObjectKind::Surface(_) => 1,
+            ObjectKind::Armature(_) => 2,
+            ObjectKind::Empty { .. } => 3,
+            ObjectKind::Camera(_) => 4,
+            ObjectKind::Light(_) => 5,
+            _ => 6,
+        }
+    }
+
     pub fn is_mesh(&self) -> bool {
         matches!(self, ObjectKind::Mesh)
     }

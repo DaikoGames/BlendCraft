@@ -4864,7 +4864,7 @@ impl App {
                         && !(self.doc.armature_edit || self.doc.pose_mode)
                     {
                         self.ts.tool = Tool::Move;
-                        if self.gizmo.begin(
+                        if self.settings.show_gizmo && self.gizmo.begin(
                             self.cursor,
                             &self.camera,
                             self.viewport,
@@ -4895,6 +4895,7 @@ impl App {
                     // In armature modes, gizmo handles take priority over bone picking.
                     if (self.doc.armature_edit || self.doc.pose_mode)
                         && self.ts.tool.is_gizmo()
+                        && self.settings.show_gizmo
                         && self.gizmo.begin(
                             self.cursor,
                             &self.camera,
@@ -4927,7 +4928,7 @@ impl App {
                             return;
                         }
                         // Axis arrows first (like Object Mode gizmo)
-                        if self.begin_edit_gizmo_drag() {
+                        if self.settings.show_gizmo && self.begin_edit_gizmo_drag() {
                             return;
                         }
                         // Click a vertex: select + free drag
@@ -4942,6 +4943,7 @@ impl App {
                     }
                     if self.ts.tool.is_gizmo()
                         && !(self.doc.armature_edit || self.doc.pose_mode)
+                        && self.settings.show_gizmo
                         && self.gizmo.begin(
                             self.cursor,
                             &self.camera,
@@ -5160,7 +5162,9 @@ impl App {
             self.update_sel_drag();
             return;
         }
-        if !self.left && !self.middle && !self.right {
+        if !self.settings.show_gizmo {
+            self.edit_gizmo_hover = None;
+        } else if !self.left && !self.middle && !self.right {
             if self.doc.edit.is_some() {
                 self.edit_gizmo_hover_test();
             } else {
@@ -5349,7 +5353,9 @@ impl App {
                 || self.ui.render_done_message.is_some();
             if !rendering_ws && !render_modal {
                 tools::draw_toolbar(ctx, r, &mut self.ts);
-                nav_actions = navgizmo::draw(ctx, &self.camera, r, nav_full, nav_in_camera);
+                if self.settings.show_gizmo {
+                    nav_actions = navgizmo::draw(ctx, &self.camera, r, nav_full, nav_in_camera);
+                }
                 let measure_preview = match (self.measure_a, self.measure_b) {
                     (Some(a), Some(b)) => Some((a, b)),
                     _ => None,
@@ -5362,9 +5368,13 @@ impl App {
                     measure_preview,
                     annotations: &self.annotations,
                     annotate_stroke: self.annotate_stroke.as_deref(),
+                    xray: self.settings.xray,
+                    overlays: self.settings.show_overlays,
                 };
                 overlay::draw(ctx, &self.camera, r, &self.doc, &extra);
-                if self.doc.edit.is_some() {
+                if !self.settings.show_gizmo {
+                    // gizmos hidden
+                } else if self.doc.edit.is_some() {
                     draw_edit_gizmo_ui(
                         ctx,
                         r,

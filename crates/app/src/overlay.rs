@@ -17,6 +17,10 @@ pub struct Extra<'a> {
     /// Annotation strokes in world space
     pub annotations: &'a [Vec<Vec3>],
     pub annotate_stroke: Option<&'a [Vec3]>,
+    /// X-Ray on: Edit Mode points / edges are drawn even when hidden behind the surface.
+    pub xray: bool,
+    /// Viewport overlays on/off (helper icons, 3D cursor, Edit Mode points / edges).
+    pub overlays: bool,
 }
 
 /// Project a world segment to physical pixels, clipping against the near plane.
@@ -43,6 +47,92 @@ fn clip_project(m: Mat4, vp: [f32; 4], a: Vec3, b: Vec3) -> Option<(Vec2, Vec2)>
     Some((s(c0), s(c1)))
 }
 
+/// Project to physical pixels, also returning 1/w (larger = nearer to the camera).
+fn project_w(m: Mat4, vp: [f32; 4], p: Vec3) -> Option<(Vec2, f32)> {
+    let c = m * p.extend(1.0);
+    if c.w <= 1e-5 {
+        return None;
+    }
+    Some((
+        Vec2::new(
+            vp[0] + (c.x / c.w * 0.5 + 0.5) * vp[2],
+            vp[1] + (1.0 - (c.y / c.w * 0.5 + 0.5)) * vp[3],
+        ),
+        1.0 / c.w,
+    ))
+}
+
+/// Small CPU depth buffer of the edit mesh, used to hide Edit Mode points / edges that
+/// are behind the visible surface (when X-Ray is off).
+struct Occluder {
+    w: usize,
+    h: usize,
+    cell: f32,
+    d: Vec<f32>,
+}
+
+impl Occluder {
+    fn build(m: Mat4, vp: [f32; 4], verts: &[Vec3], indices: &[u32]) -> Self {
+        let cell = if indices.len() / 3 > 40_000 { 4.0_f32 } else { 2.0_f32 };
+        let w = ((vp[2] / cell).ceil() as usize).max(1);
+        let h = ((vp[3] / cell).ceil() as usize).max(1);
+        let mut d = vec![0.0_f32; w * h];
+        let pv: Vec<Option<(Vec2, f32)>> = verts.iter().map(|p| project_w(m, vp, *p)).collect();
+        let edge = |a: Vec2, b: Vec2, p: Vec2| (p.x - a.x) * (b.y - a.y) - (p.y - a.y) * (b.x - a.x);
+        for tri in indices.chunks_exact(3) {
+            let (Some(pa), Some(pb), Some(pc)) = (
+                pv[tri[0] as usize],
+                pv[tri[1] as usize],
+                pv[tri[2] as usize],
+            ) else {
+                continue;
+            };
+            let to = |p: Vec2| Vec2::new((p.x - vp[0]) / cell, (p.y - vp[1]) / cell);
+            let (a, b, c) = (to(pa.0), to(pb.0), to(pc.0));
+            let area = edge(a, b, c);
+            if area.abs() < 1e-8 {
+                continue;
+            }
+            let min_x = a.x.min(b.x).min(c.x).floor().max(0.0) as usize;
+            let min_y = a.y.min(b.y).min(c.y).floor().max(0.0) as usize;
+            let max_x = (a.x.max(b.x).max(c.x).ceil().max(0.0) as usize).min(w - 1);
+            let max_y = (a.y.max(b.y).max(c.y).ceil().max(0.0) as usize).min(h - 1);
+            if min_x > max_x || min_y > max_y {
+                continue;
+            }
+            for y in min_y..=max_y {
+                for x in min_x..=max_x {
+                    let p = Vec2::new(x as f32 + 0.5, y as f32 + 0.5);
+                    let wa = edge(b, c, p) / area;
+                    let wb = edge(c, a, p) / area;
+                    let wc = 1.0 - wa - wb;
+                    // slightly generous so a surface's own edges are never cut off
+                    if wa < -0.03 || wb < -0.03 || wc < -0.03 {
+                        continue;
+                    }
+                    let iw = wa * pa.1 + wb * pb.1 + wc * pc.1;
+                    let i = y * w + x;
+                    if iw > d[i] {
+                        d[i] = iw;
+                    }
+                }
+            }
+        }
+        Self { w, h, cell, d }
+    }
+
+    /// True when a point at pixel `p` with 1/w `iw` is not hidden behind the surface.
+    fn visible(&self, vp: [f32; 4], p: Vec2, iw: f32) -> bool {
+        let x = ((p.x - vp[0]) / self.cell).floor();
+        let y = ((p.y - vp[1]) / self.cell).floor();
+        if x < 0.0 || y < 0.0 || x as usize >= self.w || y as usize >= self.h {
+            return true;
+        }
+        let nearest = self.d[y as usize * self.w + x as usize];
+        iw >= nearest * 0.995
+    }
+}
+
 pub fn draw(
     ctx: &egui::Context,
     cam: &OrbitCamera,
@@ -66,7 +156,7 @@ pub fn draw(
         .with_clip_rect(rect);
 
     // helper icons for non-mesh objects
-    if doc.scene.objects.iter().any(|o| !o.kind.is_mesh()) {
+    if extra.overlays && doc.scene.objects.iter().any(|o| !o.kind.is_mesh()) {
         let m = cam.view_proj(vp[2] / vp[3]);
         let worlds = doc.scene.world_matrices();
         for (i, o) in doc.scene.objects.iter().enumerate() {
@@ -146,7 +236,7 @@ pub fn draw(
     }
 
     // Armature mode badge and per-bone selection feedback.
-    if (doc.armature_edit || doc.pose_mode) && doc.active_armature().is_some() {
+    if extra.overlays && (doc.armature_edit || doc.pose_mode) && doc.active_armature().is_some() {
         let label = if doc.armature_edit {
             "Armature Edit Mode"
         } else {
@@ -169,7 +259,7 @@ pub fn draw(
     }
 
     // 3D cursor
-    if let Some(c) = project_px(cam, vp, doc.scene.cursor) {
+    if let Some(c) = project_px(cam, vp, doc.scene.cursor).filter(|_| extra.overlays) {
         let c = pt(c);
         painter.circle_stroke(c, 10.0, Stroke::new(3.0_f32, Color32::WHITE));
         painter.circle_stroke(
@@ -258,7 +348,7 @@ pub fn draw(
     }
 
     // Edit Mode: vertices / edges / faces
-    if let Some(session) = doc.edit.as_ref() {
+    if let Some(session) = doc.edit.as_ref().filter(|_| extra.overlays) {
         if let Some(idx) = doc
             .scene
             .objects
@@ -273,6 +363,21 @@ pub fn draw(
                 .map(|v| world.transform_point3(Vec3::from(v.position)))
                 .collect();
             let selected_verts = session.selected_vert_indices();
+            let view_m = cam.view_proj(vp[2] / vp[3]);
+            let occluder = if extra.xray {
+                None
+            } else {
+                Some(Occluder::build(view_m, vp, &verts, &session.mesh.indices))
+            };
+            let point_visible = |w: Vec3| -> bool {
+                match &occluder {
+                    None => true,
+                    Some(o) => match project_w(view_m, vp, w) {
+                        Some((p, iw)) => o.visible(vp, p, iw),
+                        None => false,
+                    },
+                }
+            };
             // All mesh edges (topology) — shows points are connected
             let edge_col = Color32::from_rgb(90, 160, 220);
             let edge_sel = Color32::from_rgb(255, 180, 40);
@@ -291,13 +396,35 @@ pub fn draw(
                     if sel { 2.5_f32 } else { 1.5_f32 },
                     if sel { edge_sel } else { edge_col },
                 );
-                painter.line_segment([pt(p0), pt(p1)], stroke);
+                if occluder.is_none() {
+                    painter.line_segment([pt(p0), pt(p1)], stroke);
+                } else {
+                    let (wa, wb) = (verts[a as usize], verts[b as usize]);
+                    let n = (((p1 - p0).length() / 14.0).ceil() as usize).clamp(1, 16);
+                    for k in 0..n {
+                        let t0 = k as f32 / n as f32;
+                        let t1 = (k + 1) as f32 / n as f32;
+                        let mid = wa.lerp(wb, (t0 + t1) * 0.5);
+                        if !point_visible(mid) {
+                            continue;
+                        }
+                        if let (Some(q0), Some(q1)) = (
+                            project_px(cam, vp, wa.lerp(wb, t0)),
+                            project_px(cam, vp, wa.lerp(wb, t1)),
+                        ) {
+                            painter.line_segment([pt(q0), pt(q1)], stroke);
+                        }
+                    }
+                }
             }
             // Vertices as connected joints
             for (i, w) in verts.iter().enumerate() {
                 let Some(p) = project_px(cam, vp, *w) else {
                     continue;
                 };
+                if !point_visible(*w) {
+                    continue;
+                }
                 let sel = selected_verts.contains(&(i as u32));
                 let r = if sel { 6.5 } else { 4.5 };
                 let fill = if sel {
@@ -328,6 +455,9 @@ pub fn draw(
                     let Some(p) = project_px(cam, vp, c) else {
                         continue;
                     };
+                    if !point_visible(c) {
+                        continue;
+                    }
                     let sel = session.selection.faces.contains(&(fi as u32));
                     let col = if sel {
                         Color32::from_rgba_unmultiplied(255, 160, 0, 200)

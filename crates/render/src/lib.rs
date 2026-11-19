@@ -144,6 +144,8 @@ pub struct Renderer {
     grid_pipeline: wgpu::RenderPipeline,
     mesh_opaque: wgpu::RenderPipeline,
     mesh_blend: wgpu::RenderPipeline,
+    mesh_xray: wgpu::RenderPipeline,
+    mesh_depth: wgpu::RenderPipeline,
     wire_pipeline: wgpu::RenderPipeline,
 
     grid_vb: wgpu::Buffer,
@@ -494,6 +496,28 @@ impl Renderer {
             wgpu::CompareFunction::Less,
             wgpu::BlendState::ALPHA_BLENDING,
         );
+        let mesh_xray = make_pipeline(
+            &device,
+            &layout_mat,
+            format,
+            &mesh_src,
+            &[vertex_buf()],
+            wgpu::PrimitiveTopology::TriangleList,
+            false,
+            wgpu::CompareFunction::Always,
+            wgpu::BlendState::ALPHA_BLENDING,
+        );
+        let mesh_depth = make_depth_only_pipeline(
+            &device,
+            &layout_wire,
+            format,
+            &src(include_str!("depth.wgsl"), common),
+            &[wgpu::VertexBufferLayout {
+                array_stride: std::mem::size_of::<Vertex>() as u64,
+                step_mode: wgpu::VertexStepMode::Vertex,
+                attributes: &POS_ATTRS,
+            }],
+        );
         let wire_pipeline = make_pipeline(
             &device,
             &layout_wire,
@@ -642,6 +666,8 @@ fn vs_main(@location(0) pos: vec3<f32>) -> @builtin(position) vec4<f32> {
             grid_pipeline,
             mesh_opaque,
             mesh_blend,
+            mesh_xray,
+            mesh_depth,
             wire_pipeline,
             grid_vb,
             cycles: cycles::CyclesState::default(),
@@ -1305,7 +1331,9 @@ fn vs_main(@location(0) pos: vec3<f32>) -> @builtin(position) vec4<f32> {
 
         let vp = camera.view_proj(vw / vh);
         let eye = camera.eye();
-        let shadow_on = s.shadows && self.shadow_light >= 0;
+        let shadow_on = s.shadows
+            && s.viewport_shading != ViewportShading::MaterialPreview
+            && self.shadow_light >= 0;
         let g = Globals {
             view_proj: vp.to_cols_array_2d(),
             inv_view_proj: vp.inverse().to_cols_array_2d(),
@@ -1331,7 +1359,9 @@ fn vs_main(@location(0) pos: vec3<f32>) -> @builtin(position) vec4<f32> {
                 self.light_count as f32,
                 self.shadow_light as f32,
                 s.engine as u32 as f32,
-                s.cycles_samples as f32,
+                // bit 0 = X-Ray, bit 1 = Material Preview (environment-only lighting, no shadows)
+                (s.xray as u32 | ((s.viewport_shading == ViewportShading::MaterialPreview) as u32) << 1)
+                    as f32,
             ],
             lights: self.lights,
             light_view_proj: self.light_view_proj.to_cols_array_2d(),
@@ -1390,7 +1420,7 @@ fn vs_main(@location(0) pos: vec3<f32>) -> @builtin(position) vec4<f32> {
                 }
             }
         }
-        let use_cycles = s.engine == RenderEngine::Cycles && !skip_3d;
+        let use_cycles = s.engine == RenderEngine::Cycles && !skip_3d && !s.xray;
         if use_cycles {
             // Clear the swapchain, then path-trace and blit into the viewport.
             {
@@ -1470,30 +1500,71 @@ fn vs_main(@location(0) pos: vec3<f32>) -> @builtin(position) vec4<f32> {
                     pass.draw(0..3, 0..1);
                 }
 
-                pass.set_pipeline(&self.grid_pipeline);
-                pass.set_vertex_buffer(0, self.grid_vb.slice(..));
-                pass.draw(0..self.grid_count, 0..1);
+                let wire_only = s.wireframe == WireMode::Only;
+                // In Wireframe without X-Ray the objects only write depth, so the grid must be
+                // drawn AFTER them to be hidden behind the objects.
+                let grid_late = wire_only && !s.xray;
+                if !grid_late && s.show_overlays {
+                    pass.set_pipeline(&self.grid_pipeline);
+                    pass.set_vertex_buffer(0, self.grid_vb.slice(..));
+                    pass.draw(0..self.grid_count, 0..1);
+                }
 
-                if s.wireframe != WireMode::Only {
+                if s.xray && wire_only {
+                    // Wireframe + X-Ray: nothing is drawn but the edges, so everything shows through.
+                } else if wire_only {
+                    // Wireframe, X-Ray OFF: write depth only, so edges hidden behind a surface
+                    // are occluded and you cannot look through the object.
+                    pass.set_pipeline(&self.mesh_depth);
+                    for o in &self.objects {
+                        if o.draws.is_empty() {
+                            continue;
+                        }
+                        pass.set_bind_group(1, &o.model_bg, &[]);
+                        pass.set_vertex_buffer(0, o.buffers.vb.slice(..));
+                        pass.set_index_buffer(o.buffers.ib.slice(..), wgpu::IndexFormat::Uint32);
+                        for d in &o.draws {
+                            if d.count == 0 {
+                                continue;
+                            }
+                            pass.draw_indexed(d.first..d.first + d.count, 0, 0..1);
+                        }
+                    }
+                    if s.show_overlays {
+                        pass.set_pipeline(&self.grid_pipeline);
+                        pass.set_vertex_buffer(0, self.grid_vb.slice(..));
+                        pass.draw(0..self.grid_count, 0..1);
+                    }
+                } else if s.xray {
+                    // X-Ray is a dedicated translucent pass with depth testing disabled:
+                    // hidden surfaces remain visible, but disabling X-Ray restores normal depth.
+                    for o in &self.objects {
+                        if o.draws.is_empty() {
+                            continue;
+                        }
+                        pass.set_pipeline(&self.mesh_xray);
+                        pass.set_bind_group(2, &o.model_bg, &[]);
+                        pass.set_vertex_buffer(0, o.buffers.vb.slice(..));
+                        pass.set_index_buffer(o.buffers.ib.slice(..), wgpu::IndexFormat::Uint32);
+                        for d in &o.draws {
+                            let material = &self.materials[d.material];
+                            pass.set_bind_group(1, &material.bind_group, &[]);
+                            pass.draw_indexed(d.first..d.first + d.count, 0, 0..1);
+                        }
+                    }
+                } else if s.wireframe != WireMode::Only {
                     for blend in [false, true] {
                         for o in &self.objects {
                             let mut bound = false;
                             for d in o.draws.iter().filter(|d| d.blend == blend) {
                                 let material = &self.materials[d.material];
                                 pass.set_pipeline(material.graph_pipeline.as_deref().unwrap_or(
-                                    if blend {
-                                        &self.mesh_blend
-                                    } else {
-                                        &self.mesh_opaque
-                                    },
+                                    if blend { &self.mesh_blend } else { &self.mesh_opaque },
                                 ));
                                 if !bound {
                                     pass.set_bind_group(2, &o.model_bg, &[]);
                                     pass.set_vertex_buffer(0, o.buffers.vb.slice(..));
-                                    pass.set_index_buffer(
-                                        o.buffers.ib.slice(..),
-                                        wgpu::IndexFormat::Uint32,
-                                    );
+                                    pass.set_index_buffer(o.buffers.ib.slice(..), wgpu::IndexFormat::Uint32);
                                     bound = true;
                                 }
                                 pass.set_bind_group(1, &material.bind_group, &[]);
@@ -1507,7 +1578,10 @@ fn vs_main(@location(0) pos: vec3<f32>) -> @builtin(position) vec4<f32> {
                 for o in self
                     .objects
                     .iter()
-                    .filter(|o| o.highlight != Highlight::None || s.wireframe != WireMode::Off)
+                    .filter(|o| {
+                        (s.show_overlays && o.highlight != Highlight::None)
+                            || s.wireframe != WireMode::Off
+                    })
                 {
                     pass.set_bind_group(1, &o.model_bg, &[]);
                     pass.set_vertex_buffer(0, o.buffers.vb.slice(..));
@@ -1979,7 +2053,7 @@ struct VsOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32>, };
                 self.light_count as f32,
                 self.shadow_light as f32,
                 s.engine as u32 as f32,
-                s.cycles_samples as f32,
+                0.0,
             ],
             lights: self.lights,
             light_view_proj: self.light_view_proj.to_cols_array_2d(),
@@ -2346,6 +2420,61 @@ fn make_pipeline(
             depth_compare,
             stencil: Default::default(),
             bias: Default::default(),
+        }),
+        multisample: wgpu::MultisampleState::default(),
+        multiview: None,
+        cache: None,
+    })
+}
+
+/// Depth-only pipeline (no colour writes): hides geometry behind a surface without drawing it.
+fn make_depth_only_pipeline(
+    device: &wgpu::Device,
+    layout: &wgpu::PipelineLayout,
+    format: wgpu::TextureFormat,
+    wgsl: &str,
+    buffers: &[wgpu::VertexBufferLayout],
+) -> wgpu::RenderPipeline {
+    let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("depth-only shader"),
+        source: wgpu::ShaderSource::Wgsl(wgsl.into()),
+    });
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("depth-only pipeline"),
+        layout: Some(layout),
+        vertex: wgpu::VertexState {
+            module: &module,
+            entry_point: "vs_main",
+            compilation_options: Default::default(),
+            buffers,
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &module,
+            entry_point: "fs_main",
+            compilation_options: Default::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format,
+                blend: None,
+                write_mask: wgpu::ColorWrites::empty(),
+            })],
+        }),
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            cull_mode: None,
+            ..Default::default()
+        },
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: DEPTH_FORMAT,
+            depth_write_enabled: true,
+            depth_compare: wgpu::CompareFunction::Less,
+            stencil: Default::default(),
+            // Tiny hardware depth bias (scales with slope, independent of distance) so a
+            // surface's own edges win the depth test but edges behind it are still hidden.
+            bias: wgpu::DepthBiasState {
+                constant: 2,
+                slope_scale: 1.5,
+                clamp: 0.0,
+            },
         }),
         multisample: wgpu::MultisampleState::default(),
         multiview: None,

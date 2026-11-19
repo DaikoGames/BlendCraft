@@ -170,6 +170,9 @@ fn fs_main(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f
     let f0 = mix(vec3<f32>(0.04), base.rgb, metallic);
     let diffuse_color = base.rgb * (1.0 - metallic);
     let engine = u32(g.light_info.z + 0.5); // 0 Workbench, 1 EEVEE, 2 Cycles
+    let view_flags = u32(g.light_info.w + 0.5);
+    let xray_on = (view_flags & 1u) != 0u;
+    let mat_preview = (view_flags & 2u) != 0u;
 
     var lit = vec3<f32>(0.0);
 
@@ -209,7 +212,7 @@ fn fs_main(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f
         let light_count = u32(g.light_info.x + 0.5);
         let shadow_idx = i32(g.light_info.y);
         // Workbench ignores mapped shadows; EEVEE uses them; Cycles softens further.
-        var shadow_enabled = g.opts.w >= 1.0 && engine != 0u;
+        var shadow_enabled = g.opts.w >= 1.0 && engine != 0u && !mat_preview;
         var shadow_factor = 1.0;
         if (shadow_enabled && shadow_idx >= 0) {
             let slt = g.lights[u32(shadow_idx)];
@@ -266,6 +269,11 @@ fn fs_main(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f
         if (engine == 2u) {
             env_str = max(env_str, 0.35); // Cycles always uses some environment bounce
         }
+        if (mat_preview) {
+            // Material Preview: even environment lighting, no scene-light shading or shadows.
+            env_str = max(env_str, 1.0);
+            direct = vec3<f32>(0.0);
+        }
         lit = ambient + (diffuse_color * irradiance + spec) * ao * env_str * shade + direct + graph_emission;
     }
 
@@ -285,5 +293,6 @@ fn fs_main(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f
         let tint = 0.7 + 0.3 * vec3<f32>(uv.x, uv.y, 1.0 - uv.x);
         rgb = mix(vec3<f32>(0.1), vec3<f32>(0.85), chk) * tint;
     }
-    return vec4<f32>(rgb, select(1.0, base.a, is_blend));
+    let xray_alpha = select(1.0, 0.32, xray_on);
+    return vec4<f32>(rgb, select(1.0, base.a, is_blend) * xray_alpha);
 }

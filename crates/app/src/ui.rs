@@ -288,6 +288,95 @@ fn kind_tag(k: &ObjectKind) -> &'static str {
     }
 }
 
+// ---- Viewport header icons (hand-painted, same style as the shading icons) ----
+
+/// Gizmo icon: three axes meeting in a point, each ending in a small dot.
+fn paint_icon_gizmo(painter: &egui::Painter, c: egui::Pos2, col: egui::Color32) {
+    let stroke = egui::Stroke::new(1.3_f32, col);
+    let ends = [
+        egui::vec2(0.0, -7.5),
+        egui::vec2(7.0, 4.5),
+        egui::vec2(-7.0, 4.5),
+    ];
+    let origin = c + egui::vec2(0.0, 0.5);
+    for e in ends {
+        painter.line_segment([origin, origin + e * 0.78], stroke);
+        painter.circle_filled(origin + e * 0.92, 2.0, col);
+    }
+    painter.circle_stroke(origin, 1.8, stroke);
+}
+
+/// Overlay icon: two overlapping discs (one outlined, one filled).
+fn paint_icon_overlay(painter: &egui::Painter, c: egui::Pos2, col: egui::Color32) {
+    painter.circle_filled(c + egui::vec2(-2.8, 0.0), 5.6, col.linear_multiply(0.45));
+    painter.circle_stroke(c + egui::Vec2::new(-2.8, 0.0), 5.6, egui::Stroke::new(1.3_f32, col));
+    painter.circle_stroke(c + egui::vec2(2.8, 0.0), 5.6, egui::Stroke::new(1.3_f32, col));
+}
+
+/// Mouse-pointer arrow (selectability).
+fn paint_icon_pointer(painter: &egui::Painter, c: egui::Pos2, col: egui::Color32) {
+    let pts = vec![
+        c + egui::vec2(-4.5, -6.5),
+        c + egui::vec2(-4.5, 5.0),
+        c + egui::vec2(-1.6, 2.2),
+        c + egui::vec2(0.6, 7.0),
+        c + egui::vec2(2.6, 6.1),
+        c + egui::vec2(0.5, 1.4),
+        c + egui::vec2(4.6, 1.4),
+    ];
+    painter.add(egui::Shape::convex_polygon(
+        pts.clone(),
+        col.linear_multiply(0.45),
+        egui::Stroke::NONE,
+    ));
+    let mut outline = pts;
+    outline.push(outline[0]);
+    painter.add(egui::Shape::line(outline, egui::Stroke::new(1.2_f32, col)));
+}
+
+/// Eye (visibility); `slashed` draws a strike-through for hidden.
+fn paint_icon_eye(painter: &egui::Painter, c: egui::Pos2, col: egui::Color32, slashed: bool) {
+    let stroke = egui::Stroke::new(1.3_f32, col);
+    let n = 14;
+    let mut top = Vec::new();
+    let mut bottom = Vec::new();
+    for i in 0..=n {
+        let t = i as f32 / n as f32 * 2.0 - 1.0;
+        let x = t * 7.5;
+        let y = 4.2 * (1.0 - t * t);
+        top.push(c + egui::vec2(x, -y));
+        bottom.push(c + egui::vec2(x, y));
+    }
+    painter.add(egui::Shape::line(top, stroke));
+    painter.add(egui::Shape::line(bottom, stroke));
+    painter.circle_filled(c, 2.2, col);
+    if slashed {
+        painter.line_segment(
+            [c + egui::vec2(-6.5, 6.0), c + egui::vec2(6.5, -6.0)],
+            egui::Stroke::new(1.5_f32, col),
+        );
+    }
+}
+
+/// Selectability & Visibility icon for the header: pointer + small eye.
+fn paint_icon_type_filter(painter: &egui::Painter, c: egui::Pos2, col: egui::Color32) {
+    paint_icon_pointer(painter, c + egui::vec2(-2.6, -1.6), col);
+    let eye_c = c + egui::vec2(3.8, 5.0);
+    painter.circle_filled(eye_c, 5.4, egui::Color32::from_rgba_unmultiplied(28, 28, 30, 235));
+    let stroke = egui::Stroke::new(1.1_f32, col);
+    let mut top = Vec::new();
+    let mut bottom = Vec::new();
+    for i in 0..=10 {
+        let t = i as f32 / 10.0 * 2.0 - 1.0;
+        let y = 2.6 * (1.0 - t * t);
+        top.push(eye_c + egui::vec2(t * 4.6, -y));
+        bottom.push(eye_c + egui::vec2(t * 4.6, y));
+    }
+    painter.add(egui::Shape::line(top, stroke));
+    painter.add(egui::Shape::line(bottom, stroke));
+    painter.circle_filled(eye_c, 1.3, col);
+}
+
 // ------------------------------------------------------------------ main entry
 pub fn draw(
     ctx: &egui::Context,
@@ -1125,13 +1214,11 @@ pub fn draw(
         let in_edit = doc.in_edit_mode();
         let in_pose = doc.pose_mode && doc.active_armature().is_some();
         let can_mirror = in_edit || doc.sculpt_mode || in_pose || doc.armature_edit;
-        // Inset from the right edge (not flush, not on the far left)
-        let bar_w = if can_mirror { 250.0 } else { 160.0 };
-        let origin = egui::pos2(
-            viewport_rect.right() - bar_w - 48.0,
-            viewport_rect.top() + 6.0,
-        );
+        // Right-aligned and kept well clear of the navigation gizmo (axis cross), which
+        // occupies the top-right ~102px of the viewport.
+        let origin = egui::pos2(viewport_rect.right() - 102.0 - 28.0, viewport_rect.top() + 12.0);
         egui::Area::new(egui::Id::new("viewport_header_overlay"))
+            .pivot(egui::Align2::RIGHT_TOP)
             .fixed_pos(origin)
             .order(egui::Order::Foreground)
             .show(ctx, |ui| {
@@ -1143,7 +1230,11 @@ pub fn draw(
                         ui.horizontal(|ui| {
                             ui.spacing_mut().item_spacing.x = 3.0;
                             let btn = egui::vec2(24.0, 24.0);
-                            let active_bg = egui::Color32::from_rgb(0x4a, 0x6a, 0x9a);
+                            // No blue anywhere in these icons: neutral greys + amber accents.
+                            ui.visuals_mut().selection.bg_fill = egui::Color32::from_rgb(0x58, 0x58, 0x58);
+                            ui.visuals_mut().selection.stroke =
+                                egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(0xf0, 0xf0, 0xf0));
+                            let active_bg = egui::Color32::from_rgb(0x58, 0x58, 0x58);
                             let idle_col = egui::Color32::from_rgb(0xc0, 0xc0, 0xc0);
                             let active_col = egui::Color32::from_rgb(0xf0, 0xf0, 0xf0);
 
@@ -1208,6 +1299,66 @@ pub fn draw(
                                 }
                                 ui.separator();
                             }
+
+                            // Selectability & Visibility per object type
+                            {
+                                let open_id = egui::Id::new("type_filter_open");
+                                let open: bool =
+                                    ui.ctx().data(|d| d.get_temp::<bool>(open_id)).unwrap_or(false);
+                                let filtered = doc.scene.type_hidden != 0
+                                    || doc.scene.type_unselectable != 0;
+                                let (rect, resp) = ui.allocate_exact_size(btn, egui::Sense::click());
+                                if open {
+                                    ui.painter().rect_filled(rect, 3.0, active_bg);
+                                }
+                                let col = if filtered {
+                                    egui::Color32::from_rgb(0xff, 0xcc, 0x66)
+                                } else if open {
+                                    active_col
+                                } else {
+                                    idle_col
+                                };
+                                paint_icon_type_filter(ui.painter(), rect.center(), col);
+                                ui.ctx().data_mut(|d| {
+                                    d.insert_temp(egui::Id::new("type_filter_btn_rect"), rect)
+                                });
+                                if resp.clicked() {
+                                    ui.ctx().data_mut(|d| d.insert_temp(open_id, !open));
+                                }
+                                resp.on_hover_text("Selectability & Visibility by object type");
+                            }
+
+                            // Show / hide gizmos
+                            {
+                                let on = settings.show_gizmo;
+                                let (rect, resp) = ui.allocate_exact_size(btn, egui::Sense::click());
+                                if on {
+                                    ui.painter().rect_filled(rect, 3.0, active_bg);
+                                }
+                                let col = if on { active_col } else { idle_col };
+                                paint_icon_gizmo(ui.painter(), rect.center(), col);
+                                if resp.clicked() {
+                                    settings.show_gizmo = !settings.show_gizmo;
+                                }
+                                resp.on_hover_text("Show Gizmo (navigation and transform handles)");
+                            }
+
+                            // Show / hide overlays
+                            {
+                                let on = settings.show_overlays;
+                                let (rect, resp) = ui.allocate_exact_size(btn, egui::Sense::click());
+                                if on {
+                                    ui.painter().rect_filled(rect, 3.0, active_bg);
+                                }
+                                let col = if on { active_col } else { idle_col };
+                                paint_icon_overlay(ui.painter(), rect.center(), col);
+                                if resp.clicked() {
+                                    settings.show_overlays = !settings.show_overlays;
+                                }
+                                resp.on_hover_text("Show Overlays (grid, outlines, helpers, edit points)");
+                            }
+
+                            ui.separator();
 
                             // --- Viewport shading icons (Blender sphere row style) ---
                             let vs = settings.viewport_shading;
@@ -1279,13 +1430,13 @@ pub fn draw(
                                 ui.painter().circle_filled(
                                     c,
                                     7.5,
-                                    egui::Color32::from_rgb(0x6a, 0x8a, 0xb8),
+                                    egui::Color32::from_rgb(0x9a, 0x9a, 0x9a),
                                 );
                                 // highlight crescent
                                 ui.painter().circle_filled(
                                     c + egui::vec2(-2.5, -2.5),
                                     3.2,
-                                    egui::Color32::from_rgb(0xc8, 0xd8, 0xf0),
+                                    egui::Color32::from_rgb(0xd0, 0xd0, 0xd0),
                                 );
                                 ui.painter().circle_stroke(
                                     c,
@@ -1315,19 +1466,19 @@ pub fn draw(
                                 ui.painter().circle_filled(
                                     c,
                                     7.5,
-                                    egui::Color32::from_rgb(0x90, 0x90, 0x98),
+                                    egui::Color32::from_rgb(0x90, 0x90, 0x90),
                                 );
                                 // lit side
                                 ui.painter().circle_filled(
                                     c + egui::vec2(-2.8, -2.2),
                                     4.0,
-                                    egui::Color32::from_rgb(0xe8, 0xe8, 0xf0),
+                                    egui::Color32::from_rgb(0xe8, 0xe8, 0xe8),
                                 );
                                 // shadow side arc
                                 ui.painter().circle_filled(
                                     c + egui::vec2(3.0, 2.5),
                                     3.5,
-                                    egui::Color32::from_rgb(0x40, 0x40, 0x48),
+                                    egui::Color32::from_rgb(0x40, 0x40, 0x40),
                                 );
                                 ui.painter().circle_stroke(
                                     c,
@@ -1380,20 +1531,102 @@ pub fn draw(
                                 );
                                 if resp.clicked() {
                                     settings.xray = !settings.xray;
-                                    if settings.xray {
-                                        if settings.wireframe == WireMode::Off {
-                                            settings.wireframe = WireMode::Overlay;
-                                        }
-                                    } else if settings.viewport_shading != ViewportShading::Wireframe
+                                    // X-Ray controls translucent depth-independent mesh drawing;
+                                    // it must not silently enable or leave wireframe mode behind.
+                                    if !settings.xray
+                                        && settings.viewport_shading != ViewportShading::Wireframe
                                     {
                                         settings.wireframe = WireMode::Off;
                                     }
                                 }
                                 resp.on_hover_text("X-Ray — see through the mesh");
                             }
+
                         });
                     });
             });
+
+        // Popup for the object-type filter
+        let open_id = egui::Id::new("type_filter_open");
+        if ctx.data(|d| d.get_temp::<bool>(open_id)).unwrap_or(false) {
+            let btn_rect: Option<egui::Rect> =
+                ctx.data(|d| d.get_temp::<egui::Rect>(egui::Id::new("type_filter_btn_rect")));
+            if let Some(br) = btn_rect {
+                let popup = egui::Area::new(egui::Id::new("type_filter_popup"))
+                    .pivot(egui::Align2::RIGHT_TOP)
+                    .fixed_pos(br.right_bottom() + egui::vec2(0.0, 4.0))
+                    .order(egui::Order::Foreground)
+                    .show(ctx, |ui| {
+                        egui::Frame::popup(ui.style()).show(ui, |ui| {
+                            ui.set_min_width(200.0);
+                            ui.label(RichText::new("Selectability & Visibility").strong());
+                            ui.separator();
+                            let on_col = egui::Color32::from_rgb(0xf0, 0xf0, 0xf0);
+                            let off_col = egui::Color32::from_rgb(0x70, 0x70, 0x70);
+                            let mut changed = false;
+                            for (ti, name) in forge_core::kinds::OBJECT_TYPE_NAMES.iter().enumerate() {
+                                let bit = 1u32 << ti;
+                                ui.horizontal(|ui| {
+                                    ui.add_sized(egui::vec2(104.0, 22.0), egui::Label::new(*name));
+                                    let vis = doc.scene.type_hidden & bit == 0;
+                                    let sel = doc.scene.type_unselectable & bit == 0;
+
+                                    let (r1, resp1) = ui.allocate_exact_size(
+                                        egui::vec2(30.0, 22.0),
+                                        egui::Sense::click(),
+                                    );
+                                    if resp1.hovered() {
+                                        ui.painter().rect_filled(r1, 3.0, egui::Color32::from_rgb(0x44, 0x44, 0x44));
+                                    }
+                                    paint_icon_eye(
+                                        ui.painter(),
+                                        r1.center(),
+                                        if vis { on_col } else { off_col },
+                                        !vis,
+                                    );
+                                    if resp1.clicked() {
+                                        doc.scene.type_hidden ^= bit;
+                                        changed = true;
+                                    }
+                                    resp1.on_hover_text(if vis { "Hide this type" } else { "Show this type" });
+
+                                    let (r2, resp2) = ui.allocate_exact_size(
+                                        egui::vec2(30.0, 22.0),
+                                        egui::Sense::click(),
+                                    );
+                                    if resp2.hovered() {
+                                        ui.painter().rect_filled(r2, 3.0, egui::Color32::from_rgb(0x44, 0x44, 0x44));
+                                    }
+                                    paint_icon_pointer(
+                                        ui.painter(),
+                                        r2.center(),
+                                        if sel && vis { on_col } else { off_col },
+                                    );
+                                    if resp2.clicked() {
+                                        doc.scene.type_unselectable ^= bit;
+                                        changed = true;
+                                    }
+                                    resp2.on_hover_text(if sel {
+                                        "Make this type unselectable"
+                                    } else {
+                                        "Make this type selectable"
+                                    });
+                                });
+                            }
+                            if changed {
+                                doc.refresh_view();
+                            }
+                        });
+                    });
+                if ctx.input(|i| i.pointer.any_click()) {
+                    if let Some(pos) = ctx.input(|i| i.pointer.interact_pos()) {
+                        if !popup.response.rect.contains(pos) && !br.contains(pos) {
+                            ctx.data_mut(|d| d.insert_temp(open_id, false));
+                        }
+                    }
+                }
+            }
+        }
     }
 
     if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
@@ -7540,7 +7773,7 @@ fn draw_geometry_spreadsheet(ui: &mut egui::Ui, doc: &Document, st: &mut UiState
                             egui::Align2::LEFT_CENTER,
                             lab,
                             egui::FontId::proportional(11.0),
-                            egui::Color32::from_rgb(0x90, 0x90, 0x98),
+                            egui::Color32::from_rgb(0x90, 0x90, 0x90),
                         );
                         x += w;
                     }

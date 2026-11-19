@@ -100,7 +100,7 @@ impl From<Version9Scene> for Scene {
             rigid_body_constraints: scene.rigid_body_constraints, physics_cache: scene.physics_cache,
             simulations: scene.simulations.into(),
             object_simulations: upgrade_object_sims(scene.object_simulations),
-            fluids: scene.fluids, mesh_caches: scene.mesh_caches }
+            fluids: scene.fluids, mesh_caches: scene.mesh_caches, type_hidden: 0, type_unselectable: 0, }
     }
 }
 
@@ -125,7 +125,7 @@ impl From<Version8Scene> for Scene {
             rigid_bodies: scene.rigid_bodies, physics_world: scene.physics_world,
             rigid_body_constraints: scene.rigid_body_constraints, physics_cache: scene.physics_cache,
             simulations: scene.simulations.into(), object_simulations: upgrade_object_sims(scene.object_simulations),
-            fluids: Default::default(), mesh_caches: Default::default() }
+            fluids: Default::default(), mesh_caches: Default::default(), type_hidden: 0, type_unselectable: 0, }
     }
 }
 
@@ -148,7 +148,7 @@ impl From<Version7Scene> for Scene {
             animation: scene.animation, compositor_graph: scene.compositor_graph,
             rigid_bodies: scene.rigid_bodies, physics_world: scene.physics_world,
             rigid_body_constraints: scene.rigid_body_constraints, physics_cache: scene.physics_cache,
-            simulations: scene.simulations.into(), object_simulations: Default::default(), fluids: Default::default(), mesh_caches: Default::default() }
+            simulations: scene.simulations.into(), object_simulations: Default::default(), fluids: Default::default(), mesh_caches: Default::default(), type_hidden: 0, type_unselectable: 0, }
     }
 }
 
@@ -170,7 +170,7 @@ impl From<Version6Scene> for Scene {
             animation: scene.animation, compositor_graph: scene.compositor_graph,
             rigid_bodies: scene.rigid_bodies, physics_world: scene.physics_world,
             rigid_body_constraints: scene.rigid_body_constraints, physics_cache: scene.physics_cache,
-            simulations: Default::default(), object_simulations: Default::default(), fluids: Default::default(), mesh_caches: Default::default() }
+            simulations: Default::default(), object_simulations: Default::default(), fluids: Default::default(), mesh_caches: Default::default(), type_hidden: 0, type_unselectable: 0, }
     }
 }
 
@@ -211,7 +211,7 @@ impl From<Version5Scene> for Scene {
                 friction: b.friction, restitution: b.restitution, linear_damping: b.linear_damping,
                 enabled: b.enabled, ..RigidBody::default()
             })).collect(), physics_world: Default::default(),
-            rigid_body_constraints: Vec::new(), physics_cache: None, simulations: Default::default(), object_simulations: Default::default(), fluids: Default::default(), mesh_caches: Default::default(),
+            rigid_body_constraints: Vec::new(), physics_cache: None, simulations: Default::default(), object_simulations: Default::default(), fluids: Default::default(), mesh_caches: Default::default(), type_hidden: 0, type_unselectable: 0,
         }
     }
 }
@@ -235,7 +235,7 @@ impl From<Version4Scene> for Scene {
             collections: scene.collections, cursor: scene.cursor, next_id: scene.next_id,
             animation: scene.animation, compositor_graph: scene.compositor_graph,
             rigid_bodies: Default::default(), physics_world: Default::default(),
-            rigid_body_constraints: Vec::new(), physics_cache: None, simulations: Default::default(), object_simulations: Default::default(), fluids: Default::default(), mesh_caches: Default::default(),
+            rigid_body_constraints: Vec::new(), physics_cache: None, simulations: Default::default(), object_simulations: Default::default(), fluids: Default::default(), mesh_caches: Default::default(), type_hidden: 0, type_unselectable: 0,
         }
     }
 }
@@ -352,7 +352,7 @@ impl From<Version3Scene> for Scene {
             animation: scene.animation,
             compositor_graph: Default::default(),
             rigid_bodies: Default::default(), physics_world: Default::default(),
-            rigid_body_constraints: Vec::new(), physics_cache: None, simulations: Default::default(), object_simulations: Default::default(), fluids: Default::default(), mesh_caches: Default::default(),
+            rigid_body_constraints: Vec::new(), physics_cache: None, simulations: Default::default(), object_simulations: Default::default(), fluids: Default::default(), mesh_caches: Default::default(), type_hidden: 0, type_unselectable: 0,
         }
     }
 }
@@ -469,7 +469,7 @@ impl From<LegacyScene> for Scene {
             animation: scene.animation,
             compositor_graph: Default::default(),
             rigid_bodies: Default::default(), physics_world: Default::default(),
-            rigid_body_constraints: Vec::new(), physics_cache: None, simulations: Default::default(), object_simulations: Default::default(), fluids: Default::default(), mesh_caches: Default::default(),
+            rigid_body_constraints: Vec::new(), physics_cache: None, simulations: Default::default(), object_simulations: Default::default(), fluids: Default::default(), mesh_caches: Default::default(), type_hidden: 0, type_unselectable: 0,
         }
     }
 }

@@ -25,7 +25,7 @@ pub enum NavAction {
 const AXES: [(Vec3, Color32, &str); 3] = [
     (Vec3::X, Color32::from_rgb(237, 70, 95), "X"),
     (Vec3::Y, Color32::from_rgb(139, 220, 0), "Y"),
-    (Vec3::Z, Color32::from_rgb(44, 143, 255), "Z"),
+    (Vec3::Z, Color32::from_rgb(68, 138, 255), "Z"),
 ];
 
 /// Yaw / pitch that views the scene from the given side of an axis.
@@ -235,8 +235,8 @@ pub fn draw(
             if !full {
                 return;
             }
-            ui.add_space(6.0);
-            let idle = Color32::from_rgb(210, 210, 215);
+            ui.add_space(14.0);
+            let idle = Color32::from_rgb(210, 210, 210);
             let bg = Color32::from_black_alpha(150);
             for kind in 0..4 {
                 let (row, _) = ui.allocate_exact_size(vec2(size, btn), Sense::hover());
@@ -250,9 +250,9 @@ pub fn draw(
                 let r = ui.interact(rc, id, sense);
                 let active = kind == 2 && in_camera_view;
                 let fill = if active {
-                    Color32::from_rgb(52, 102, 180)
+                    Color32::from_rgb(105, 105, 105)
                 } else if r.hovered() || r.dragged() {
-                    Color32::from_rgba_unmultiplied(80, 80, 90, 210)
+                    Color32::from_rgba_unmultiplied(80, 80, 80, 210)
                 } else {
                     bg
                 };

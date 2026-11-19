@@ -114,6 +114,10 @@ pub struct ViewSettings {
     pub wireframe: WireMode,
     /// See-through mesh display (Blender X-Ray).
     pub xray: bool,
+    /// Show viewport overlays (grid, selection outlines, helper icons, edit-mode points).
+    pub show_overlays: bool,
+    /// Show viewport gizmos (navigation axes, transform handles).
+    pub show_gizmo: bool,
     pub show_background: bool,
     /// 0 = sharp, 1 = fully blurred environment background
     pub background_blur: f32,
@@ -146,6 +150,8 @@ impl Default for ViewSettings {
             viewport_shading: ViewportShading::Solid,
             wireframe: WireMode::Off,
             xray: false,
+            show_overlays: true,
+            show_gizmo: true,
             show_background: false,
             background_blur: 0.35,
             exposure: 1.0,

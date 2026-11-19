@@ -155,6 +155,12 @@ impl Document {
         }
     }
 
+    /// Ask the renderer to rebuild the scene without marking the project as modified
+    /// (used for pure view-state changes such as the object-type visibility filter).
+    pub fn refresh_view(&mut self) {
+        self.version += 1;
+    }
+
     pub fn touch(&mut self) {
         self.dirty = true;
         self.version += 1;
@@ -178,7 +184,10 @@ impl Document {
     }
 
     fn restore_snap(&mut self, snap: UndoSnap) {
+        let (th, tu) = (self.scene.type_hidden, self.scene.type_unselectable);
         self.scene = snap.scene;
+        self.scene.type_hidden = th;
+        self.scene.type_unselectable = tu;
         self.edit = snap.edit;
     }
 
@@ -344,7 +353,7 @@ impl Document {
 
     pub fn select_all(&mut self) {
         let ids: Vec<u64> = (0..self.scene.objects.len())
-            .filter(|&i| self.scene.is_visible(i))
+            .filter(|&i| self.scene.is_selectable(i))
             .map(|i| self.scene.objects[i].id)
             .collect();
         for id in &ids {

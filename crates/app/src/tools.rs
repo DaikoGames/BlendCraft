@@ -622,7 +622,7 @@ pub fn project_px(cam: &OrbitCamera, vp: [f32; 4], p: Vec3) -> Option<Vec2> {
 pub fn anchors(doc: &Document, cam: &OrbitCamera, vp: [f32; 4]) -> Vec<(usize, Vec2)> {
     let worlds = doc.scene.world_matrices();
     (0..doc.scene.objects.len())
-        .filter(|&i| doc.scene.is_visible(i))
+        .filter(|&i| doc.scene.is_selectable(i))
         .filter_map(|i| {
             let b = doc.scene.object_world_bounds(i, &worlds[i])?;
             project_px(cam, vp, b.center()).map(|p| (i, p))

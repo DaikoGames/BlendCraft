@@ -12,7 +12,7 @@ struct Globals {
     env: vec4<f32>,   // x = exposure, y = env rotation, z = env max lod, w = shading mode
     opts: vec4<f32>,  // x = show bg, y = bg lod, z = env_strength, w = shadow enable + softness
     sh: array<vec4<f32>, 9>,
-    light_info: vec4<f32>, // x = count, y = shadow light index, z = engine (0 Workbench, 1 EEVEE, 2 Cycles), w = cycles samples
+    light_info: vec4<f32>, // x = count, y = shadow light index, z = engine (0 Workbench, 1 EEVEE, 2 Cycles), w = viewport flags (bit 0 = X-Ray, bit 1 = Material Preview)
     lights: array<Light, 8>,
     light_view_proj: mat4x4<f32>,
 };
