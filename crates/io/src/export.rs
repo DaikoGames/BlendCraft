@@ -54,6 +54,7 @@ impl Builder {
 }
 
 /// Vertex data + one primitive per material group.
+/// When `skin` is set, JOINTS_0 / WEIGHTS_0 attributes are written from the binding.
 fn add_mesh(b: &mut Builder, o: &Object, nmat: usize) -> Value {
     let verts = &o.mesh.vertices;
     let pos: Vec<[f32; 3]> = verts.iter().map(|v| v.position).collect();
@@ -75,11 +76,39 @@ fn add_mesh(b: &mut Builder, o: &Object, nmat: usize) -> Value {
     let ta = b.accessor(tv, 0, 5126, uv.len(), "VEC2", None);
     let iv = b.view(bytemuck::cast_slice(&o.mesh.indices), Some(34963));
 
+    // Skin attributes (optional).
+    let mut joints_acc: Option<usize> = None;
+    let mut weights_acc: Option<usize> = None;
+    if let Some(skin) = o.skin.as_ref() {
+        if skin.joints.len() == verts.len() && skin.weights.len() == verts.len() {
+            // JOINTS as UNSIGNED_SHORT VEC4
+            let mut jbytes: Vec<u8> = Vec::with_capacity(verts.len() * 8);
+            for j in &skin.joints {
+                for &c in j {
+                    jbytes.extend_from_slice(&c.to_le_bytes());
+                }
+            }
+            let jv = b.view(&jbytes, Some(34962));
+            joints_acc = Some(b.accessor(jv, 0, 5123, verts.len(), "VEC4", None));
+            // WEIGHTS as FLOAT VEC4
+            let wflat: Vec<[f32; 4]> = skin.weights.clone();
+            let wv = b.view(bytemuck::cast_slice(&wflat), Some(34962));
+            weights_acc = Some(b.accessor(wv, 0, 5126, verts.len(), "VEC4", None));
+        }
+    }
+
     let mat_ok = |m: Option<usize>| m.filter(|&i| i < nmat);
     let mut prims = Vec::new();
     let mut push = |b: &mut Builder, first: usize, count: usize, mat: Option<usize>| {
         let ia = b.accessor(iv, first * 4, 5125, count, "SCALAR", None);
-        let mut prim = json!({ "attributes": { "POSITION": pa, "NORMAL": na, "TEXCOORD_0": ta }, "indices": ia, "mode": 4 });
+        let mut attrs = json!({ "POSITION": pa, "NORMAL": na, "TEXCOORD_0": ta });
+        if let Some(ja) = joints_acc {
+            attrs["JOINTS_0"] = json!(ja);
+        }
+        if let Some(wa) = weights_acc {
+            attrs["WEIGHTS_0"] = json!(wa);
+        }
+        let mut prim = json!({ "attributes": attrs, "indices": ia, "mode": 4 });
         if let Some(m) = mat_ok(mat) {
             prim["material"] = json!(m);
         }
@@ -171,7 +200,9 @@ pub fn export_glb(scene: &Scene, path: &Path, only: Option<&BTreeSet<u64>>) -> R
         if only.map_or(false, |s| !s.contains(&o.id)) {
             continue;
         }
-        if o.kind.is_mesh() && o.mesh.indices.is_empty() {
+        // Keep armatures (bones) even without mesh geometry; skip empty mesh-only objects.
+        let is_arm = matches!(o.kind, ObjectKind::Armature(_));
+        if o.kind.is_mesh() && o.mesh.indices.is_empty() && !is_arm {
             continue;
         }
         node_of[i] = Some(order.len());
@@ -252,7 +283,10 @@ pub fn export_glb(scene: &Scene, path: &Path, only: Option<&BTreeSet<u64>>) -> R
                 };
                 node["mesh"] = json!(mi);
             }
-            // Surface, Volume, GreasePencil, Armature, LightProbe, Speaker, ForceField: empty nodes
+            ObjectKind::Armature(_) => {
+                // Joint nodes are appended below.
+            }
+            // Surface, Volume, GreasePencil, LightProbe, Speaker, ForceField: empty nodes
             _ => {}
         }
         nodes.push(node);
@@ -261,6 +295,88 @@ pub fn export_glb(scene: &Scene, path: &Path, only: Option<&BTreeSet<u64>>) -> R
             None => roots.push(ni),
         }
     }
+
+    // ---- Skins / bones ------------------------------------------------------------
+    // Joint nodes live under each armature. Skinned meshes get JOINTS/WEIGHTS via
+    // add_mesh and a `skin` index pointing at skins_json.
+    let mut skins_json: Vec<Value> = Vec::new();
+    let mut skin_index_of: HashMap<u64, usize> = HashMap::new();
+    for (ni, &i) in order.iter().enumerate() {
+        let o = &scene.objects[i];
+        let ObjectKind::Armature(arm) = &o.kind else {
+            continue;
+        };
+        if arm.bones.is_empty() {
+            continue;
+        }
+        let arm_world = worlds[i];
+        let rest_mats: Vec<glam::Mat4> = arm
+            .bones
+            .iter()
+            .map(forge_core::ArmatureData::rest_matrix)
+            .collect();
+        let mut joint_node_indices: Vec<usize> = Vec::with_capacity(arm.bones.len());
+        let mut bone_children: Vec<Vec<usize>> = vec![Vec::new(); arm.bones.len()];
+        for (bi, bone) in arm.bones.iter().enumerate() {
+            let rest = rest_mats[bi];
+            let local = if let Some(p) = bone.parent {
+                let pi = p as usize;
+                if pi < rest_mats.len() && rest_mats[pi].determinant().abs() > 1e-12 {
+                    rest_mats[pi].inverse() * rest
+                } else {
+                    rest
+                }
+            } else {
+                rest
+            };
+            let (s, r, t) = local.to_scale_rotation_translation();
+            let jni = nodes.len();
+            nodes.push(json!({
+                "name": bone.name,
+                "translation": t.to_array(),
+                "rotation": r.to_array(),
+                "scale": s.to_array()
+            }));
+            joint_node_indices.push(jni);
+            if let Some(p) = bone.parent {
+                let pi = p as usize;
+                if pi < bone_children.len() {
+                    bone_children[pi].push(jni);
+                }
+            } else {
+                children[ni].push(jni);
+            }
+        }
+        for (bi, ch) in bone_children.iter().enumerate() {
+            if !ch.is_empty() {
+                nodes[joint_node_indices[bi]]["children"] = json!(ch);
+            }
+        }
+        let mut ibm: Vec<[f32; 16]> = Vec::with_capacity(arm.bones.len());
+        for rest in &rest_mats {
+            let global = arm_world * *rest;
+            ibm.push(global.inverse().to_cols_array());
+        }
+        let ibm_view = b.view(bytemuck::cast_slice(&ibm), None);
+        let ibm_acc = b.accessor(ibm_view, 0, 5126, ibm.len(), "MAT4", None);
+        let si = skins_json.len();
+        skins_json.push(json!({
+            "name": o.name,
+            "joints": joint_node_indices,
+            "inverseBindMatrices": ibm_acc,
+            "skeleton": ni
+        }));
+        skin_index_of.insert(o.id, si);
+    }
+    // Link skinned meshes to their skin.
+    for (ni, &i) in order.iter().enumerate() {
+        if let Some(skin) = scene.objects[i].skin.as_ref() {
+            if let Some(&si) = skin_index_of.get(&skin.armature_id) {
+                nodes[ni]["skin"] = json!(si);
+            }
+        }
+    }
+
     for (ni, ch) in children.iter().enumerate() {
         if !ch.is_empty() {
             nodes[ni]["children"] = json!(ch);
@@ -270,13 +386,16 @@ pub fn export_glb(scene: &Scene, path: &Path, only: Option<&BTreeSet<u64>>) -> R
     let mut root = Map::new();
     root.insert(
         "asset".into(),
-        json!({ "version": "2.0", "generator": "Forge3D" }),
+        json!({ "version": "2.0", "generator": "BlendCraft" }),
     );
     root.insert("scene".into(), json!(0));
     root.insert("scenes".into(), json!([{ "nodes": roots }]));
     root.insert("nodes".into(), Value::Array(nodes));
     if !meshes.is_empty() {
         root.insert("meshes".into(), Value::Array(meshes));
+    }
+    if !skins_json.is_empty() {
+        root.insert("skins".into(), Value::Array(skins_json));
     }
     if !cameras.is_empty() {
         root.insert("cameras".into(), Value::Array(cameras));
@@ -323,11 +442,132 @@ pub fn export_glb(scene: &Scene, path: &Path, only: Option<&BTreeSet<u64>>) -> R
     Ok(())
 }
 
-/// Wavefront OBJ (geometry only, transforms baked, Y-up). Materials are not written.
+/// Wavefront OBJ + MTL (transforms baked, Y-up). Writes materials and PNG textures
+/// next to the OBJ (same stem `.mtl`, textures as `{stem}_{texname}.png`).
 #[cfg(not(target_arch = "wasm32"))]
 pub fn export_obj(scene: &Scene, path: &Path, only: Option<&BTreeSet<u64>>) -> Result<()> {
     let worlds = scene.world_matrices();
-    let mut s = String::from("# Exported by Forge3D\n");
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("export");
+    let mtl_name = format!("{stem}.mtl");
+    let mtl_path = dir.join(&mtl_name);
+
+    // Collect materials actually used by exported meshes.
+    let mut used_mats: BTreeSet<usize> = BTreeSet::new();
+    for (i, o) in scene.objects.iter().enumerate() {
+        if !scene.is_visible(i)
+            || o.mesh.indices.is_empty()
+            || !o.kind.is_mesh()
+            || only.map_or(false, |s| !s.contains(&o.id))
+        {
+            continue;
+        }
+        if let Some(mi) = o.material {
+            if mi < scene.materials.len() {
+                used_mats.insert(mi);
+            }
+        }
+        for g in &o.mesh.groups {
+            if let Some(mi) = g.material {
+                if mi < scene.materials.len() {
+                    used_mats.insert(mi);
+                }
+            }
+        }
+    }
+
+    // Write texture PNGs referenced by used materials; map scene tex index -> file name.
+    let mut tex_files: HashMap<usize, String> = HashMap::new();
+    for &mi in &used_mats {
+        let m = &scene.materials[mi];
+        for ti in [m.base_color_tex, m.normal_tex, m.emissive_tex, m.occlusion_tex]
+            .into_iter()
+            .flatten()
+        {
+            if tex_files.contains_key(&ti) {
+                continue;
+            }
+            let Some(tex) = scene.textures.get(ti) else {
+                continue;
+            };
+            let safe: String = tex
+                .name
+                .chars()
+                .map(|c| {
+                    if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                        c
+                    } else {
+                        '_'
+                    }
+                })
+                .collect();
+            let safe = if safe.is_empty() {
+                format!("tex{ti}")
+            } else {
+                safe
+            };
+            let fname = format!("{stem}_{safe}.png");
+            let fpath = dir.join(&fname);
+            image::save_buffer(
+                &fpath,
+                &tex.rgba8,
+                tex.width,
+                tex.height,
+                image::ColorType::Rgba8,
+            )
+            .with_context(|| format!("writing texture {}", fpath.display()))?;
+            tex_files.insert(ti, fname);
+        }
+    }
+
+    // MTL
+    let mut mtl = String::from("# Exported by BlendCraft\n");
+    let mut mat_name_of: HashMap<usize, String> = HashMap::new();
+    for &mi in &used_mats {
+        let m = &scene.materials[mi];
+        let safe: String = m
+            .name
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        let mname = if safe.is_empty() {
+            format!("Material_{mi}")
+        } else {
+            format!("{safe}_{mi}")
+        };
+        mat_name_of.insert(mi, mname.clone());
+        writeln!(mtl, "newmtl {mname}")?;
+        let c = m.base_color;
+        writeln!(mtl, "Kd {:.6} {:.6} {:.6}", c[0], c[1], c[2])?;
+        writeln!(mtl, "d {:.6}", c[3])?;
+        writeln!(mtl, "Ns {:.6}", (1.0 - m.roughness) * 200.0)?;
+        writeln!(mtl, "illum 2")?;
+        if let Some(ti) = m.base_color_tex {
+            if let Some(f) = tex_files.get(&ti) {
+                writeln!(mtl, "map_Kd {f}")?;
+            }
+        }
+        if let Some(ti) = m.normal_tex {
+            if let Some(f) = tex_files.get(&ti) {
+                writeln!(mtl, "map_Bump {f}")?;
+            }
+        }
+        writeln!(mtl)?;
+    }
+    std::fs::write(&mtl_path, mtl).with_context(|| format!("writing {}", mtl_path.display()))?;
+
+    // OBJ
+    let mut s = String::from("# Exported by BlendCraft\n");
+    writeln!(s, "mtllib {mtl_name}")?;
     let mut off = 1usize;
     for (i, o) in scene.objects.iter().enumerate() {
         if !scene.is_visible(i)
@@ -346,6 +586,11 @@ pub fn export_obj(scene: &Scene, path: &Path, only: Option<&BTreeSet<u64>>) -> R
             .map(|c| if c.is_whitespace() { '_' } else { c })
             .collect();
         writeln!(s, "o {name}")?;
+        if let Some(mi) = o.material {
+            if let Some(mn) = mat_name_of.get(&mi) {
+                writeln!(s, "usemtl {mn}")?;
+            }
+        }
         for v in &o.mesh.vertices {
             let p = m.transform_point3(v.position.into());
             writeln!(s, "v {} {} {}", p.x, p.y, p.z)?;
@@ -357,14 +602,37 @@ pub fn export_obj(scene: &Scene, path: &Path, only: Option<&BTreeSet<u64>>) -> R
             let n = (nm * Vec3::from(v.normal)).normalize_or_zero();
             writeln!(s, "vn {} {} {}", n.x, n.y, n.z)?;
         }
-        for t in o.mesh.indices.chunks_exact(3) {
-            let (a, b, c) = if flip {
-                (t[0], t[2], t[1])
-            } else {
-                (t[0], t[1], t[2])
-            };
-            let (a, b, c) = (a as usize + off, b as usize + off, c as usize + off);
-            writeln!(s, "f {a}/{a}/{a} {b}/{b}/{b} {c}/{c}/{c}")?;
+        // Per-group materials when present.
+        if o.mesh.groups.is_empty() {
+            for t in o.mesh.indices.chunks_exact(3) {
+                let (a, b, c) = if flip {
+                    (t[0], t[2], t[1])
+                } else {
+                    (t[0], t[1], t[2])
+                };
+                let (a, b, c) = (a as usize + off, b as usize + off, c as usize + off);
+                writeln!(s, "f {a}/{a}/{a} {b}/{b}/{b} {c}/{c}/{c}")?;
+            }
+        } else {
+            for g in &o.mesh.groups {
+                if let Some(mi) = g.material {
+                    if let Some(mn) = mat_name_of.get(&mi) {
+                        writeln!(s, "usemtl {mn}")?;
+                    }
+                }
+                let start = g.first_index as usize;
+                let end = start + g.index_count as usize;
+                let indices = &o.mesh.indices[start.min(o.mesh.indices.len())..end.min(o.mesh.indices.len())];
+                for t in indices.chunks_exact(3) {
+                    let (a, b, c) = if flip {
+                        (t[0], t[2], t[1])
+                    } else {
+                        (t[0], t[1], t[2])
+                    };
+                    let (a, b, c) = (a as usize + off, b as usize + off, c as usize + off);
+                    writeln!(s, "f {a}/{a}/{a} {b}/{b}/{b} {c}/{c}/{c}")?;
+                }
+            }
         }
         off += o.mesh.vertices.len();
     }

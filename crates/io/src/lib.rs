@@ -190,22 +190,50 @@ pub fn load_gltf(path: &Path) -> Result<Scene> {
             let joint_world = worlds.get(&joint.index()).copied().unwrap_or(Mat4::IDENTITY);
             let joint_local = world_to_armature * joint_world;
             let head = joint_local.transform_point3(Vec3::ZERO);
-            let mut tail = head + Vec3::Y * 0.1;
-            // Prefer a child joint as the bone tail; otherwise use a modest
-            // display length along the joint's local +Y axis.
+            // Full armature-space orientation of the joint. Stored on the bone so
+            // rest_matrix / hierarchical pose use the same frame as glTF local TRS
+            // (including twist). Head→tail alone cannot recover twist and was the
+            // main reason imported animations looked rotated wrong.
+            let (_, joint_rot, _) = joint_local.to_scale_rotation_translation();
+            let joint_rot = joint_rot.normalize();
+            let local_y = (joint_rot * Vec3::Y).normalize_or_zero();
+            let mut tail = if local_y.length_squared() > 1e-8 {
+                head + local_y * 0.1
+            } else {
+                head + Vec3::Y * 0.1
+            };
+            // Prefer a child joint as the bone tail when present (display length).
+            // Orientation still comes from rest_orientation, not from this vector.
             if let Some(child) = joint.children().find(|c| joint_to_bone.contains_key(&c.index())) {
                 let child_world = worlds.get(&child.index()).copied().unwrap_or(Mat4::IDENTITY);
-                tail = (world_to_armature * child_world).transform_point3(Vec3::ZERO);
+                let child_head = (world_to_armature * child_world).transform_point3(Vec3::ZERO);
+                if (child_head - head).length_squared() > 1e-10 {
+                    tail = child_head;
+                }
             } else if let Some(parent_index) = parent_by_node.get(&joint.index()) {
                 let parent_world = worlds.get(parent_index).copied().unwrap_or(Mat4::IDENTITY);
                 let p = (world_to_armature * parent_world).transform_point3(Vec3::ZERO);
                 let direction = (head - p).normalize_or_zero();
-                if direction.length_squared() > 1e-6 { tail = head + direction * 0.1; }
+                if direction.length_squared() > 1e-6 && local_y.length_squared() <= 1e-8 {
+                    tail = head + direction * 0.1;
+                }
             }
             let parent_bone = parent_by_node.get(&joint.index())
                 .and_then(|parent_index| joint_to_bone.get(parent_index).copied());
             let mut bone = Bone::new(joint.name().unwrap_or("Joint"), head, tail);
             bone.parent = parent_bone;
+            bone.rest_orientation = Some(joint_rot.to_array());
+            // Absolute local TRS relative to the parent node (glTF joint.transform).
+            // Pose channels store the same absolute local values; hierarchical eval
+            // composes parent * local so root/hip motion no longer drifts on +Y.
+            let (lt, lr, ls) = joint.transform().decomposed();
+            let lr = glam::Quat::from_array(lr).normalize();
+            bone.rest_local_loc = Some(lt);
+            bone.rest_local_rot = Some(lr.to_array());
+            bone.rest_local_scale = Some(ls);
+            bone.pose_loc = lt;
+            bone.pose_rot = lr.to_array();
+            bone.pose_scale = ls;
             arm.bones.push(bone);
         }
         arm.active = Some(0);
@@ -264,37 +292,35 @@ pub fn load_gltf(path: &Path) -> Result<Scene> {
                 .entry(bone_index).or_default();
             let to_frame = |time: f32| frame_start + ((time - min_time) * fps).round() as i32;
             match (property, outputs) {
+                // Store absolute local TRS (same space as joint.transform). Hierarchical
+                // eval composes parent * local; do NOT subtract rest — that mixed parent
+                // local space with armature space and made motion crawl along +Y.
                 (gltf::animation::Property::Translation, gltf::animation::util::ReadOutputs::Translations(values)) => {
-                    let rest = node_rest_trs.get(&node_index).map(|v| v.0).unwrap_or(Vec3::ZERO);
                     let values: Vec<[f32; 3]> = values.collect();
                     let values: Vec<[f32; 3]> = if interpolation == gltf::animation::Interpolation::CubicSpline {
                         values.chunks_exact(3).map(|triple| triple[1]).collect()
                     } else { values };
                     for (time, value) in times.into_iter().zip(values) {
-                        track.insert_or_merge(to_frame(time), Some(Vec3::from_array(value) - rest), None, None);
+                        track.insert_or_merge(to_frame(time), Some(Vec3::from_array(value)), None, None);
                     }
                 }
                 (gltf::animation::Property::Rotation, gltf::animation::util::ReadOutputs::Rotations(values)) => {
-                    let rest = node_rest_trs.get(&node_index).map(|v| v.1).unwrap_or(glam::Quat::IDENTITY);
                     let values: Vec<[f32; 4]> = values.into_f32().collect();
                     let values: Vec<[f32; 4]> = if interpolation == gltf::animation::Interpolation::CubicSpline {
                         values.chunks_exact(3).map(|triple| triple[1]).collect()
                     } else { values };
                     for (time, value) in times.into_iter().zip(values) {
-                        let q = (rest.inverse() * glam::Quat::from_array(value).normalize()).normalize();
+                        let q = glam::Quat::from_array(value).normalize();
                         track.insert_or_merge(to_frame(time), None, Some(q), None);
                     }
                 }
                 (gltf::animation::Property::Scale, gltf::animation::util::ReadOutputs::Scales(values)) => {
-                    let rest = node_rest_trs.get(&node_index).map(|v| v.2).unwrap_or(Vec3::ONE);
                     let values: Vec<[f32; 3]> = values.collect();
                     let values: Vec<[f32; 3]> = if interpolation == gltf::animation::Interpolation::CubicSpline {
                         values.chunks_exact(3).map(|triple| triple[1]).collect()
                     } else { values };
                     for (time, value) in times.into_iter().zip(values) {
-                        let value = Vec3::from_array(value);
-                        let delta = Vec3::new(value.x / rest.x.max(1e-8), value.y / rest.y.max(1e-8), value.z / rest.z.max(1e-8));
-                        track.insert_or_merge(to_frame(time), None, None, Some(delta));
+                        track.insert_or_merge(to_frame(time), None, None, Some(Vec3::from_array(value)));
                     }
                 }
                 _ => {}

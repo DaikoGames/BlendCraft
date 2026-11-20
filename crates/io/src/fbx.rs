@@ -74,7 +74,45 @@ fn is_binary_fbx(bytes: &[u8]) -> bool {
 #[cfg(not(target_arch = "wasm32"))]
 pub fn export_fbx(scene: &Scene, path: &Path, only: Option<&BTreeSet<u64>>) -> Result<()> {
     // Binary FBX 7.4 — Blender and most DCCs import this; ASCII is often rejected.
-    let bytes = build_binary_fbx(scene, only)?;
+    // Write any referenced textures next to the FBX so RelativeFilename links resolve.
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("export");
+    let mut tex_rel: HashMap<usize, String> = HashMap::new();
+    for (ti, tex) in scene.textures.iter().enumerate() {
+        let safe: String = tex
+            .name
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        let safe = if safe.is_empty() {
+            format!("tex{ti}")
+        } else {
+            safe
+        };
+        let fname = format!("{stem}_{safe}.png");
+        let fpath = dir.join(&fname);
+        if let Err(e) = image::save_buffer(
+            &fpath,
+            &tex.rgba8,
+            tex.width,
+            tex.height,
+            image::ColorType::Rgba8,
+        ) {
+            eprintln!("FBX texture write failed for {}: {e}", fpath.display());
+            continue;
+        }
+        tex_rel.insert(ti, fname);
+    }
+    let bytes = build_binary_fbx(scene, only, &tex_rel)?;
     std::fs::write(path, bytes).with_context(|| format!("writing {}", path.display()))?;
     Ok(())
 }
@@ -2178,15 +2216,43 @@ fn prop_trailing_f32(node: &BinNode) -> Vec<f32> {
 // Version 7400 uses 32-bit offsets.
 // ===========================================================================
 
-fn build_binary_fbx(scene: &Scene, only: Option<&BTreeSet<u64>>) -> Result<Vec<u8>> {
+fn build_binary_fbx(
+    scene: &Scene,
+    only: Option<&BTreeSet<u64>>,
+    tex_rel: &HashMap<usize, String>,
+) -> Result<Vec<u8>> {
     let mut meshes: Vec<(String, MeshData, [f32; 4], usize)> = Vec::new(); // name, mesh, diffuse, mat_idx
-    let mut mat_names: Vec<(String, [f32; 4])> = scene
+    // (name, color, optional diffuse texture index into scene.textures)
+    let mut mat_names: Vec<(String, [f32; 4], Option<usize>)> = scene
         .materials
         .iter()
-        .map(|m| (m.name.clone(), m.base_color))
+        .map(|m| (m.name.clone(), m.base_color, m.base_color_tex))
         .collect();
     if mat_names.is_empty() {
-        mat_names.push(("Default".into(), [0.8, 0.8, 0.8, 1.0]));
+        mat_names.push(("Default".into(), [0.8, 0.8, 0.8, 1.0], None));
+    }
+
+    // Armature bones exported as LimbNode models (hierarchy only — no skin weights yet).
+    let mut limb_models: Vec<(String, [f32; 3], [f32; 4], Option<usize>)> = Vec::new(); // name, head, rest_orient, parent_limb_idx
+    for obj in &scene.objects {
+        if let Some(sel) = only {
+            if !sel.contains(&obj.id) {
+                continue;
+            }
+        }
+        if let ObjectKind::Armature(arm) = &obj.kind {
+            let base = limb_models.len();
+            for (bi, bone) in arm.bones.iter().enumerate() {
+                let parent = bone.parent.map(|p| base + p as usize);
+                limb_models.push((
+                    bone.name.clone(),
+                    bone.head,
+                    bone.rest_orientation.unwrap_or([0.0, 0.0, 0.0, 1.0]),
+                    parent,
+                ));
+                let _ = bi;
+            }
+        }
     }
 
     for obj in &scene.objects {
@@ -2210,30 +2276,30 @@ fn build_binary_fbx(scene: &Scene, only: Option<&BTreeSet<u64>>) -> Result<Vec<u
             .min(mat_names.len().saturating_sub(1));
         let diff = mat_names
             .get(mi)
-            .map(|(_, c)| *c)
+            .map(|(_, c, _)| *c)
             .unwrap_or([0.8, 0.8, 0.8, 1.0]);
         meshes.push((obj.name.clone(), baked, diff, mi));
     }
-    if meshes.is_empty() {
-        bail!("nothing to export as FBX (no mesh objects)");
+    if meshes.is_empty() && limb_models.is_empty() {
+        bail!("nothing to export as FBX (no mesh or armature objects)");
     }
 
     // Collect unique materials referenced
-    let mut used_mats: Vec<(String, [f32; 4])> = Vec::new();
+    let mut used_mats: Vec<(String, [f32; 4], Option<usize>)> = Vec::new();
     let mut mat_remap: Vec<usize> = vec![0; mat_names.len()];
     for (_, _, _, mi) in &meshes {
-        if used_mats.iter().all(|(n, _)| n != &mat_names[*mi].0) {
+        if used_mats.iter().all(|(n, _, _)| n != &mat_names[*mi].0) {
             mat_remap[*mi] = used_mats.len();
             used_mats.push(mat_names[*mi].clone());
         } else {
             mat_remap[*mi] = used_mats
                 .iter()
-                .position(|(n, _)| n == &mat_names[*mi].0)
+                .position(|(n, _, _)| n == &mat_names[*mi].0)
                 .unwrap_or(0);
         }
     }
     if used_mats.is_empty() {
-        used_mats.push(("Default".into(), [0.8, 0.8, 0.8, 1.0]));
+        used_mats.push(("Default".into(), [0.8, 0.8, 0.8, 1.0], None));
     }
 
     let mut next_id: i64 = 100000;
@@ -2283,26 +2349,170 @@ fn build_binary_fbx(scene: &Scene, only: Option<&BTreeSet<u64>>) -> Result<Vec<u
         ],
     );
 
+    // Texture / Video ids for materials that have a diffuse map on disk.
+    let mut tex_ids: Vec<Option<(i64, i64)>> = vec![None; used_mats.len()]; // (texture_id, video_id)
+    let mut next_tex_id = next_id;
+    for (i, (_, _, tex_opt)) in used_mats.iter().enumerate() {
+        if let Some(ti) = tex_opt {
+            if tex_rel.contains_key(ti) {
+                let vid = next_tex_id;
+                next_tex_id += 1;
+                let tid = next_tex_id;
+                next_tex_id += 1;
+                tex_ids[i] = Some((tid, vid));
+            }
+        }
+    }
+    next_id = next_tex_id;
+
+    // LimbNode model ids for exported bones.
+    let mut limb_ids: Vec<i64> = Vec::with_capacity(limb_models.len());
+    for _ in &limb_models {
+        limb_ids.push(next_id);
+        next_id += 1;
+    }
+
+    let model_count = (meshes.len() + limb_models.len()) as i32;
+    let tex_count = tex_ids.iter().filter(|t| t.is_some()).count() as i32;
     let definitions = bin_node(
         "Definitions",
         vec![],
         vec![
             bin_node("Version", vec![BinWProp::I32(100)], vec![]),
-            bin_node("Count", vec![BinWProp::I32(3)], vec![]),
+            bin_node(
+                "Count",
+                vec![BinWProp::I32(3 + if tex_count > 0 { 2 } else { 0 })],
+                vec![],
+            ),
             object_type_def("Geometry", meshes.len() as i32),
-            object_type_def("Model", meshes.len() as i32),
+            object_type_def("Model", model_count),
             object_type_def("Material", used_mats.len() as i32),
+            object_type_def("Texture", tex_count),
+            object_type_def("Video", tex_count),
         ],
     );
 
     let mut object_children: Vec<BinWNode> = Vec::new();
-    for (i, (name, color)) in used_mats.iter().enumerate() {
+    for (i, (name, color, _)) in used_mats.iter().enumerate() {
         object_children.push(material_node(mat_ids[i], name, *color));
     }
     for (i, (name, mesh, _, mi)) in meshes.iter().enumerate() {
         object_children.push(geometry_node(geom_ids[i], name, mesh));
         object_children.push(model_node(model_ids[i], name));
         let _ = mi;
+    }
+    // Diffuse textures as Texture + Video pairs with RelativeFilename.
+    for (i, (_, _, tex_opt)) in used_mats.iter().enumerate() {
+        let Some(ti) = tex_opt else { continue };
+        let Some(fname) = tex_rel.get(ti) else { continue };
+        let Some((tid, vid)) = tex_ids[i] else { continue };
+        object_children.push(bin_node(
+            "Video",
+            vec![
+                BinWProp::I64(vid),
+                BinWProp::String(format!("Video::{}", sanitize(fname))),
+                BinWProp::String("Clip".into()),
+            ],
+            vec![
+                bin_node("Type", vec![BinWProp::String("Clip".into())], vec![]),
+                bin_node(
+                    "Properties70",
+                    vec![],
+                    vec![bin_node(
+                        "P",
+                        vec![
+                            BinWProp::String("Path".into()),
+                            BinWProp::String("KString".into()),
+                            BinWProp::String("XRefUrl".into()),
+                            BinWProp::String("".into()),
+                            BinWProp::String(fname.clone()),
+                        ],
+                        vec![],
+                    )],
+                ),
+                bin_node(
+                    "UseMipMap",
+                    vec![BinWProp::I32(0)],
+                    vec![],
+                ),
+                bin_node(
+                    "Filename",
+                    vec![BinWProp::String(fname.clone())],
+                    vec![],
+                ),
+                bin_node(
+                    "RelativeFilename",
+                    vec![BinWProp::String(fname.clone())],
+                    vec![],
+                ),
+            ],
+        ));
+        object_children.push(bin_node(
+            "Texture",
+            vec![
+                BinWProp::I64(tid),
+                BinWProp::String(format!("Texture::{}", sanitize(fname))),
+                BinWProp::String("".into()),
+            ],
+            vec![
+                bin_node("Type", vec![BinWProp::String("TextureVideoClip".into())], vec![]),
+                bin_node("Version", vec![BinWProp::I32(202)], vec![]),
+                bin_node(
+                    "TextureName",
+                    vec![BinWProp::String(format!("Texture::{}", sanitize(fname)))],
+                    vec![],
+                ),
+                bin_node(
+                    "Media",
+                    vec![BinWProp::String(format!("Video::{}", sanitize(fname)))],
+                    vec![],
+                ),
+                bin_node(
+                    "Filename",
+                    vec![BinWProp::String(fname.clone())],
+                    vec![],
+                ),
+                bin_node(
+                    "RelativeFilename",
+                    vec![BinWProp::String(fname.clone())],
+                    vec![],
+                ),
+            ],
+        ));
+    }
+    // Bones as LimbNode models.
+    for (i, (name, head, _orient, _parent)) in limb_models.iter().enumerate() {
+        object_children.push(bin_node(
+            "Model",
+            vec![
+                BinWProp::I64(limb_ids[i]),
+                BinWProp::String(format!("Model::{}", sanitize(name))),
+                BinWProp::String("LimbNode".into()),
+            ],
+            vec![
+                bin_node("Version", vec![BinWProp::I32(232)], vec![]),
+                bin_node(
+                    "Properties70",
+                    vec![],
+                    vec![
+                        prop70_i("InheritType", 1),
+                        bin_node(
+                            "P",
+                            vec![
+                                BinWProp::String("Lcl Translation".into()),
+                                BinWProp::String("Lcl Translation".into()),
+                                BinWProp::String("".into()),
+                                BinWProp::String("A".into()),
+                                BinWProp::F64(head[0] as f64),
+                                BinWProp::F64(head[1] as f64),
+                                BinWProp::F64(head[2] as f64),
+                            ],
+                            vec![],
+                        ),
+                    ],
+                ),
+            ],
+        ));
     }
     let objects = bin_node("Objects", vec![], object_children);
 
@@ -2319,6 +2529,17 @@ fn build_binary_fbx(scene: &Scene, only: Option<&BTreeSet<u64>>) -> Result<Vec<u
             .unwrap_or(0)
             .min(mat_ids.len() - 1)];
         conn_children.push(connection_oo(mid, model_ids[i]));
+        // Texture -> Material DiffuseColor, Video -> Texture
+        let remap_i = mat_remap.get(mi).copied().unwrap_or(0).min(tex_ids.len().saturating_sub(1));
+        if let Some((tid, vid)) = tex_ids.get(remap_i).copied().flatten() {
+            conn_children.push(connection_op(tid, mid, "DiffuseColor"));
+            conn_children.push(connection_oo(vid, tid));
+        }
+    }
+    // Limb hierarchy
+    for (i, (_, _, _, parent)) in limb_models.iter().enumerate() {
+        let parent_id = parent.map(|p| limb_ids[p]).unwrap_or(0);
+        conn_children.push(connection_oo(limb_ids[i], parent_id));
     }
     let connections = bin_node("Connections", vec![], conn_children);
 
@@ -2450,6 +2671,7 @@ fn material_node(id: i64, name: &str, color: [f32; 4]) -> BinWNode {
 fn geometry_node(id: i64, name: &str, mesh: &MeshData) -> BinWNode {
     let mut verts: Vec<f64> = Vec::with_capacity(mesh.vertices.len() * 3);
     let mut norms: Vec<f64> = Vec::with_capacity(mesh.vertices.len() * 3);
+    let mut uvs: Vec<f64> = Vec::with_capacity(mesh.vertices.len() * 2);
     for v in &mesh.vertices {
         verts.extend_from_slice(&[
             v.position[0] as f64,
@@ -2457,6 +2679,8 @@ fn geometry_node(id: i64, name: &str, mesh: &MeshData) -> BinWNode {
             v.position[2] as f64,
         ]);
         norms.extend_from_slice(&[v.normal[0] as f64, v.normal[1] as f64, v.normal[2] as f64]);
+        // FBX UV V is typically top-origin; BlendCraft stores bottom-origin like glTF.
+        uvs.extend_from_slice(&[v.uv[0] as f64, 1.0 - v.uv[1] as f64]);
     }
     let mut pvi: Vec<i32> = Vec::with_capacity(mesh.indices.len());
     for tri in mesh.indices.chunks_exact(3) {
@@ -2496,6 +2720,25 @@ fn geometry_node(id: i64, name: &str, mesh: &MeshData) -> BinWNode {
                 ],
             ),
             bin_node(
+                "LayerElementUV",
+                vec![BinWProp::I32(0)],
+                vec![
+                    bin_node("Version", vec![BinWProp::I32(101)], vec![]),
+                    bin_node("Name", vec![BinWProp::String("UVMap".into())], vec![]),
+                    bin_node(
+                        "MappingInformationType",
+                        vec![BinWProp::String("ByVertice".into())],
+                        vec![],
+                    ),
+                    bin_node(
+                        "ReferenceInformationType",
+                        vec![BinWProp::String("Direct".into())],
+                        vec![],
+                    ),
+                    bin_node("UV", vec![BinWProp::F64Arr(uvs)], vec![]),
+                ],
+            ),
+            bin_node(
                 "Layer",
                 vec![BinWProp::I32(0)],
                 vec![
@@ -2507,6 +2750,18 @@ fn geometry_node(id: i64, name: &str, mesh: &MeshData) -> BinWNode {
                             bin_node(
                                 "Type",
                                 vec![BinWProp::String("LayerElementNormal".into())],
+                                vec![],
+                            ),
+                            bin_node("TypedIndex", vec![BinWProp::I32(0)], vec![]),
+                        ],
+                    ),
+                    bin_node(
+                        "LayerElement",
+                        vec![],
+                        vec![
+                            bin_node(
+                                "Type",
+                                vec![BinWProp::String("LayerElementUV".into())],
                                 vec![],
                             ),
                             bin_node("TypedIndex", vec![BinWProp::I32(0)], vec![]),
@@ -2593,6 +2848,19 @@ fn connection_oo(child: i64, parent: i64) -> BinWNode {
             BinWProp::String("OO".into()),
             BinWProp::I64(child),
             BinWProp::I64(parent),
+        ],
+        vec![],
+    )
+}
+
+fn connection_op(child: i64, parent: i64, prop: &str) -> BinWNode {
+    bin_node(
+        "C",
+        vec![
+            BinWProp::String("OP".into()),
+            BinWProp::I64(child),
+            BinWProp::I64(parent),
+            BinWProp::String(prop.into()),
         ],
         vec![],
     )
@@ -2740,7 +3008,7 @@ mod tests {
         obj.material = Some(0);
         scene.objects.push(obj);
 
-        let bytes = build_binary_fbx(&scene, None).expect("export binary");
+        let bytes = build_binary_fbx(&scene, None, &HashMap::new()).expect("export binary");
         assert!(
             bytes.starts_with(b"Kaydara FBX Binary"),
             "missing binary magic"

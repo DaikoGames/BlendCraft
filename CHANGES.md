@@ -1,3 +1,34 @@
+## Export: materials, textures, bones (2026-11-20d)
+
+- **OBJ**: writes a sibling `.mtl` with Kd / map_Kd / map_Bump, embeds PNG textures next to the OBJ, and `usemtl` per object/group.
+- **GLB**: exports armature bones as joint nodes, `skins` with inverse bind matrices, and JOINTS_0 / WEIGHTS_0 on skinned meshes. Armature objects are no longer dropped.
+- **FBX**: geometry now includes UV layer; diffuse textures written as sibling PNGs and linked via Texture/Video + OP DiffuseColor; armature bones exported as LimbNode models with hierarchy. (Skin weights / animation curves still not written to FBX.)
+
+
+## Animation Y-drift fix (absolute local TRS) — 2026-11-20c
+
+- glTF bone animation now stores **absolute local** translation / rotation / scale (the same values as `joint.transform`), not deltas from rest.
+- Bones carry `rest_local_loc/rot/scale` and hierarchical pose for those bones is composed as `parent * local(pose)` — matching the glTF joint hierarchy.
+- Root joints convert parent-local animation into armature space via `rest_world * inv(rest_local) * local_anim`, which stops hip/root motion from crawling along +Y.
+- Scrubbing resets each bone with `reset_pose_to_rest()` so unkeyed channels stay at bind local TRS instead of zero.
+
+
+## Animation pose fidelity (position / rotation) — 2026-11-20b
+
+- **Bone rest orientation**: Bones now store an optional full rest quaternion (`rest_orientation`) from the source joint matrix. Rest matrices and hierarchical pose use this instead of the head→tail approximation, so twist is preserved and rotation deltas from glTF land in the correct local frame.
+- **Hierarchical head placement**: For imported bones with `rest_orientation`, posed heads are always `parent_delta * rest_head + parent_pose_rot * pose_loc` so the bind pose stays identity under zero pose (no more tip-along-+Y shift that scrambled skinned meshes). Authored Blender-style chains without rest orientation still snap connected children to the parent tip.
+- **Translation deltas**: `pose_loc` for non-root bones is treated as parent-local (glTF node translation space) and rotated by the parent pose before being added.
+- glTF import writes `rest_orientation` from each joint's armature-space rotation at bind.
+
+
+## Fixes: multiple animations, clip picker, near-clip vanish, OBJ textures, bone rest orientation (2026-11-20)
+
+- **Multiple animations / choose clip**: The named animation clip ComboBox is now on the default bottom timeline (not only in the Animation workspace). Imported glTF clips remain separate in `clips` + `bone_tracks` and can be selected without merging keys.
+- **GLB vanish when zooming near ~1 m**: Orbit camera `zoom` now updates `near`/`far` proportionally to distance (same formula as `frame`). Previously near stayed at the last framed value and clipped the mesh when the camera moved closer than that plane.
+- **Animation + mesh rotation**: glTF joint bones now initialise their rest tail from the joint's local orientation (local +Y) so bone rest space matches the space used for animation rotation/scale deltas, reducing the common "animation applied with wrong orientation" look. Child joint positions still drive display length when present.
+- **OBJ textures**: If the MTL path embedded in the OBJ fails (absolute path from another machine, etc.), a sibling `.mtl` with the same stem is loaded. Texture search uses the model stem for sidecar folders. Ambient map is used as base color when diffuse map is missing. Single-material OBJs without `usemtl` bind the only material.
+
+
 ## Step 2: glTF/GLB skeletal animation import
 
 - Imports glTF animation channels targeting skin joints: translation, rotation and scale.

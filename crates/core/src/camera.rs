@@ -126,6 +126,11 @@ impl OrbitCamera {
             return;
         }
         self.distance = (self.distance * (1.0 - amount * 0.1)).clamp(0.01, 1500.0);
+        // Keep near/far proportional to distance so close zooms do not clip the mesh
+        // (previously near stayed at the value from the last Frame, often ~1 m, causing
+        // geometry to vanish when the camera moved nearer than that plane).
+        self.near = (self.distance * 0.01).max(0.001);
+        self.far = (self.distance * 100.0).max(self.near + 1.0);
     }
 
     pub fn frame(&mut self, b: Aabb) {

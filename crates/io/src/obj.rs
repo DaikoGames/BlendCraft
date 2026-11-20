@@ -29,7 +29,7 @@ fn mtl_texture_name(raw: &str) -> String {
 /// the textures referenced by the .mtl (diffuse, normal) are loaded from disk.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn load_obj(path: &Path) -> Result<Scene> {
-    let (models, mats) = tobj::load_obj(
+    let (models, mats_result) = tobj::load_obj(
         path,
         &tobj::LoadOptions {
             triangulate: true,
@@ -39,6 +39,11 @@ pub fn load_obj(path: &Path) -> Result<Scene> {
     )?;
     let mut scene = Scene::default();
     let dir = path.parent().map(|p| p.to_path_buf()).unwrap_or_default();
+    let model_stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_string();
     let mut textures: Vec<TextureData> = Vec::new();
     let mut cache: HashMap<String, Option<usize>> = HashMap::new();
     let mut load_tex = |name: &str| -> Option<usize> {
@@ -49,47 +54,81 @@ pub fn load_obj(path: &Path) -> Result<Scene> {
         if let Some(c) = cache.get(&name) {
             return *c;
         }
-        let found = crate::find_texture_file(&dir, "", &name)
+        // Search next to the OBJ, in common texture folders, and by bare file name.
+        // Also try the model stem as an .fbm-style sidecar folder (some exporters do this).
+        let found = crate::find_texture_file(&dir, &model_stem, &name)
             .and_then(|b| crate::decode_image_bytes(&b, &name))
             .map(|t| {
                 textures.push(t);
                 textures.len() - 1
             });
         if found.is_none() {
-            eprintln!("OBJ texture '{name}' was not found or could not be decoded");
+            eprintln!(
+                "OBJ texture '{name}' was not found or could not be decoded (searched under {})",
+                dir.display()
+            );
         }
         cache.insert(name, found);
         found
     };
-    if let Ok(mats) = mats {
-        scene.materials = mats
-            .iter()
-            .map(|m| {
-                let d = m.diffuse.unwrap_or([0.8; 3]);
-                let mut mat = Material {
-                    name: m.name.clone(),
-                    base_color: [d[0], d[1], d[2], 1.0],
-                    roughness: 0.8,
-                    ..Default::default()
-                };
-                if let Some(t) = m.diffuse_texture.as_deref().and_then(&mut load_tex) {
+
+    // tobj may fail to resolve the MTL when the path inside the OBJ is absolute
+    // (authoring machine) or relative in a non-obvious way. Fall back to a sibling
+    // .mtl with the same stem so textures still load.
+    let mats = match mats_result {
+        Ok(m) => m,
+        Err(e) => {
+            let sibling = path.with_extension("mtl");
+            match tobj::load_mtl(&sibling) {
+                Ok((m, _)) => {
+                    eprintln!(
+                        "OBJ materials from embedded path failed ({e}); loaded sibling {}",
+                        sibling.display()
+                    );
+                    m
+                }
+                Err(e2) => {
+                    eprintln!("OBJ materials not loaded ({e}; sibling also failed: {e2})");
+                    Vec::new()
+                }
+            }
+        }
+    };
+
+    scene.materials = mats
+        .iter()
+        .map(|m| {
+            let d = m.diffuse.unwrap_or([0.8; 3]);
+            let mut mat = Material {
+                name: m.name.clone(),
+                base_color: [d[0], d[1], d[2], 1.0],
+                roughness: 0.8,
+                ..Default::default()
+            };
+            if let Some(t) = m.diffuse_texture.as_deref().and_then(&mut load_tex) {
+                mat.base_color_tex = Some(t);
+                // Kd multiplies the texture; many exporters leave a grey default there.
+                mat.base_color = [1.0, 1.0, 1.0, 1.0];
+            }
+            // Some exporters put the color map under ambient or use map_Ka instead of map_Kd.
+            if mat.base_color_tex.is_none() {
+                if let Some(t) = m.ambient_texture.as_deref().and_then(&mut load_tex) {
                     mat.base_color_tex = Some(t);
-                    // Kd multiplies the texture; many exporters leave a grey default there.
                     mat.base_color = [1.0, 1.0, 1.0, 1.0];
                 }
-                if let Some(t) = m.normal_texture.as_deref().and_then(&mut load_tex) {
-                    mat.normal_tex = Some(t);
+            }
+            if let Some(t) = m.normal_texture.as_deref().and_then(&mut load_tex) {
+                mat.normal_tex = Some(t);
+            }
+            if let Some(a) = m.dissolve {
+                if a < 0.999 {
+                    mat.base_color[3] = a.clamp(0.0, 1.0);
+                    mat.alpha_mode = AlphaMode::Blend;
                 }
-                if let Some(a) = m.dissolve {
-                    if a < 0.999 {
-                        mat.base_color[3] = a.clamp(0.0, 1.0);
-                        mat.alpha_mode = AlphaMode::Blend;
-                    }
-                }
-                mat
-            })
-            .collect();
-    }
+            }
+            mat
+        })
+        .collect();
     scene.textures = Arc::new(textures);
     for model in models {
         let me = &model.mesh;
@@ -130,7 +169,18 @@ pub fn load_obj(path: &Path) -> Result<Scene> {
             md.compute_normals();
         }
         let mut obj = Object::new(model.name.clone(), md);
-        obj.material = me.material_id.filter(|&i| i < scene.materials.len());
+        // Clamp material_id into range; some files report an id even when the MTL failed to load.
+        obj.material = me
+            .material_id
+            .filter(|&i| i < scene.materials.len())
+            .or_else(|| {
+                // Single-material files often omit usemtl; bind the only material if present.
+                if scene.materials.len() == 1 {
+                    Some(0)
+                } else {
+                    None
+                }
+            });
         scene.objects.push(obj);
     }
     Ok(scene)

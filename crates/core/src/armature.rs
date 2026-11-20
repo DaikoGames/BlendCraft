@@ -20,6 +20,22 @@ pub struct Bone {
     /// Pose scale in bone-local axes. Defaults to identity for older project files.
     #[serde(default = "default_pose_scale")]
     pub pose_scale: [f32; 3],
+    /// Full rest orientation in armature space (xyzw). When set (e.g. from glTF joint
+    /// matrices), this is used instead of the head→tail approximation so animation
+    /// rotation deltas land in the correct local frame including twist.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rest_orientation: Option<[f32; 4]>,
+    /// Absolute local TRS of the joint relative to its parent node at bind (glTF).
+    /// When set, `pose_loc` / `pose_rot` / `pose_scale` are treated as **absolute
+    /// local** values (not deltas) and hierarchical pose is composed like the
+    /// source file: `parent * local(pose)`. This avoids the parent-space vs
+    /// armature-space mixup that made root / hip motion drift along +Y.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rest_local_loc: Option<[f32; 3]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rest_local_rot: Option<[f32; 4]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rest_local_scale: Option<[f32; 3]>,
 }
 
 fn default_pose_scale() -> [f32; 3] {
@@ -36,6 +52,34 @@ impl Bone {
             pose_rot: [0.0, 0.0, 0.0, 1.0],
             pose_loc: [0.0, 0.0, 0.0],
             pose_scale: [1.0, 1.0, 1.0],
+            rest_orientation: None,
+            rest_local_loc: None,
+            rest_local_rot: None,
+            rest_local_scale: None,
+        }
+    }
+
+    /// True when this bone uses absolute local TRS pose values (glTF import).
+    pub fn uses_absolute_local_pose(&self) -> bool {
+        self.rest_local_rot.is_some() || self.rest_local_loc.is_some()
+    }
+
+    /// Reset pose to bind: absolute-local bones go back to rest local TRS; others to delta identity.
+    pub fn reset_pose_to_rest(&mut self) {
+        if let Some(t) = self.rest_local_loc {
+            self.pose_loc = t;
+        } else {
+            self.pose_loc = [0.0, 0.0, 0.0];
+        }
+        if let Some(r) = self.rest_local_rot {
+            self.pose_rot = r;
+        } else {
+            self.pose_rot = [0.0, 0.0, 0.0, 1.0];
+        }
+        if let Some(s) = self.rest_local_scale {
+            self.pose_scale = s;
+        } else {
+            self.pose_scale = [1.0, 1.0, 1.0];
         }
     }
 
@@ -60,6 +104,20 @@ impl Bone {
 
     pub fn pose_scale_v(&self) -> Vec3 {
         Vec3::from(self.pose_scale)
+    }
+
+    /// Rest orientation in armature space. Prefer the stored full joint orientation
+    /// (preserves twist from the source file); fall back to aligning +Y with head→tail.
+    pub fn rest_rot_q(&self) -> Quat {
+        if let Some(r) = self.rest_orientation {
+            return Quat::from_xyzw(r[0], r[1], r[2], r[3]).normalize();
+        }
+        let dir = self.direction();
+        if dir.length_squared() < 1e-10 {
+            Quat::IDENTITY
+        } else {
+            Quat::from_rotation_arc(Vec3::Y, dir)
+        }
     }
 
     pub fn length(&self) -> f32 {
@@ -243,9 +301,7 @@ impl ArmatureData {
         }
         for i in indices {
             if let Some(b) = self.bones.get_mut(i as usize) {
-                b.pose_rot = [0.0, 0.0, 0.0, 1.0];
-                b.pose_loc = [0.0, 0.0, 0.0];
-                b.pose_scale = [1.0, 1.0, 1.0];
+                b.reset_pose_to_rest();
             }
         }
     }
@@ -317,28 +373,15 @@ impl ArmatureData {
     }
 
     /// World-space (armature-local) rest matrix for bone: maps bone-local to armature space.
-    /// Bone local: origin at head, +Y toward tail.
-    pub(crate) fn rest_matrix(bone: &Bone) -> Mat4 {
-        let head = bone.head_v();
-        let dir = bone.direction();
-        let rot = if dir.length_squared() < 1e-10 {
-            Quat::IDENTITY
-        } else {
-            Quat::from_rotation_arc(Vec3::Y, dir)
-        };
-        Mat4::from_rotation_translation(rot, head)
+    /// Bone local: origin at head, +Y toward tail (or full stored rest orientation).
+    pub fn rest_matrix(bone: &Bone) -> Mat4 {
+        Mat4::from_rotation_translation(bone.rest_rot_q(), bone.head_v())
     }
 
     /// Pose matrix for a single bone (ignoring hierarchy for delta — hierarchy applied via heads).
     fn pose_matrix(bone: &Bone) -> Mat4 {
         let head = bone.head_v() + bone.pose_loc_v();
-        let dir = bone.direction();
-        let rest_rot = if dir.length_squared() < 1e-10 {
-            Quat::IDENTITY
-        } else {
-            Quat::from_rotation_arc(Vec3::Y, dir)
-        };
-        let rot = rest_rot * bone.pose_rot_q();
+        let rot = bone.rest_rot_q() * bone.pose_rot_q();
         Mat4::from_scale_rotation_translation(bone.pose_scale_v(), rot, head)
     }
 
@@ -368,19 +411,49 @@ impl ArmatureData {
         for &i in &order {
             let b = &self.bones[i];
             rest_world[i] = Self::rest_matrix(b);
-            let dir = b.direction();
-            let rest_rot = if dir.length_squared() < 1e-10 {
-                Quat::IDENTITY
-            } else {
-                Quat::from_rotation_arc(Vec3::Y, dir)
-            };
+            let rest_rot = b.rest_rot_q();
 
+            // glTF path: pose_* are absolute local TRS relative to the parent joint
+            // node. Compose exactly like the file: pose_world = parent * local.
+            // Root is converted from parent-node space into armature space via the
+            // bind matrix so hip/root translation no longer drifts along +Y.
+            if b.uses_absolute_local_pose() {
+                let local = Mat4::from_scale_rotation_translation(
+                    b.pose_scale_v(),
+                    b.pose_rot_q(),
+                    b.pose_loc_v(),
+                );
+                if let Some(p) = b.parent {
+                    let pi = p as usize;
+                    pose_world[i] = pose_world[pi] * local;
+                } else {
+                    let rest_local = Mat4::from_scale_rotation_translation(
+                        Vec3::from(b.rest_local_scale.unwrap_or([1.0, 1.0, 1.0])),
+                        Quat::from_xyzw(
+                            b.rest_local_rot.unwrap_or([0.0, 0.0, 0.0, 1.0])[0],
+                            b.rest_local_rot.unwrap_or([0.0, 0.0, 0.0, 1.0])[1],
+                            b.rest_local_rot.unwrap_or([0.0, 0.0, 0.0, 1.0])[2],
+                            b.rest_local_rot.unwrap_or([0.0, 0.0, 0.0, 1.0])[3],
+                        )
+                        .normalize(),
+                        Vec3::from(b.rest_local_loc.unwrap_or([0.0, 0.0, 0.0])),
+                    );
+                    // rest_world[root] * inv(rest_local) * local_anim
+                    // maps parent-local animation into armature space.
+                    pose_world[i] = rest_world[i] * rest_local.inverse() * local;
+                }
+                continue;
+            }
+
+            // Authored Blender-style bones: pose_* are deltas from rest.
             if let Some(p) = b.parent {
                 let pi = p as usize;
                 let parent = &self.bones[pi];
                 let parent_len = parent.length().max(1e-5);
-                let at_parent_tip = b.head_v().distance(parent.tail_v()) <= CONNECT_EPS.max(parent_len * 1e-4);
-                let at_parent_head = b.head_v().distance(parent.head_v()) <= CONNECT_EPS.max(parent_len * 1e-4);
+                let at_parent_tip =
+                    b.head_v().distance(parent.tail_v()) <= CONNECT_EPS.max(parent_len * 1e-4);
+                let at_parent_head =
+                    b.head_v().distance(parent.head_v()) <= CONNECT_EPS.max(parent_len * 1e-4);
 
                 let (_, parent_pose_rot, _) = pose_world[pi].to_scale_rotation_translation();
                 let (_, parent_rest_rot, _) = rest_world[pi].to_scale_rotation_translation();
@@ -389,16 +462,14 @@ impl ArmatureData {
                 let (ps, _, _) = pose_world[pi].to_scale_rotation_translation();
                 let scale = ps * b.pose_scale_v();
 
-                let posed_head = if at_parent_tip {
-                    // Always glued to parent tip — this is Blender's connected joint
-                    pose_world[pi].transform_point3(Vec3::new(0.0, parent_len, 0.0))
+                let parent_delta = pose_world[pi] * rest_world[pi].inverse();
+                let mut posed_head =
+                    parent_delta.transform_point3(b.head_v()) + parent_pose_rot * b.pose_loc_v();
+                if at_parent_tip {
+                    posed_head = pose_world[pi].transform_point3(Vec3::new(0.0, parent_len, 0.0));
                 } else if at_parent_head {
-                    pose_world[pi].transform_point3(Vec3::ZERO)
-                } else {
-                    // Offset child: inherit parent transform, then apply pose_loc in armature space
-                    let parent_delta = pose_world[pi] * rest_world[pi].inverse();
-                    parent_delta.transform_point3(b.head_v()) + b.pose_loc_v()
-                };
+                    posed_head = pose_world[pi].transform_point3(Vec3::ZERO);
+                }
 
                 pose_world[i] = Mat4::from_scale_rotation_translation(scale, rot, posed_head);
             } else {

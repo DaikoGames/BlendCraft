@@ -4234,9 +4234,9 @@ impl App {
             let tracks = bone_tracks.get(&armature_id);
             if let ObjectKind::Armature(armature) = &mut self.doc.scene.objects[idx].kind {
                 for (bone_index, bone) in armature.bones.iter_mut().enumerate() {
-                    bone.pose_loc = [0.0, 0.0, 0.0];
-                    bone.pose_rot = [0.0, 0.0, 0.0, 1.0];
-                    bone.pose_scale = [1.0, 1.0, 1.0];
+                    // Absolute-local (glTF) bones restore bind local TRS so unkeyed
+                    // channels stay at rest; delta bones still reset to identity.
+                    bone.reset_pose_to_rest();
                     if let Some(track) = tracks.and_then(|tracks| tracks.get(&(bone_index as u32))) {
                         let (loc, rot, scale) = track.eval(frame);
                         if let Some(v) = loc { bone.pose_loc = v.to_array(); }
