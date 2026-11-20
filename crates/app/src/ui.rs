@@ -5196,6 +5196,31 @@ fn draw_timeline_transport(ui: &mut egui::Ui, doc: &mut Document, actions: &mut 
             anim.playing = false;
             actions.push(Action::AnimScrub);
         }
+        if !anim.clips.is_empty() {
+            ui.separator();
+            let mut active = anim.active_clip;
+            let selected_name = active
+                .and_then(|i| anim.clips.get(i))
+                .map(|c| c.name.as_str())
+                .unwrap_or("Scene Range");
+            egui::ComboBox::from_id_salt("timeline_active_animation_clip")
+                .selected_text(selected_name)
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut active, None, "Scene Range");
+                    for (i, clip) in anim.clips.iter().enumerate() {
+                        ui.selectable_value(&mut active, Some(i), &clip.name);
+                    }
+                });
+            if active != anim.active_clip {
+                if let Some(i) = active {
+                    anim.select_clip(Some(i));
+                } else {
+                    anim.active_clip = None;
+                }
+                actions.push(Action::AnimScrub);
+            }
+        }
+
         ui.separator();
         ui.label("Start");
         let mut fs = anim.frame_start;

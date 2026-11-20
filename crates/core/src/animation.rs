@@ -243,6 +243,14 @@ fn eval_quat(keys: impl Iterator<Item = (i32, Quat)>, frame: f32) -> Option<Quat
     Some(qs[n - 1])
 }
 
+/// Imported or user-created named animation range. Bone/object tracks are stored separately.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AnimationClip {
+    pub name: String,
+    pub frame_start: i32,
+    pub frame_end: i32,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AnimationData {
     pub frame_current: i32,
@@ -251,6 +259,16 @@ pub struct AnimationData {
     pub fps: u32,
     /// object id → keys
     pub objects: HashMap<u64, ObjectAnimation>,
+    /// Named animation actions imported from formats such as glTF.
+    #[serde(default)]
+    pub clips: Vec<AnimationClip>,
+    /// Armature id -> bone index -> animated pose channels.
+    /// Stored separately from object transforms so skeletal animation can be evaluated per frame.
+    #[serde(default)]
+    pub bone_tracks: Vec<HashMap<u64, HashMap<u32, ObjectAnimation>>>,
+    /// Active clip index; None means the scene-wide timeline range.
+    #[serde(default)]
+    pub active_clip: Option<usize>,
     #[serde(default)]
     pub playing: bool,
     #[serde(default)]
@@ -265,6 +283,9 @@ impl Default for AnimationData {
             frame_end: 250,
             fps: 24,
             objects: HashMap::new(),
+            clips: Vec::new(),
+            bone_tracks: Vec::new(),
+            active_clip: None,
             playing: false,
             auto_key: false,
         }
@@ -272,6 +293,16 @@ impl Default for AnimationData {
 }
 
 impl AnimationData {
+    pub fn select_clip(&mut self, index: Option<usize>) {
+        self.active_clip = index.filter(|i| *i < self.clips.len());
+        if let Some(i) = self.active_clip {
+            self.frame_start = self.clips[i].frame_start;
+            self.frame_end = self.clips[i].frame_end.max(self.frame_start);
+            self.set_frame(self.frame_current);
+            self.playing = false;
+        }
+    }
+
     pub fn set_frame(&mut self, f: i32) {
         self.frame_current = f.clamp(self.frame_start, self.frame_end);
     }

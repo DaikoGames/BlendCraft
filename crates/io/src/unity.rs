@@ -5,8 +5,9 @@
 //! `asset` (the raw file) and `asset.meta`. We pull out every embedded model
 //! (`.fbx`, `.obj`, `.glb`) and run it through the regular importers.
 //!
-//! Not supported: Unity-native serialized assets (`.asset`, `.prefab`, `.unity`,
-//! `.mat`), textures that live beside the model, and animation clips.
+//! Textures and `.mtl` files that sit in the package next to a model are found by file name
+//! (FBX / OBJ). Not supported: Unity-native serialized assets (`.asset`, `.prefab`, `.unity`,
+//! `.mat`) and animation clips.
 use anyhow::{bail, Context, Result};
 use flate2::read::GzDecoder;
 use forge_core::Scene;
@@ -104,18 +105,79 @@ fn file_stem(path: &str) -> String {
     file.rsplit_once('.').map(|(s, _)| s).unwrap_or(file).to_string()
 }
 
-/// Load a model whose importer only accepts a path, via a temporary file.
+/// Files other assets can refer to by name (textures, .mtl): lower-case file name -> bytes range.
+type SideFiles = BTreeMap<String, (usize, usize)>;
+
+fn is_side_file(ext: &str) -> bool {
+    matches!(ext, "png" | "jpg" | "jpeg" | "tga" | "bmp" | "mtl")
+}
+
+fn lower_file_name(path: &str) -> String {
+    let norm = path.replace('\\', "/");
+    norm.rsplit('/').next().unwrap_or(&norm).to_ascii_lowercase()
+}
+
+fn bare_name(path: &str) -> String {
+    let norm = path.replace('\\', "/");
+    norm.rsplit('/').next().unwrap_or(&norm).to_string()
+}
+
+fn side_file<'a>(data: &'a [u8], side: &SideFiles, name: &str) -> Option<&'a [u8]> {
+    let (a, b) = *side.get(&lower_file_name(name))?;
+    Some(&data[a..b])
+}
+
+/// Names of the files an OBJ's `mtllib` / an MTL's `map_*` lines refer to.
+fn referenced_names(text: &str, keys: &[&str]) -> Vec<String> {
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        let Some((key, rest)) = line.split_once(char::is_whitespace) else {
+            continue;
+        };
+        if keys.iter().any(|k| key.eq_ignore_ascii_case(k)) {
+            // texture options (-s 1 1 1 ...) precede the name; the name is the last token
+            if let Some(last) = rest.split_whitespace().last() {
+                out.push(last.to_string());
+            }
+        }
+    }
+    out
+}
+
+/// Load a model whose importer only accepts a path, via a temporary folder. Any `.mtl` and
+/// textures the model refers to are copied next to it so the importer finds them.
 fn load_via_temp(
     bytes: &[u8],
     file_name: &str,
+    data: &[u8],
+    side: &SideFiles,
     load: impl FnOnce(&Path) -> Result<Scene>,
 ) -> Result<Scene> {
-    let dir = std::env::temp_dir().join(format!("blendcraft_unity_{}", std::process::id()));
+    static COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("blendcraft_unity_{}_{n}", std::process::id()));
     std::fs::create_dir_all(&dir)?;
     let path = dir.join(file_name);
     std::fs::write(&path, bytes)?;
+    if file_name.ends_with(".obj") {
+        let text = String::from_utf8_lossy(bytes);
+        for mtl in referenced_names(&text, &["mtllib"]) {
+            let Some(mb) = side_file(data, side, &mtl) else {
+                continue;
+            };
+            let _ = std::fs::write(dir.join(bare_name(&mtl)), mb);
+            let mtl_text = String::from_utf8_lossy(mb);
+            let keys = ["map_Kd", "map_Bump", "bump", "map_Ke", "map_d", "norm"];
+            for tex in referenced_names(&mtl_text, &keys) {
+                if let Some(tb) = side_file(data, side, &tex) {
+                    let _ = std::fs::write(dir.join(bare_name(&tex)), tb);
+                }
+            }
+        }
+    }
     let result = load(&path);
-    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_dir_all(&dir);
     result
 }
 
@@ -136,6 +198,16 @@ pub fn load_unitypackage(path: &Path) -> Result<(Vec<(String, Scene)>, Vec<Strin
     }
 
     let entries = index_tar(&data)?;
+    // Textures / .mtl files are separate assets in the package; index them by file name so
+    // models that refer to them by name can find them.
+    let mut side: SideFiles = BTreeMap::new();
+    for entry in entries.values() {
+        if let (Some(pathname), Some(range)) = (&entry.pathname, entry.asset) {
+            if is_side_file(&ext_lower(pathname)) {
+                side.entry(lower_file_name(pathname)).or_insert(range);
+            }
+        }
+    }
     let mut models = Vec::new();
     let mut notes = Vec::new();
     for entry in entries.values() {
@@ -144,9 +216,11 @@ pub fn load_unitypackage(path: &Path) -> Result<(Vec<(String, Scene)>, Vec<Strin
         };
         let bytes = &data[a..b];
         let loaded = match ext_lower(pathname).as_str() {
-            "fbx" => crate::load_fbx_bytes(bytes),
-            "obj" => load_via_temp(bytes, "model.obj", crate::load_obj),
-            "glb" => load_via_temp(bytes, "model.glb", crate::load_gltf),
+            "fbx" => crate::load_fbx_bytes_with(bytes, &|name: &str| {
+                side_file(&data, &side, name).map(|b| b.to_vec())
+            }),
+            "obj" => load_via_temp(bytes, "model.obj", &data, &side, crate::load_obj),
+            "glb" => load_via_temp(bytes, "model.glb", &data, &side, crate::load_gltf),
             _ => continue,
         };
         match loaded {

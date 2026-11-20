@@ -1,3 +1,24 @@
+## Step 2: glTF/GLB skeletal animation import
+
+- Imports glTF animation channels targeting skin joints: translation, rotation and scale.
+- Converts sampled node transforms into pose deltas relative to each joint's imported rest transform.
+- Stores tracks separately per named clip, so choosing another action does not merge or overwrite its keys.
+- Evaluates the active clip during timeline scrubbing and playback, updates armature pose channels, and re-applies skin deformation.
+- Handles the central value samples of glTF CUBICSPLINE output accessors. Tangent-based cubic interpolation and exact STEP interpolation are not yet reproduced; tracks use BlendCraft's existing key interpolation.
+- Fixes scene merging so imported object parents, mesh-to-armature skin links, object animation tracks, and bone tracks are remapped to the new document object IDs instead of being discarded.
+- Scope: glTF/GLB joint animation. FBX animation import/export and skeletal animation export are not part of this step.
+
+
+## Import fixes: textures, hierarchies, bones
+
+- **FBX**: textures are now imported. Embedded images (binary `Video/Content`, ASCII base64) and external files (searched next to the model, in `textures/`, `<name>.fbm/`, case-insensitively, by bare file name) are decoded and wired to base color, normal, emissive and occlusion slots through the `OP` connections. The grey diffuse default no longer darkens a textured material.
+- **FBX**: normals and UVs honour `MappingInformationType` / `ReferenceInformationType` (`ByPolygonVertex`, `ByVertice`, `IndexToDirect`...). Previously UVIndex was read per vertex, which scrambled UVs on almost every file.
+- **FBX**: Model-to-Model parent links are followed, so meshes parented to bones / nulls / armatures land in the right place (parent chain is baked into the object transform). `PreRotation`, `PostRotation` and `RotationOrder` are honoured, Euler order was wrong for multi-axis rotations, Z-up files are converted to Y-up, `UnitScaleFactor` no longer gets overridden by `OriginalUnitScaleFactor`.
+- **FBX**: multi-material meshes get one group per material slot; blend-shape "Shape" geometries are no longer imported as junk meshes; one unreadable node no longer aborts the whole file.
+- **OBJ**: `.mtl` diffuse / normal textures and dissolve are imported.
+- **glTF/GLB**: skinned meshes are posed at bind pose from their joints (meshes under a skeleton), triangle strips/fans are converted, files without a `scene` still load.
+- **.unitypackage**: textures and `.mtl` files stored as separate assets in the package are found by file name for FBX and OBJ models.
+- Images: TGA and BMP are decoded (also for "Image as Plane").
 
 ## X Mirror (butterfly) + Pose bone connections
 

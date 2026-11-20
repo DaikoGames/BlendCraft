@@ -2,9 +2,10 @@
 //! and HDR environment maps.
 use anyhow::{Context, Result};
 use forge_core::{
-    AlphaMode, EnvironmentMap, Material, MeshData, Object, Scene, TextureData, Vertex,
+    AlphaMode, ArmatureData, Bone, EnvironmentMap, Material, MeshData, Object, ObjectKind, Scene, TextureData, Vertex,
 };
-use glam::Mat4;
+use glam::{Mat4, Vec3};
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -20,11 +21,103 @@ pub use alembic::{
     ImportedObject,
 };
 pub use export::{export_glb, export_obj};
-pub use fbx::{export_fbx, load_fbx, load_fbx_bytes};
+pub use fbx::{export_fbx, load_fbx, load_fbx_bytes, load_fbx_bytes_with};
 pub use obj::load_obj;
 pub use usd::{build_usda_string, export_usda};
 #[cfg(not(target_arch = "wasm32"))]
 pub use unity::load_unitypackage;
+
+
+/// Decode any supported image file (PNG/JPEG/TGA/BMP/...) held in memory into RGBA8.
+/// `name_hint` (a file name or path) is only used to pick a decoder for formats without a
+/// magic number (TGA) and to name the texture.
+pub(crate) fn decode_image_bytes(bytes: &[u8], name_hint: &str) -> Option<TextureData> {
+    let lower = name_hint.to_ascii_lowercase();
+    let img = match image::load_from_memory(bytes) {
+        Ok(i) => i,
+        Err(first) => {
+            let fmt = if lower.ends_with(".tga") {
+                Some(image::ImageFormat::Tga)
+            } else if lower.ends_with(".bmp") {
+                Some(image::ImageFormat::Bmp)
+            } else {
+                None
+            };
+            match fmt.and_then(|f| image::load_from_memory_with_format(bytes, f).ok()) {
+                Some(i) => i,
+                None => {
+                    eprintln!("texture '{name_hint}' could not be decoded: {first}");
+                    return None;
+                }
+            }
+        }
+    };
+    let rgba = img.to_rgba8();
+    let (width, height) = rgba.dimensions();
+    let norm = name_hint.replace('\\', "/");
+    let file = norm.rsplit('/').next().unwrap_or(&norm);
+    let name = file
+        .rsplit_once('.')
+        .map(|(s, _)| s)
+        .unwrap_or(file)
+        .to_string();
+    Some(TextureData {
+        name: if name.is_empty() { "Texture".into() } else { name },
+        width,
+        height,
+        rgba8: rgba.into_raw(),
+    })
+}
+
+/// Look for a texture file referenced by a model. Model formats store the path of the
+/// artist's machine (often absolute Windows paths), so besides the path as written we also
+/// try the bare file name next to the model and in the usual texture folders.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn find_texture_file(dir: &Path, model_stem: &str, name: &str) -> Option<Vec<u8>> {
+    use std::path::PathBuf;
+    let norm = name.trim().replace('\\', "/");
+    let file = norm.rsplit('/').next().unwrap_or(&norm).to_string();
+    if file.is_empty() {
+        return None;
+    }
+    let mut tries: Vec<PathBuf> = Vec::new();
+    let p = Path::new(&norm);
+    if p.is_absolute() {
+        tries.push(p.to_path_buf());
+    }
+    tries.push(dir.join(&norm));
+    tries.push(dir.join(&file));
+    if !model_stem.is_empty() {
+        tries.push(dir.join(format!("{model_stem}.fbm")).join(&file));
+    }
+    for sub in [
+        "textures", "Textures", "texture", "Texture", "tex", "Tex", "maps", "Maps", "images",
+        "Images", "materials", "Materials",
+    ] {
+        tries.push(dir.join(sub).join(&file));
+        if let Some(parent) = dir.parent() {
+            tries.push(parent.join(sub).join(&file));
+        }
+    }
+    for t in tries {
+        if t.is_file() {
+            if let Ok(b) = std::fs::read(&t) {
+                return Some(b);
+            }
+        }
+    }
+    // Last resort: case-insensitive match in the model's folder (Windows-authored files).
+    if let Ok(rd) = std::fs::read_dir(dir) {
+        for e in rd.flatten() {
+            if e.file_name().to_string_lossy().eq_ignore_ascii_case(&file) {
+                if let Ok(b) = std::fs::read(e.path()) {
+                    return Some(b);
+                }
+            }
+        }
+    }
+    None
+}
 
 #[cfg(not(target_arch = "wasm32"))]
 pub fn load_gltf(path: &Path) -> Result<Scene> {
@@ -38,13 +131,181 @@ pub fn load_gltf(path: &Path) -> Result<Scene> {
             .map(|(img, data)| convert_image(img.name().unwrap_or("Image"), data))
             .collect::<Vec<_>>(),
     );
-    let gscene = doc
-        .default_scene()
-        .or_else(|| doc.scenes().next())
-        .context("file has no scene")?;
-    for node in gscene.nodes() {
-        visit(&node, Mat4::IDENTITY, &buffers, &mut scene);
+    // Roots of the default scene; files without any scene fall back to every parentless node.
+    let roots: Vec<gltf::Node> = match doc.default_scene().or_else(|| doc.scenes().next()) {
+        Some(s) => s.nodes().collect(),
+        None => {
+            let mut is_child = vec![false; doc.nodes().count()];
+            for n in doc.nodes() {
+                for c in n.children() {
+                    is_child[c.index()] = true;
+                }
+            }
+            doc.nodes().filter(|n| !is_child[n.index()]).collect()
+        }
+    };
+    if roots.is_empty() {
+        anyhow::bail!("file has no scene");
     }
+    // World matrix of every node: skinned meshes are posed by their joints' world matrices.
+    let mut worlds: HashMap<usize, Mat4> = HashMap::new();
+    for node in &roots {
+        collect_worlds(node, Mat4::IDENTITY, &mut worlds);
+    }
+    // Preserve glTF skins as editable BlendCraft armature objects. The previous
+    // importer only baked skin deformation into vertex positions, which discarded
+    // the source skeleton entirely. Joint node transforms are converted into
+    // armature-local rest positions; joint-parent relationships become bones.
+    // gltf::Node does not expose a parent() accessor. Build the reverse
+    // hierarchy once from child links so joints can resolve their parent.
+    let mut parent_by_node: HashMap<usize, usize> = HashMap::new();
+    for parent in doc.nodes() {
+        for child in parent.children() {
+            parent_by_node.insert(child.index(), parent.index());
+        }
+    }
+    let mut armature_ids: HashMap<usize, u64> = HashMap::new();
+    let mut node_to_bone: HashMap<usize, (u64, u32)> = HashMap::new();
+    let mut node_rest_trs: HashMap<usize, (Vec3, glam::Quat, Vec3)> = HashMap::new();
+    for skin in doc.skins() {
+        let joints: Vec<gltf::Node> = skin.joints().collect();
+        if joints.is_empty() { continue; }
+        let joint_to_bone: HashMap<usize, u32> = joints.iter().enumerate()
+            .map(|(i, joint)| (joint.index(), i as u32)).collect();
+        // Use the glTF skeleton root as the armature object's transform and
+        // store every bone in armature-local space. Previously joint world-space
+        // positions were stored as bone-local coordinates while the armature
+        // object stayed at identity, causing an offset/double-transform at rest.
+        let armature_world = skin.skeleton()
+            .and_then(|root| worlds.get(&root.index()).copied())
+            .or_else(|| joints.iter().find(|joint| {
+                parent_by_node.get(&joint.index())
+                    .is_none_or(|parent_index| !joint_to_bone.contains_key(parent_index))
+            }).and_then(|root| worlds.get(&root.index()).copied()))
+            .unwrap_or(Mat4::IDENTITY);
+        let world_to_armature = armature_world.inverse();
+        let mut arm = ArmatureData::default();
+        arm.bones.clear();
+        for joint in &joints {
+            let joint_world = worlds.get(&joint.index()).copied().unwrap_or(Mat4::IDENTITY);
+            let joint_local = world_to_armature * joint_world;
+            let head = joint_local.transform_point3(Vec3::ZERO);
+            let mut tail = head + Vec3::Y * 0.1;
+            // Prefer a child joint as the bone tail; otherwise use a modest
+            // display length along the joint's local +Y axis.
+            if let Some(child) = joint.children().find(|c| joint_to_bone.contains_key(&c.index())) {
+                let child_world = worlds.get(&child.index()).copied().unwrap_or(Mat4::IDENTITY);
+                tail = (world_to_armature * child_world).transform_point3(Vec3::ZERO);
+            } else if let Some(parent_index) = parent_by_node.get(&joint.index()) {
+                let parent_world = worlds.get(parent_index).copied().unwrap_or(Mat4::IDENTITY);
+                let p = (world_to_armature * parent_world).transform_point3(Vec3::ZERO);
+                let direction = (head - p).normalize_or_zero();
+                if direction.length_squared() > 1e-6 { tail = head + direction * 0.1; }
+            }
+            let parent_bone = parent_by_node.get(&joint.index())
+                .and_then(|parent_index| joint_to_bone.get(parent_index).copied());
+            let mut bone = Bone::new(joint.name().unwrap_or("Joint"), head, tail);
+            bone.parent = parent_bone;
+            arm.bones.push(bone);
+        }
+        arm.active = Some(0);
+        arm.selected.clear();
+        arm.selected.insert(0);
+        let mut arm_obj = Object::from_matrix(
+            skin.name().unwrap_or("Armature"), armature_world, Arc::new(MeshData::default())
+        );
+        arm_obj.id = scene.alloc_id();
+        arm_obj.kind = ObjectKind::Armature(arm);
+        armature_ids.insert(skin.index(), arm_obj.id);
+        for (bone_index, joint) in joints.iter().enumerate() {
+            node_to_bone.insert(joint.index(), (arm_obj.id, bone_index as u32));
+            let (t, r, scale) = joint.transform().decomposed();
+            node_rest_trs.insert(joint.index(), (Vec3::from_array(t), glam::Quat::from_array(r).normalize(), Vec3::from_array(scale)));
+        }
+        scene.objects.push(arm_obj);
+    }
+    for node in &roots {
+        visit(&node, Mat4::IDENTITY, &buffers, &worlds, &armature_ids, &mut scene);
+    }
+    // Import glTF animation channels into per-armature bone tracks. glTF node
+    // animation targets the joint node; node_to_bone maps that node to the
+    // corresponding editable BlendCraft bone.
+    for (animation_index, animation) in doc.animations().enumerate() {
+        let mut min_time = f32::INFINITY;
+        let mut max_time = f32::NEG_INFINITY;
+        let mut channel_data = Vec::new();
+        for channel in animation.channels() {
+            let reader = channel.reader(|buffer| Some(&buffers[buffer.index()].0[..]));
+            let Some(times) = reader.read_inputs() else { continue };
+            let times: Vec<f32> = times.collect();
+            if times.is_empty() { continue; }
+            for &time in &times {
+                min_time = min_time.min(time);
+                max_time = max_time.max(time);
+            }
+            let Some(outputs) = reader.read_outputs() else { continue };
+            channel_data.push((channel.target().node().index(), channel.target().property(), channel.sampler().interpolation(), times, outputs));
+        }
+        if !min_time.is_finite() { min_time = 0.0; }
+        if !max_time.is_finite() { max_time = min_time; }
+        let fps = scene.animation.fps.max(1) as f32;
+        let frame_start = 1;
+        let frame_end = ((max_time - min_time).max(0.0) * fps).ceil() as i32 + frame_start;
+        scene.animation.clips.push(forge_core::AnimationClip {
+            name: animation.name().map(str::to_owned).unwrap_or_else(|| format!("Animation {}", animation_index + 1)),
+            frame_start,
+            frame_end: frame_end.max(frame_start),
+        });
+
+        let mut clip_bone_tracks: HashMap<u64, HashMap<u32, forge_core::ObjectAnimation>> = HashMap::new();
+        for (node_index, property, interpolation, times, outputs) in channel_data {
+            let Some(&(armature_id, bone_index)) = node_to_bone.get(&node_index) else { continue };
+            let track = clip_bone_tracks.entry(armature_id).or_default()
+                .entry(bone_index).or_default();
+            let to_frame = |time: f32| frame_start + ((time - min_time) * fps).round() as i32;
+            match (property, outputs) {
+                (gltf::animation::Property::Translation, gltf::animation::util::ReadOutputs::Translations(values)) => {
+                    let rest = node_rest_trs.get(&node_index).map(|v| v.0).unwrap_or(Vec3::ZERO);
+                    let values: Vec<[f32; 3]> = values.collect();
+                    let values: Vec<[f32; 3]> = if interpolation == gltf::animation::Interpolation::CubicSpline {
+                        values.chunks_exact(3).map(|triple| triple[1]).collect()
+                    } else { values };
+                    for (time, value) in times.into_iter().zip(values) {
+                        track.insert_or_merge(to_frame(time), Some(Vec3::from_array(value) - rest), None, None);
+                    }
+                }
+                (gltf::animation::Property::Rotation, gltf::animation::util::ReadOutputs::Rotations(values)) => {
+                    let rest = node_rest_trs.get(&node_index).map(|v| v.1).unwrap_or(glam::Quat::IDENTITY);
+                    let values: Vec<[f32; 4]> = values.into_f32().collect();
+                    let values: Vec<[f32; 4]> = if interpolation == gltf::animation::Interpolation::CubicSpline {
+                        values.chunks_exact(3).map(|triple| triple[1]).collect()
+                    } else { values };
+                    for (time, value) in times.into_iter().zip(values) {
+                        let q = (rest.inverse() * glam::Quat::from_array(value).normalize()).normalize();
+                        track.insert_or_merge(to_frame(time), None, Some(q), None);
+                    }
+                }
+                (gltf::animation::Property::Scale, gltf::animation::util::ReadOutputs::Scales(values)) => {
+                    let rest = node_rest_trs.get(&node_index).map(|v| v.2).unwrap_or(Vec3::ONE);
+                    let values: Vec<[f32; 3]> = values.collect();
+                    let values: Vec<[f32; 3]> = if interpolation == gltf::animation::Interpolation::CubicSpline {
+                        values.chunks_exact(3).map(|triple| triple[1]).collect()
+                    } else { values };
+                    for (time, value) in times.into_iter().zip(values) {
+                        let value = Vec3::from_array(value);
+                        let delta = Vec3::new(value.x / rest.x.max(1e-8), value.y / rest.y.max(1e-8), value.z / rest.z.max(1e-8));
+                        track.insert_or_merge(to_frame(time), None, None, Some(delta));
+                    }
+                }
+                _ => {}
+            }
+            track.sort();
+        }
+        // Keep one track collection per clip so actions never overwrite one another.
+        scene.animation.bone_tracks.push(clip_bone_tracks);
+    }
+    if !scene.animation.clips.is_empty() { scene.animation.select_clip(Some(0)); }
+    scene.fix_ids();
     Ok(scene)
 }
 
@@ -183,25 +444,90 @@ fn convert_image(name: &str, d: &gltf::image::Data) -> TextureData {
     }
 }
 
-fn visit(node: &gltf::Node, parent: Mat4, buffers: &[gltf::buffer::Data], scene: &mut Scene) {
+fn collect_worlds(node: &gltf::Node, parent: Mat4, out: &mut HashMap<usize, Mat4>) {
+    let world = parent * Mat4::from_cols_array_2d(&node.transform().matrix());
+    out.insert(node.index(), world);
+    for child in node.children() {
+        collect_worlds(&child, world, out);
+    }
+}
+
+/// Triangle list from a primitive's index list for any triangle topology.
+fn triangle_indices(mode: gltf::mesh::Mode, idx: Vec<u32>) -> Option<Vec<u32>> {
+    use gltf::mesh::Mode;
+    match mode {
+        Mode::Triangles => Some(idx),
+        Mode::TriangleStrip => {
+            let mut out = Vec::new();
+            for i in 2..idx.len() {
+                if i % 2 == 0 {
+                    out.extend_from_slice(&[idx[i - 2], idx[i - 1], idx[i]]);
+                } else {
+                    out.extend_from_slice(&[idx[i - 1], idx[i - 2], idx[i]]);
+                }
+            }
+            Some(out)
+        }
+        Mode::TriangleFan => {
+            let mut out = Vec::new();
+            for i in 2..idx.len() {
+                out.extend_from_slice(&[idx[0], idx[i - 1], idx[i]]);
+            }
+            Some(out)
+        }
+        _ => None,
+    }
+}
+
+fn visit(
+    node: &gltf::Node,
+    parent: Mat4,
+    buffers: &[gltf::buffer::Data],
+    worlds: &HashMap<usize, Mat4>,
+    armature_ids: &HashMap<usize, u64>,
+    scene: &mut Scene,
+) {
     let world = parent * Mat4::from_cols_array_2d(&node.transform().matrix());
     if let Some(mesh) = node.mesh() {
+        // Keep glTF bind-pose geometry and its original skin weights. Baking the
+        // current pose here destroys editability and makes round-trip export impossible.
+        let skin_armature_id = node.skin().and_then(|skin| armature_ids.get(&skin.index()).copied());
         for (i, prim) in mesh.primitives().enumerate() {
-            if prim.mode() != gltf::mesh::Mode::Triangles {
-                continue;
-            }
             let reader = prim.reader(|b| Some(&buffers[b.index()].0[..]));
             let Some(pos) = reader.read_positions() else {
                 continue;
             };
-            let positions: Vec<[f32; 3]> = pos.collect();
-            let normals: Option<Vec<[f32; 3]>> = reader.read_normals().map(|n| n.collect());
+            let mut positions: Vec<[f32; 3]> = pos.collect();
+            let mut normals: Option<Vec<[f32; 3]>> = reader.read_normals().map(|n| n.collect());
             let uvs: Option<Vec<[f32; 2]>> =
                 reader.read_tex_coords(0).map(|t| t.into_f32().collect());
-            let indices: Vec<u32> = match reader.read_indices() {
+            let raw_indices: Vec<u32> = match reader.read_indices() {
                 Some(idx) => idx.into_u32().collect(),
                 None => (0..positions.len() as u32).collect(),
             };
+            let Some(indices) = triangle_indices(prim.mode(), raw_indices) else {
+                continue; // points / lines
+            };
+            // JOINTS_n and WEIGHTS_n are vertex attributes on each primitive,
+            // not properties of gltf::Skin. Read them from the mesh primitive reader.
+            let skin_binding = if let Some(armature_id) = skin_armature_id {
+                match (reader.read_joints(0), reader.read_weights(0)) {
+                    (Some(joints), Some(weights)) => {
+                        let joints: Vec<[u16; 4]> = joints.into_u16().collect();
+                        let weights: Vec<[f32; 4]> = weights.into_f32().collect();
+                        if joints.len() == positions.len() && weights.len() == positions.len() {
+                            Some(forge_core::SkinBinding {
+                                armature_id,
+                                joints,
+                                weights,
+                                rest_positions: positions.clone(),
+                                rest_normals: normals.clone().unwrap_or_else(|| vec![[0.0, 1.0, 0.0]; positions.len()]),
+                            })
+                        } else { None }
+                    }
+                    _ => None,
+                }
+            } else { None };
             let vertices = positions
                 .iter()
                 .enumerate()
@@ -226,13 +552,17 @@ fn visit(node: &gltf::Node, parent: Mat4, buffers: &[gltf::buffer::Data], scene:
             } else {
                 md.name.clone()
             };
-            let mut obj = Object::from_matrix(name, world, Arc::new(md));
+            // glTF skinned vertex positions are in mesh bind space; their skin
+            // is evaluated relative to joint transforms, not baked into vertices.
+            let obj_world = if skin_binding.is_some() { Mat4::IDENTITY } else { world };
+            let mut obj = Object::from_matrix(name, obj_world, Arc::new(md));
             obj.material = prim.material().index();
+            obj.skin = skin_binding;
             scene.objects.push(obj);
         }
     }
     for child in node.children() {
-        visit(&child, world, buffers, scene);
+        visit(&child, world, buffers, worlds, armature_ids, scene);
     }
 }
 

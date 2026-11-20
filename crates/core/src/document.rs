@@ -587,18 +587,58 @@ impl Document {
             m.offset_textures(tex_off);
             self.scene.materials.push(m);
         }
-        let mut new_ids = Vec::new();
+        // Allocate all new object ids first, then remap hierarchy and skin links.
+        // Imported armatures, meshes and their animation tracks must retain their
+        // relationships when merged into an existing document.
+        let mut id_map: HashMap<u64, u64> = HashMap::new();
+        let mut imported_objects = Vec::with_capacity(other.objects.len());
         for mut o in other.objects {
+            let old_id = o.id;
             o.material = o.material.map(|i| i + mat_off);
             for g in Arc::make_mut(&mut o.mesh).groups.iter_mut() {
                 g.material = g.material.map(|i| i + mat_off);
             }
             o.name = self.unique_name(&o.name);
             o.id = self.scene.alloc_id();
-            o.parent = None;
+            id_map.insert(old_id, o.id);
             o.collection = self.active_collection;
+            imported_objects.push(o);
+        }
+        let mut new_ids = Vec::with_capacity(imported_objects.len());
+        for mut o in imported_objects {
+            o.parent = o.parent.and_then(|parent| id_map.get(&parent).copied());
+            if let Some(skin) = o.skin.as_mut() {
+                if let Some(new_armature_id) = id_map.get(&skin.armature_id) {
+                    skin.armature_id = *new_armature_id;
+                }
+            }
             new_ids.push(o.id);
             self.scene.objects.push(o);
+        }
+
+        // Merge object animation and named skeletal actions, remapping armature
+        // and object ids to the ids assigned in this document.
+        for (old_id, animation) in other.animation.objects {
+            if let Some(&new_id) = id_map.get(&old_id) {
+                self.scene.animation.objects.insert(new_id, animation);
+            }
+        }
+        let clip_offset = self.scene.animation.clips.len();
+        self.scene.animation.clips.extend(other.animation.clips);
+        for old_tracks in other.animation.bone_tracks {
+            let mut remapped = HashMap::new();
+            for (old_armature_id, tracks) in old_tracks {
+                if let Some(&new_armature_id) = id_map.get(&old_armature_id) {
+                    remapped.insert(new_armature_id, tracks);
+                }
+            }
+            self.scene.animation.bone_tracks.push(remapped);
+        }
+        if let Some(active) = other.animation.active_clip {
+            let imported_clip_count = self.scene.animation.clips.len().saturating_sub(clip_offset);
+            if active < imported_clip_count {
+                self.scene.animation.select_clip(Some(clip_offset + active));
+            }
         }
         self.selection = new_ids.iter().copied().collect();
         self.active = new_ids.last().copied();

@@ -28,7 +28,7 @@ pub mod simulation;
 pub mod shader_graph;
 pub mod uv;
 
-pub use animation::{AnimationData, ObjectAnimation, TransformKey};
+pub use animation::{AnimationClip, AnimationData, ObjectAnimation, TransformKey};
 pub use armature::{ArmatureData, Bone, SkinBinding};
 pub use camera::{FixedView, OrbitCamera};
 pub use cloth::{ClothBaker, ClothPin, FabricPreset, FabricType};

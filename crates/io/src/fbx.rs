@@ -5,10 +5,14 @@
 //!   Model nodes, Geometry, Connections (OO)
 //! - Export: same subset as static triangle meshes + Phong materials
 use anyhow::{bail, Context, Result};
-use forge_core::{Material, MeshData, Object, ObjectKind, Scene, Vertex};
+use forge_core::{Material, MeshData, MeshGroup, Object, ObjectKind, Scene, TextureData, Vertex};
 use glam::{Mat4, Quat, Vec3};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
+use std::sync::Arc;
+
+/// Looks up an external texture by the path/file name stored in the FBX and returns its bytes.
+type TexResolver<'a> = &'a dyn Fn(&str) -> Option<Vec<u8>>;
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -17,7 +21,16 @@ use std::path::Path;
 #[cfg(not(target_arch = "wasm32"))]
 pub fn load_fbx(path: &Path) -> Result<Scene> {
     let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
-    load_fbx_bytes(&bytes)
+    // External textures are searched next to the file (and in the usual texture folders).
+    let dir = path.parent().map(|p| p.to_path_buf()).unwrap_or_default();
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_string();
+    load_fbx_bytes_with(&bytes, &move |name: &str| {
+        crate::find_texture_file(&dir, &stem, name)
+    })
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -28,18 +41,30 @@ pub fn load_fbx(_path: &Path) -> Result<Scene> {
 /// Parse ASCII FBX text into a BlendCraft scene.
 pub fn load_fbx_str(text: &str) -> Result<Scene> {
     let doc = parse_ascii(text)?;
-    convert_doc(&doc)
+    convert_doc(&doc, &|_| None)
 }
 
-/// Load FBX from bytes — auto-detects binary vs ASCII. Fully local, no external crates.
+/// Load FBX from bytes — auto-detects binary vs ASCII. Only textures embedded in the file
+/// are available; use [`load_fbx_bytes_with`] to also resolve external texture files.
 pub fn load_fbx_bytes(bytes: &[u8]) -> Result<Scene> {
+    load_fbx_bytes_with(bytes, &|_| None)
+}
+
+/// Like [`load_fbx_bytes`], with a callback that returns the bytes of an external texture
+/// file given the path stored in the FBX (it is called with the relative name, the full
+/// name and the bare file name).
+pub fn load_fbx_bytes_with(
+    bytes: &[u8],
+    resolver: &dyn Fn(&str) -> Option<Vec<u8>>,
+) -> Result<Scene> {
     if is_binary_fbx(bytes) {
         let doc = parse_binary(bytes)?;
-        return convert_doc(&doc);
+        return convert_doc(&doc, resolver);
     }
     let text = std::str::from_utf8(bytes)
         .context("FBX is not valid UTF-8 (and not a binary FBX header)")?;
-    load_fbx_str(text)
+    let doc = parse_ascii(text)?;
+    convert_doc(&doc, resolver)
 }
 
 fn is_binary_fbx(bytes: &[u8]) -> bool {
@@ -80,8 +105,15 @@ struct FbxDoc {
     models: BTreeMap<i64, Model>,
     /// id -> material
     materials: BTreeMap<i64, Mat>,
-    /// connections: (child_id, parent_id) for OO links
-    connections: Vec<(i64, i64)>,
+    /// id -> texture node
+    textures: BTreeMap<i64, Tex>,
+    /// id -> video (image) node; may carry the embedded image bytes
+    videos: BTreeMap<i64, Video>,
+    /// all connections (OO object links and OP property links)
+    connections: Vec<Conn>,
+    /// GlobalSettings UpAxis (0 = X, 1 = Y, 2 = Z) and its sign
+    up_axis: i32,
+    up_sign: i32,
     /// Multiply positions/translations by this to get meters.
     /// Derived from GlobalSettings UnitScaleFactor (FBX stores a factor to centimeters).
     unit_to_meters: f32,
@@ -93,7 +125,11 @@ impl Default for FbxDoc {
             geometries: BTreeMap::new(),
             models: BTreeMap::new(),
             materials: BTreeMap::new(),
+            textures: BTreeMap::new(),
+            videos: BTreeMap::new(),
             connections: Vec::new(),
+            up_axis: 1,
+            up_sign: 1,
             // Default FBX unit is centimeters → meters
             unit_to_meters: 0.01,
         }
@@ -109,6 +145,40 @@ struct Geom {
     normals: Vec<[f32; 3]>,
     uvs: Vec<[f32; 2]>,
     uv_indices: Vec<i32>,
+    normal_indices: Vec<i32>,
+    /// LayerElement MappingInformationType / ReferenceInformationType
+    normal_mapping: String,
+    normal_ref: String,
+    uv_mapping: String,
+    uv_ref: String,
+    /// Per-polygon material slot (LayerElementMaterial)
+    material_ids: Vec<i32>,
+    material_mapping: String,
+}
+
+#[derive(Debug, Clone)]
+struct Conn {
+    /// "OO" (object-object) or "OP" (object-property)
+    ty: String,
+    child: i64,
+    parent: i64,
+    /// property name for OP links, e.g. "DiffuseColor"
+    prop: String,
+}
+
+#[derive(Debug, Default)]
+struct Tex {
+    name: String,
+    file: String,
+    relative: String,
+}
+
+#[derive(Debug, Default)]
+struct Video {
+    file: String,
+    relative: String,
+    /// Embedded image file (png/jpg/...), empty when the texture is external.
+    content: Vec<u8>,
 }
 
 #[derive(Debug, Clone)]
@@ -122,6 +192,11 @@ struct Model {
     geom_translation: [f32; 3],
     geom_rotation_deg: [f32; 3],
     geom_scale: [f32; 3],
+    /// PreRotation / PostRotation (degrees) — bones and Blender/Maya exports use these.
+    pre_rotation_deg: [f32; 3],
+    post_rotation_deg: [f32; 3],
+    /// FBX RotationOrder enum: 0 XYZ, 1 XZY, 2 YZX, 3 YXZ, 4 ZXY, 5 ZYX
+    rotation_order: i32,
     parent: Option<i64>,
 }
 
@@ -136,15 +211,31 @@ impl Default for Model {
             geom_translation: [0.0; 3],
             geom_rotation_deg: [0.0; 3],
             geom_scale: [1.0; 3],
+            pre_rotation_deg: [0.0; 3],
+            post_rotation_deg: [0.0; 3],
+            rotation_order: 0,
             parent: None,
         }
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct Mat {
     name: String,
     diffuse: [f32; 3],
+    emissive: [f32; 3],
+    opacity: f32,
+}
+
+impl Mat {
+    fn new(name: String) -> Self {
+        Self {
+            name,
+            diffuse: [0.8, 0.8, 0.8],
+            emissive: [0.0; 3],
+            opacity: 1.0,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -172,7 +263,7 @@ fn parse_ascii(text: &str) -> Result<FbxDoc> {
         if line.starts_with("Model:") {
             let (id, name, body, next) = read_block(&lines, i)?;
             i = next;
-            let kind = name_kind(&name);
+            let kind = parse_header_class(line);
             let mut m = Model {
                 name: strip_name(&name),
                 kind,
@@ -186,12 +277,35 @@ fn parse_ascii(text: &str) -> Result<FbxDoc> {
         if line.starts_with("Material:") {
             let (id, name, body, next) = read_block(&lines, i)?;
             i = next;
-            let mut m = Mat {
-                name: strip_name(&name),
-                diffuse: [0.8, 0.8, 0.8],
-            };
+            let mut m = Mat::new(strip_name(&name));
             parse_material_body(&body, &mut m);
             doc.materials.insert(id, m);
+            continue;
+        }
+        if line.starts_with("Texture:") {
+            let (id, name, body, next) = read_block(&lines, i)?;
+            i = next;
+            doc.textures.insert(
+                id,
+                Tex {
+                    name: strip_name(&name),
+                    file: first_quoted(&body, &["FileName:", "Filename:"]),
+                    relative: first_quoted(&body, &["RelativeFilename:"]),
+                },
+            );
+            continue;
+        }
+        if line.starts_with("Video:") {
+            let (id, _name, body, next) = read_block(&lines, i)?;
+            i = next;
+            doc.videos.insert(
+                id,
+                Video {
+                    file: first_quoted(&body, &["Filename:", "FileName:"]),
+                    relative: first_quoted(&body, &["RelativeFilename:"]),
+                    content: ascii_embedded_content(&body),
+                },
+            );
             continue;
         }
         if line.starts_with("Connections:") {
@@ -201,8 +315,8 @@ fn parse_ascii(text: &str) -> Result<FbxDoc> {
                 let bl = bl.trim();
                 // C: "OO",child,parent
                 if bl.starts_with("C:") {
-                    if let Some((a, b)) = parse_connection(bl) {
-                        doc.connections.push((a, b));
+                    if let Some(c) = parse_connection(bl) {
+                        doc.connections.push(c);
                     }
                 }
             }
@@ -217,6 +331,8 @@ fn parse_ascii(text: &str) -> Result<FbxDoc> {
         i += 1;
     }
 
+    doc.geometries
+        .retain(|_, g| !g.polygon_vertex_index.is_empty() && !g.vertices.is_empty());
     if doc.geometries.is_empty() {
         bail!("No Geometry blocks found — is this an ASCII FBX with mesh data?");
     }
@@ -286,24 +402,106 @@ fn strip_name(full: &str) -> String {
     full.rsplit("::").next().unwrap_or(full).to_string()
 }
 
-fn name_kind(full: &str) -> String {
-    // header has third quoted field sometimes; fallback Mesh
-    if full.contains("Null") {
-        "Null".into()
-    } else {
-        "Mesh".into()
-    }
+/// Second quoted field (the class) of a block header: `Model: 1, "Model::Arm", "LimbNode" {` -> LimbNode.
+fn parse_header_class(header: &str) -> String {
+    header
+        .split('"')
+        .skip(1)
+        .step_by(2)
+        .nth(1)
+        .unwrap_or("")
+        .to_string()
 }
 
-fn parse_connection(line: &str) -> Option<(i64, i64)> {
-    // C: "OO",123,456
+fn parse_connection(line: &str) -> Option<Conn> {
+    // C: "OO",123,456      C: "OP",123,456, "DiffuseColor"
     let parts: Vec<&str> = line.split(',').collect();
     if parts.len() < 3 {
         return None;
     }
-    let a = parts[1].trim().parse().ok()?;
-    let b = parts[2].trim().split_whitespace().next()?.parse().ok()?;
-    Some((a, b))
+    let ty = parts[0]
+        .trim_start_matches("C:")
+        .trim()
+        .trim_matches('"')
+        .to_string();
+    let child = parts[1].trim().parse().ok()?;
+    let parent = parts[2].trim().split_whitespace().next()?.parse().ok()?;
+    let prop = parts
+        .get(3)
+        .map(|p| p.trim().trim_matches('"').to_string())
+        .unwrap_or_default();
+    Some(Conn {
+        ty,
+        child,
+        parent,
+        prop,
+    })
+}
+
+/// First quoted string after any of the labels (empty if none).
+fn first_quoted(body: &str, labels: &[&str]) -> String {
+    for l in labels {
+        let Some(i) = body.find(l) else { continue };
+        let rest = body[i + l.len()..].trim_start();
+        if let Some(r) = rest.strip_prefix('"') {
+            if let Some(e) = r.find('"') {
+                return r[..e].to_string();
+            }
+        }
+    }
+    String::new()
+}
+
+/// Base64 `Content: "...."` of an ASCII Video node.
+fn ascii_embedded_content(body: &str) -> Vec<u8> {
+    let Some(i) = body.find("Content:") else {
+        return Vec::new();
+    };
+    let rest = body[i + 8..].trim_start();
+    let Some(r) = rest.strip_prefix('"') else {
+        return Vec::new();
+    };
+    let Some(e) = r.find('"') else {
+        return Vec::new();
+    };
+    base64_decode(&r[..e])
+}
+
+fn base64_decode(s: &str) -> Vec<u8> {
+    let mut out = Vec::with_capacity(s.len() / 4 * 3);
+    let mut acc = 0u32;
+    let mut bits = 0u32;
+    for c in s.bytes() {
+        let v = match c {
+            b'A'..=b'Z' => c - b'A',
+            b'a'..=b'z' => c - b'a' + 26,
+            b'0'..=b'9' => c - b'0' + 52,
+            b'+' => 62,
+            b'/' => 63,
+            _ => continue, // padding / whitespace
+        };
+        acc = (acc << 6) | v as u32;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+            acc &= (1 << bits) - 1;
+        }
+    }
+    out
+}
+
+/// The text of one `LayerElementXxx:` block (up to the next layer element).
+fn layer_section<'a>(body: &'a str, label: &str) -> Option<&'a str> {
+    let i = body.find(label)?;
+    let rest = &body[i + label.len()..];
+    let mut end = rest.len();
+    for k in ["LayerElement", "Layer:"] {
+        if let Some(j) = rest.find(k) {
+            end = end.min(j);
+        }
+    }
+    Some(&rest[..end])
 }
 
 fn parse_geometry_body(body: &str, g: &mut Geom) {
@@ -315,19 +513,35 @@ fn parse_geometry_body(body: &str, g: &mut Geom) {
     if let Some(v) = extract_array_i32(body, "PolygonVertexIndex:") {
         g.polygon_vertex_index = v;
     }
-    // Normals often under LayerElementNormal → Normals:
-    if let Some(v) = extract_array_f32(body, "Normals:") {
-        for chunk in v.chunks_exact(3) {
-            g.normals.push([chunk[0], chunk[1], chunk[2]]);
+    if let Some(sec) = layer_section(body, "LayerElementNormal:") {
+        if let Some(v) = extract_array_f32(sec, "Normals:") {
+            for chunk in v.chunks_exact(3) {
+                g.normals.push([chunk[0], chunk[1], chunk[2]]);
+            }
         }
-    }
-    if let Some(v) = extract_array_f32(body, "UV:") {
-        for chunk in v.chunks_exact(2) {
-            g.uvs.push([chunk[0], chunk[1]]);
+        if let Some(v) = extract_array_i32(sec, "NormalsIndex:") {
+            g.normal_indices = v;
         }
+        g.normal_mapping = first_quoted(sec, &["MappingInformationType:"]);
+        g.normal_ref = first_quoted(sec, &["ReferenceInformationType:"]);
     }
-    if let Some(v) = extract_array_i32(body, "UVIndex:") {
-        g.uv_indices = v;
+    if let Some(sec) = layer_section(body, "LayerElementUV:") {
+        if let Some(v) = extract_array_f32(sec, "UV:") {
+            for chunk in v.chunks_exact(2) {
+                g.uvs.push([chunk[0], chunk[1]]);
+            }
+        }
+        if let Some(v) = extract_array_i32(sec, "UVIndex:") {
+            g.uv_indices = v;
+        }
+        g.uv_mapping = first_quoted(sec, &["MappingInformationType:"]);
+        g.uv_ref = first_quoted(sec, &["ReferenceInformationType:"]);
+    }
+    if let Some(sec) = layer_section(body, "LayerElementMaterial:") {
+        if let Some(v) = extract_array_i32(sec, "Materials:") {
+            g.material_ids = v;
+        }
+        g.material_mapping = first_quoted(sec, &["MappingInformationType:"]);
     }
 }
 
@@ -352,6 +566,15 @@ fn parse_model_body(body: &str, m: &mut Model) {
             }
         }
     }
+    if let Some(v) = extract_property_vec3(body, "PreRotation") {
+        m.pre_rotation_deg = v;
+    }
+    if let Some(v) = extract_property_vec3(body, "PostRotation") {
+        m.post_rotation_deg = v;
+    }
+    if let Some(v) = extract_property_scalar(body, "RotationOrder") {
+        m.rotation_order = v as i32;
+    }
 }
 
 fn parse_material_body(body: &str, m: &mut Mat) {
@@ -359,6 +582,12 @@ fn parse_material_body(body: &str, m: &mut Mat) {
         m.diffuse = v;
     } else if let Some(v) = extract_property_vec3(body, "Diffuse") {
         m.diffuse = v;
+    }
+    if let Some(v) = extract_property_vec3(body, "EmissiveColor") {
+        m.emissive = v;
+    }
+    if let Some(v) = extract_property_scalar(body, "Opacity") {
+        m.opacity = v.clamp(0.0, 1.0);
     }
 }
 
@@ -475,18 +704,22 @@ fn unit_factor_to_meters(unit_scale_factor: f32) -> f32 {
 
 fn parse_global_settings_ascii(body: &str, doc: &mut FbxDoc) {
     // P: "UnitScaleFactor", "double", "Number", "",1  or similar
-    for key in ["UnitScaleFactor", "OriginalUnitScaleFactor"] {
-        if let Some(v) = extract_property_scalar(body, key) {
-            doc.unit_to_meters = unit_factor_to_meters(v);
-            break;
-        }
+    if let Some(v) = extract_property_scalar(body, "UnitScaleFactor") {
+        doc.unit_to_meters = unit_factor_to_meters(v);
+    }
+    if let Some(v) = extract_property_scalar(body, "UpAxis") {
+        doc.up_axis = v as i32;
+    }
+    if let Some(v) = extract_property_scalar(body, "UpAxisSign") {
+        doc.up_sign = if v < 0.0 { -1 } else { 1 };
     }
 }
 
 fn extract_property_scalar(body: &str, key: &str) -> Option<f32> {
+    let quoted = format!("\"{key}\"");
     for line in body.lines() {
         let t = line.trim();
-        if t.contains(key) && t.starts_with("P:") {
+        if t.starts_with("P:") && t.contains(&quoted) {
             let nums: Vec<f32> = t
                 .split(',')
                 .filter_map(|s| {
@@ -502,15 +735,146 @@ fn extract_property_scalar(body: &str, key: &str) -> Option<f32> {
     None
 }
 
+/// Rotation from Euler degrees in an FBX rotation order. FBX names the order in which the
+/// axes are applied, so "XYZ" is the matrix Rz * Ry * Rx.
+fn euler_quat(deg: [f32; 3], order: i32) -> Quat {
+    let qx = Quat::from_rotation_x(deg[0].to_radians());
+    let qy = Quat::from_rotation_y(deg[1].to_radians());
+    let qz = Quat::from_rotation_z(deg[2].to_radians());
+    match order {
+        1 => qy * qz * qx, // XZY
+        2 => qx * qz * qy, // YZX
+        3 => qz * qx * qy, // YXZ
+        4 => qy * qx * qz, // ZXY
+        5 => qx * qy * qz, // ZYX
+        _ => qz * qy * qx, // XYZ (default)
+    }
+}
+
 fn model_matrix(t: [f32; 3], rot_deg: [f32; 3], s: [f32; 3]) -> Mat4 {
-    let rx = rot_deg[0].to_radians();
-    let ry = rot_deg[1].to_radians();
-    let rz = rot_deg[2].to_radians();
-    let q = Quat::from_euler(glam::EulerRot::XYZ, rx, ry, rz);
+    let q = euler_quat(rot_deg, 0);
     Mat4::from_scale_rotation_translation(Vec3::from(s), q, Vec3::from(t))
 }
 
-fn convert_doc(doc: &FbxDoc) -> Result<Scene> {
+/// Node-to-parent matrix of a Model: T * Rpre * R * Rpost^-1 * S (pivots/offsets ignored).
+fn local_matrix(m: &Model) -> Mat4 {
+    let rot = euler_quat(m.pre_rotation_deg, 0)
+        * euler_quat(m.rotation_deg, m.rotation_order)
+        * euler_quat(m.post_rotation_deg, 0).inverse();
+    Mat4::from_scale_rotation_translation(
+        Vec3::from(m.scale),
+        rot,
+        Vec3::from(m.translation),
+    )
+}
+
+/// World matrix of a Model in file units: walks up the Model -> Model parent links, so a mesh
+/// parented to a bone / null / armature ends up where it belongs.
+fn model_world(id: i64, doc: &FbxDoc, parents: &HashMap<i64, i64>) -> Mat4 {
+    let mut chain: Vec<&Model> = Vec::new();
+    let mut seen: BTreeSet<i64> = BTreeSet::new();
+    let mut cur = Some(id);
+    while let Some(c) = cur {
+        if !seen.insert(c) {
+            break; // cycle guard
+        }
+        let Some(m) = doc.models.get(&c) else { break };
+        chain.push(m);
+        cur = parents.get(&c).copied();
+    }
+    let mut w = Mat4::IDENTITY;
+    for m in chain.iter().rev() {
+        w = w * local_matrix(m);
+    }
+    w
+}
+
+/// Candidate paths for a texture: relative name, stored full name, then bare file name.
+fn texture_candidates(a: &str, b: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for n in [a, b] {
+        let n = n.trim();
+        if n.is_empty() {
+            continue;
+        }
+        out.push(n.to_string());
+        let norm = n.replace('\\', "/");
+        if let Some(f) = norm.rsplit('/').next() {
+            if !f.is_empty() {
+                out.push(f.to_string());
+            }
+        }
+    }
+    out.dedup();
+    out
+}
+
+/// Load (once) the image behind an FBX Texture node into `textures` and return its index.
+fn texture_index(
+    doc: &FbxDoc,
+    tid: i64,
+    resolver: TexResolver,
+    textures: &mut Vec<TextureData>,
+    cache: &mut HashMap<i64, Option<usize>>,
+) -> Option<usize> {
+    if let Some(c) = cache.get(&tid) {
+        return *c;
+    }
+    let result = (|| {
+        let t = doc.textures.get(&tid)?;
+        // Video node linked to the texture: embedded bytes and/or additional file names.
+        let video = doc
+            .connections
+            .iter()
+            .filter(|c| c.parent == tid)
+            .find_map(|c| doc.videos.get(&c.child));
+        let mut hint = if !t.file.is_empty() {
+            t.file.clone()
+        } else {
+            t.relative.clone()
+        };
+        if hint.is_empty() {
+            if let Some(v) = video {
+                hint = if !v.file.is_empty() { v.file.clone() } else { v.relative.clone() };
+            }
+        }
+        if hint.is_empty() {
+            hint = t.name.clone();
+        }
+        let mut bytes: Option<Vec<u8>> = None;
+        if let Some(v) = video {
+            if !v.content.is_empty() {
+                bytes = Some(v.content.clone());
+            }
+        }
+        if bytes.is_none() {
+            let mut names = texture_candidates(&t.relative, &t.file);
+            if let Some(v) = video {
+                names.extend(texture_candidates(&v.relative, &v.file));
+            }
+            for n in names {
+                if let Some(b) = resolver(&n) {
+                    bytes = Some(b);
+                    break;
+                }
+            }
+        }
+        let Some(bytes) = bytes else {
+            eprintln!("FBX texture '{hint}' was not found next to the model");
+            return None;
+        };
+        let mut tex = crate::decode_image_bytes(&bytes, &hint)?;
+        if tex.name.is_empty() {
+            tex.name = t.name.clone();
+        }
+        textures.push(tex);
+        Some(textures.len() - 1)
+    })();
+    cache.insert(tid, result);
+    result
+}
+
+fn convert_doc(doc: &FbxDoc, resolver: TexResolver) -> Result<Scene> {
     let mut scene = Scene::default();
     let u = doc.unit_to_meters;
     // Guard against absurd scales from bad UnitScaleFactor
@@ -520,183 +884,373 @@ fn convert_doc(doc: &FbxDoc) -> Result<Scene> {
         0.01
     };
 
-    // Materials
+    // Z-up (3ds Max, some Maya/CAD exports) -> the app's Y-up.
+    let root_fix = match (doc.up_axis, doc.up_sign >= 0) {
+        (2, true) => Mat4::from_rotation_x(-std::f32::consts::FRAC_PI_2),
+        (2, false) => Mat4::from_rotation_x(std::f32::consts::FRAC_PI_2),
+        (0, true) => Mat4::from_rotation_z(std::f32::consts::FRAC_PI_2),
+        (0, false) => Mat4::from_rotation_z(-std::f32::consts::FRAC_PI_2),
+        _ => Mat4::IDENTITY,
+    };
+
+    // ---- connections ----------------------------------------------------------------
+    let mut geom_to_models: HashMap<i64, Vec<i64>> = HashMap::new();
+    let mut model_mats: HashMap<i64, Vec<i64>> = HashMap::new();
+    let mut parents: HashMap<i64, i64> = HashMap::new();
+    for c in &doc.connections {
+        let (child, parent) = (c.child, c.parent);
+        if doc.geometries.contains_key(&child) && doc.models.contains_key(&parent) {
+            geom_to_models.entry(child).or_default().push(parent);
+        }
+        if doc.materials.contains_key(&child) && doc.models.contains_key(&parent) {
+            let v = model_mats.entry(parent).or_default();
+            if !v.contains(&child) {
+                v.push(child);
+            }
+        }
+        // sometimes material connected the other way
+        if doc.materials.contains_key(&parent) && doc.models.contains_key(&child) {
+            let v = model_mats.entry(child).or_default();
+            if !v.contains(&parent) {
+                v.push(parent);
+            }
+        }
+        // Model -> Model: scene hierarchy (bones, nulls, armatures, groups)
+        if c.ty != "OP" && doc.models.contains_key(&child) && doc.models.contains_key(&parent) {
+            parents.insert(child, parent);
+        }
+    }
+
+    // ---- materials + textures ------------------------------------------------------
+    let mut textures: Vec<TextureData> = Vec::new();
+    let mut tex_cache: HashMap<i64, Option<usize>> = HashMap::new();
     let mut mat_id_to_index: HashMap<i64, usize> = HashMap::new();
     for (&id, m) in &doc.materials {
         let idx = scene.materials.len();
         mat_id_to_index.insert(id, idx);
-        scene.materials.push(Material {
+        let mut mat = Material {
             name: m.name.clone(),
-            base_color: [m.diffuse[0], m.diffuse[1], m.diffuse[2], 1.0],
+            base_color: [m.diffuse[0], m.diffuse[1], m.diffuse[2], m.opacity],
+            emissive: m.emissive,
             roughness: 0.5,
             ..Default::default()
-        });
+        };
+        if m.opacity < 0.999 {
+            mat.alpha_mode = forge_core::AlphaMode::Blend;
+        }
+        // Textures hang off the material through OP links named after the slot.
+        for c in doc.connections.iter().filter(|c| {
+            c.parent == id && doc.textures.contains_key(&c.child)
+        }) {
+            let slot = c.prop.to_ascii_lowercase();
+            let is_base = slot.contains("diffuse")
+                || slot.contains("basecolor")
+                || slot.contains("base_color")
+                || slot.contains("color_map")
+                || slot.is_empty();
+            let is_normal = slot.contains("normal");
+            let is_emissive = slot.contains("emissive") || slot.contains("emission");
+            let is_occlusion = slot.contains("occlusion") || slot.contains("ao_map");
+            if !(is_base || is_normal || is_emissive || is_occlusion) {
+                continue; // bump / specular / reflection maps have no equivalent slot
+            }
+            let Some(ti) = texture_index(doc, c.child, resolver, &mut textures, &mut tex_cache)
+            else {
+                continue;
+            };
+            if is_normal {
+                mat.normal_tex = Some(ti);
+            } else if is_emissive {
+                mat.emissive_tex = Some(ti);
+                mat.emissive = [1.0, 1.0, 1.0];
+            } else if is_occlusion {
+                mat.occlusion_tex = Some(ti);
+            } else if mat.base_color_tex.is_none() {
+                mat.base_color_tex = Some(ti);
+                // The diffuse colour multiplies the texture; exporters leave a grey default
+                // there, which would darken the image.
+                mat.base_color = [1.0, 1.0, 1.0, m.opacity];
+            }
+        }
+        scene.materials.push(mat);
     }
     if scene.materials.is_empty() {
         scene.materials.push(Material::default());
     }
 
-    // Map geometry id -> model id (child geom linked to parent model)
-    let mut geom_to_model: HashMap<i64, i64> = HashMap::new();
-    let mut model_to_mat: HashMap<i64, i64> = HashMap::new();
-    for &(child, parent) in &doc.connections {
-        if doc.geometries.contains_key(&child) && doc.models.contains_key(&parent) {
-            geom_to_model.insert(child, parent);
-        }
-        if doc.materials.contains_key(&child) && doc.models.contains_key(&parent) {
-            model_to_mat.insert(parent, child);
-        }
-        // sometimes material connected the other way
-        if doc.materials.contains_key(&parent) && doc.models.contains_key(&child) {
-            model_to_mat.insert(child, parent);
-        }
-    }
-
-    // Build objects: each geometry that is connected to a model, or every geometry
-    let mut used_geom = BTreeSet::new();
+    // ---- objects -------------------------------------------------------------------
     for (&gid, geom) in &doc.geometries {
-        let model = geom_to_model
-            .get(&gid)
-            .and_then(|mid| doc.models.get(mid))
-            .cloned()
-            .unwrap_or_else(|| Model {
-                name: geom.name.clone(),
-                kind: "Mesh".into(),
-                scale: [1.0; 3],
-                ..Default::default()
-            });
-        let mid = geom_to_model.get(&gid).copied();
-        used_geom.insert(gid);
-
-        let mut mesh = geom_to_mesh(geom)?;
-        if mesh.indices.is_empty() || mesh.vertices.is_empty() {
+        let (base_mesh, tri_slot) = geom_to_mesh(geom)?;
+        if base_mesh.indices.is_empty() || base_mesh.vertices.is_empty() {
             continue;
         }
-        // Apply geometric (pivot) transform in file units, then convert to meters
-        let geom_tf = model_matrix(
-            model.geom_translation,
-            model.geom_rotation_deg,
-            model.geom_scale,
-        );
-        if geom_tf != Mat4::IDENTITY {
-            mesh = mesh.transformed(geom_tf);
-        }
-        // Unit conversion: scale vertex positions to meters
-        if (u - 1.0).abs() > 1e-8 {
-            for v in &mut mesh.vertices {
-                v.position[0] *= u;
-                v.position[1] *= u;
-                v.position[2] *= u;
+        // Instances: the same geometry can be shared by several models.
+        let model_ids: Vec<Option<i64>> = match geom_to_models.get(&gid) {
+            Some(v) if !v.is_empty() => v.iter().map(|&m| Some(m)).collect(),
+            _ => vec![None],
+        };
+        for mid in model_ids {
+            let model = mid
+                .and_then(|m| doc.models.get(&m))
+                .cloned()
+                .unwrap_or_else(|| Model {
+                    name: geom.name.clone(),
+                    kind: "Mesh".into(),
+                    ..Default::default()
+                });
+            let mut mesh = base_mesh.clone();
+            // Geometric (pivot) transform: applied to the geometry only, in file units.
+            let geom_tf = model_matrix(
+                model.geom_translation,
+                model.geom_rotation_deg,
+                model.geom_scale,
+            );
+            if geom_tf != Mat4::IDENTITY {
+                mesh = mesh.transformed(geom_tf);
             }
-        }
-        let mut obj = Object::new(model.name.clone(), mesh);
-
-        // Local transform — translation in meters; Lcl Scaling stays as-is (dimensionless)
-        obj.translation = Vec3::from(model.translation) * u;
-        obj.scale = Vec3::from(model.scale);
-        let rx = model.rotation_deg[0].to_radians();
-        let ry = model.rotation_deg[1].to_radians();
-        let rz = model.rotation_deg[2].to_radians();
-        obj.rotation = Quat::from_euler(glam::EulerRot::XYZ, rx, ry, rz);
-
-        if let Some(mid) = mid {
-            if let Some(mat_id) = model_to_mat.get(&mid) {
-                if let Some(&idx) = mat_id_to_index.get(mat_id) {
-                    obj.material = Some(idx);
+            // Unit conversion: scale vertex positions to meters
+            if (u - 1.0).abs() > 1e-8 {
+                for v in &mut mesh.vertices {
+                    v.position[0] *= u;
+                    v.position[1] *= u;
+                    v.position[2] *= u;
                 }
             }
+
+            // Material slots of this model -> scene material indices
+            let slots: Vec<Option<usize>> = mid
+                .and_then(|m| model_mats.get(&m))
+                .map(|v| v.iter().map(|id| mat_id_to_index.get(id).copied()).collect())
+                .unwrap_or_default();
+            let slot_material = |s: u32| -> Option<usize> {
+                slots.get(s as usize).copied().flatten().or_else(|| {
+                    // fewer slots than the mesh refers to: fall back to the first one
+                    slots.first().copied().flatten()
+                })
+            };
+            let used: BTreeSet<u32> = tri_slot.iter().copied().collect();
+            let material: Option<usize>;
+            if used.len() <= 1 {
+                material = slot_material(used.iter().next().copied().unwrap_or(0));
+            } else {
+                // Several materials on one mesh: sort triangles by slot and emit groups.
+                let ntri = mesh.indices.len() / 3;
+                let mut order: Vec<usize> = (0..ntri).collect();
+                order.sort_by_key(|&t| tri_slot.get(t).copied().unwrap_or(0));
+                let mut indices = Vec::with_capacity(mesh.indices.len());
+                let mut groups: Vec<MeshGroup> = Vec::new();
+                let mut run_slot: Option<u32> = None;
+                for &t in &order {
+                    let sl = tri_slot.get(t).copied().unwrap_or(0);
+                    if run_slot != Some(sl) {
+                        groups.push(MeshGroup {
+                            first_index: indices.len() as u32,
+                            index_count: 0,
+                            material: slot_material(sl),
+                        });
+                        run_slot = Some(sl);
+                    }
+                    indices.extend_from_slice(&mesh.indices[t * 3..t * 3 + 3]);
+                    if let Some(g) = groups.last_mut() {
+                        g.index_count += 3;
+                    }
+                }
+                mesh.indices = indices;
+                material = groups.first().and_then(|g| g.material);
+                mesh.groups = groups;
+            }
+
+            // World transform (hierarchy baked in), translation converted to meters.
+            let world = match mid {
+                Some(m) => root_fix * model_world(m, doc, &parents),
+                None => root_fix,
+            };
+            let (scale, rotation, translation) = world.to_scale_rotation_translation();
+            let mut obj = Object::new(model.name.clone(), mesh);
+            obj.translation = translation * u;
+            obj.rotation = rotation;
+            obj.scale = scale;
+            obj.material = material;
+            scene.objects.push(obj);
         }
-        scene.objects.push(obj);
     }
 
-    // Orphan geometries not in connections
-    for (&gid, geom) in &doc.geometries {
-        if used_geom.contains(&gid) {
-            continue;
+    // Reconstruct FBX LimbNode models as editable armature bones. FBX stores
+    // bones as Model objects connected by OO hierarchy links; they are not mesh
+    // geometry and therefore must be imported independently of the geometry loop.
+    let limb_ids: Vec<i64> = doc.models.iter()
+        .filter_map(|(&id, m)| (m.kind.eq_ignore_ascii_case("limbnode") || m.kind.eq_ignore_ascii_case("root") && parents.contains_key(&id)).then_some(id))
+        .collect();
+    if !limb_ids.is_empty() {
+        let id_to_bone: HashMap<i64, u32> = limb_ids.iter().enumerate().map(|(i, id)| (*id, i as u32)).collect();
+        let mut arm = forge_core::ArmatureData { bones: Vec::new(), selected: BTreeSet::new(), active: None };
+        let mut heads = HashMap::new();
+        for &mid in &limb_ids {
+            let w = root_fix * model_world(mid, doc, &parents);
+            heads.insert(mid, w.transform_point3(Vec3::ZERO) * u);
         }
-        let mesh = geom_to_mesh(geom)?;
-        if mesh.indices.is_empty() {
-            continue;
+        for &mid in &limb_ids {
+            let head = heads.get(&mid).copied().unwrap_or(Vec3::ZERO);
+            let child_head = limb_ids.iter().find(|&&cid| parents.get(&cid) == Some(&mid)).and_then(|cid| heads.get(cid)).copied();
+            let tail = child_head.filter(|p| p.distance(head) > 1e-5).unwrap_or(head + Vec3::Y * 0.1);
+            let model = &doc.models[&mid];
+            let mut bone = forge_core::Bone::new(model.name.clone(), head, tail);
+            bone.parent = parents.get(&mid).and_then(|p| id_to_bone.get(p)).copied();
+            arm.bones.push(bone);
         }
-        scene.objects.push(Object::new(geom.name.clone(), mesh));
+        if !arm.bones.is_empty() {
+            arm.active = Some(0);
+            arm.selected.insert(0);
+            let mut arm_obj = Object::new("Armature", MeshData::default());
+            arm_obj.id = scene.alloc_id();
+            arm_obj.kind = ObjectKind::Armature(arm);
+            scene.objects.push(arm_obj);
+        }
     }
-
     if scene.objects.is_empty() {
-        bail!("FBX contained geometry but no usable triangles");
+        bail!("FBX contained no usable mesh or armature objects");
     }
+    scene.textures = Arc::new(textures);
     Ok(scene)
 }
 
-fn geom_to_mesh(g: &Geom) -> Result<MeshData> {
-    // Expand polygons to triangles using FBX polygon vertex index convention
-    let mut tri_indices: Vec<u32> = Vec::new();
-    let mut poly: Vec<u32> = Vec::new();
-    for &idx in &g.polygon_vertex_index {
-        if idx < 0 {
-            // last vertex of polygon: ~idx
-            let v = (!idx) as u32;
-            poly.push(v);
-            // fan triangulation
-            if poly.len() >= 3 {
-                for i in 1..poly.len() - 1 {
-                    tri_indices.push(poly[0]);
-                    tri_indices.push(poly[i]);
-                    tri_indices.push(poly[i + 1]);
-                }
-            }
-            poly.clear();
-        } else {
-            poly.push(idx as u32);
-        }
-    }
-
-    // If no polygon indices, try sequential triangles from vertex count
-    if tri_indices.is_empty() && g.vertices.len() >= 3 {
-        for i in (0..g.vertices.len() as u32).step_by(3) {
-            if i + 2 < g.vertices.len() as u32 {
-                tri_indices.extend_from_slice(&[i, i + 1, i + 2]);
-            }
-        }
-    }
-
-    let n = g.vertices.len();
-    let mut vertices = Vec::with_capacity(n);
-    for i in 0..n {
-        let p = g.vertices[i];
-        let normal = g.normals.get(i).copied().unwrap_or([0.0, 1.0, 0.0]);
-        let uv = if !g.uv_indices.is_empty() && i < g.uv_indices.len() {
-            let ui = g.uv_indices[i];
-            if ui >= 0 && (ui as usize) < g.uvs.len() {
-                let u = g.uvs[ui as usize];
-                [u[0], 1.0 - u[1]]
+/// Read one layer-element value (normal / uv) honouring FBX mapping + reference modes.
+#[allow(clippy::too_many_arguments)]
+fn layer_value<T: Copy>(
+    data: &[T],
+    indices: &[i32],
+    mapping: &str,
+    reference: &str,
+    corner: usize,
+    vertex: usize,
+    polygon: usize,
+    n_corners: usize,
+    n_vertices: usize,
+) -> Option<T> {
+    let slot = match mapping {
+        "ByPolygonVertex" => corner,
+        "ByVertice" | "ByVertex" => vertex,
+        "ByPolygon" => polygon,
+        "AllSame" => 0,
+        // missing/unknown mapping: guess from the array length
+        _ => {
+            let n = if indices.is_empty() { data.len() } else { indices.len() };
+            if n == n_corners {
+                corner
+            } else if n == n_vertices {
+                vertex
             } else {
-                [0.0, 0.0]
+                corner
             }
-        } else if i < g.uvs.len() {
-            let u = g.uvs[i];
-            [u[0], 1.0 - u[1]]
-        } else {
-            [0.0, 0.0]
-        };
-        vertices.push(Vertex {
-            position: p,
-            normal,
-            uv,
-            color: [1.0, 1.0, 1.0, 1.0],
+        }
+    };
+    if (reference == "IndexToDirect" || reference == "Index") || (reference.is_empty() && !indices.is_empty()) {
+        let i = *indices.get(slot)?;
+        if i < 0 {
+            return None;
+        }
+        data.get(i as usize).copied()
+    } else {
+        data.get(slot).copied()
+    }
+}
+
+/// Triangulate the polygons and resolve per-corner normals / UVs. Returns the mesh and the
+/// material slot of each triangle.
+fn geom_to_mesh(g: &Geom) -> Result<(MeshData, Vec<u32>)> {
+    let nv = g.vertices.len();
+    // polygon corners: (position index, polygon number)
+    let mut corners: Vec<(usize, usize)> = Vec::with_capacity(g.polygon_vertex_index.len());
+    let mut polys: Vec<(usize, usize)> = Vec::new(); // (first corner, corner count)
+    let mut start = 0usize;
+    for &idx in &g.polygon_vertex_index {
+        let last = idx < 0;
+        let v = if last { !idx } else { idx };
+        corners.push((v.max(0) as usize, polys.len()));
+        if last {
+            polys.push((start, corners.len() - start));
+            start = corners.len();
+        }
+    }
+    let ncorners = corners.len();
+
+    let mut vertices: Vec<Vertex> = Vec::new();
+    let mut weld: HashMap<(usize, [u32; 3], [u32; 2]), u32> = HashMap::new();
+    let mut corner_vertex: Vec<u32> = vec![0; ncorners];
+    for (k, &(vi, poly)) in corners.iter().enumerate() {
+        if vi >= nv {
+            continue; // broken polygon is dropped below
+        }
+        let normal = layer_value(
+            &g.normals,
+            &g.normal_indices,
+            &g.normal_mapping,
+            &g.normal_ref,
+            k,
+            vi,
+            poly,
+            ncorners,
+            nv,
+        )
+        .unwrap_or([0.0; 3]);
+        let uv = layer_value(
+            &g.uvs,
+            &g.uv_indices,
+            &g.uv_mapping,
+            &g.uv_ref,
+            k,
+            vi,
+            poly,
+            ncorners,
+            nv,
+        )
+        .map(|u| [u[0], 1.0 - u[1]])
+        .unwrap_or([0.0; 2]);
+        let key = (vi, normal.map(f32::to_bits), uv.map(f32::to_bits));
+        let id = *weld.entry(key).or_insert_with(|| {
+            vertices.push(Vertex {
+                position: g.vertices[vi],
+                normal,
+                uv,
+                color: [1.0, 1.0, 1.0, 1.0],
+            });
+            (vertices.len() - 1) as u32
         });
+        corner_vertex[k] = id;
     }
 
+    let mut indices: Vec<u32> = Vec::new();
+    let mut tri_slot: Vec<u32> = Vec::new();
+    for (pi, &(first, count)) in polys.iter().enumerate() {
+        if count < 3 || corners[first..first + count].iter().any(|c| c.0 >= nv) {
+            continue;
+        }
+        let slot = match g.material_mapping.as_str() {
+            "ByPolygon" => g.material_ids.get(pi).copied().unwrap_or(0),
+            _ => g.material_ids.first().copied().unwrap_or(0),
+        }
+        .max(0) as u32;
+        // fan triangulation
+        for i in 1..count - 1 {
+            indices.push(corner_vertex[first]);
+            indices.push(corner_vertex[first + i]);
+            indices.push(corner_vertex[first + i + 1]);
+            tri_slot.push(slot);
+        }
+    }
+
+    let has_normals = !g.normals.is_empty();
     let mut md = MeshData {
         name: g.name.clone(),
         vertices,
-        indices: tri_indices,
+        indices,
         groups: Vec::new(),
-            ..Default::default()
-        };
-    if g.normals.is_empty() {
+        ..Default::default()
+    };
+    if !has_normals {
         md.compute_normals();
     }
-    Ok(md)
+    Ok((md, tri_slot))
 }
 
 // ---------------------------------------------------------------------------
@@ -1025,10 +1579,12 @@ fn parse_binary(data: &[u8]) -> Result<FbxDoc> {
             r.pos += nsz;
             break;
         }
-        if let Some(node) = read_node(&mut r)? {
-            roots.push(node);
-        } else {
-            break;
+        match read_node(&mut r) {
+            Ok(Some(node)) => roots.push(node),
+            Ok(None) => break,
+            // Keep what was read so far (e.g. a broken trailing footer section).
+            Err(_) if roots.iter().any(|n| n.name == "Objects") => break,
+            Err(e) => return Err(e),
         }
     }
 
@@ -1055,7 +1611,7 @@ fn parse_binary(data: &[u8]) -> Result<FbxDoc> {
         }
     }
     if doc.geometries.is_empty() {
-        bail!("Binary FBX: no mesh Geometry found (version {version})");
+        bail!("Binary FBX: no polygon mesh Geometry found (version {version})");
     }
     Ok(doc)
 }
@@ -1100,9 +1656,15 @@ fn read_node(r: &mut BinReader<'_>) -> Result<Option<BinNode>> {
             r.pos += nsz;
             break;
         }
-        match read_node(r)? {
-            Some(n) => children.push(n),
-            None => break,
+        match read_node(r) {
+            Ok(Some(n)) => children.push(n),
+            Ok(None) => break,
+            Err(_) => {
+                // Unreadable child (unknown property type, truncated array...): skip the rest
+                // of this node instead of failing the whole file.
+                r.pos = end;
+                break;
+            }
         }
         if r.pos == save {
             break; // safety
@@ -1279,15 +1841,17 @@ fn ingest_object(node: &BinNode, doc: &mut FbxDoc) {
             let id = prop_i64(node.props.get(0)).unwrap_or(0);
             let name = prop_string(node.props.get(1)).unwrap_or_default();
             let class = prop_string(node.props.get(2)).unwrap_or_default();
-            if class != "Mesh" && !class.is_empty() && class != "Mesh" {
-                // still try if it has Vertices
+            // Blend-shape targets ("Shape"), curves, NURBS... also live under Geometry but
+            // are not polygon meshes.
+            if !class.is_empty() && class != "Mesh" {
+                return;
             }
             let mut g = Geom {
                 name: strip_name(&name),
                 ..Default::default()
             };
             fill_geom_from_children(node, &mut g);
-            if !g.vertices.is_empty() || !g.polygon_vertex_index.is_empty() {
+            if !g.vertices.is_empty() && !g.polygon_vertex_index.is_empty() {
                 doc.geometries.insert(id, g);
             }
         }
@@ -1307,18 +1871,58 @@ fn ingest_object(node: &BinNode, doc: &mut FbxDoc) {
         "Material" => {
             let id = prop_i64(node.props.get(0)).unwrap_or(0);
             let name = prop_string(node.props.get(1)).unwrap_or_default();
-            let mut mat = Mat {
-                name: strip_name(&name),
-                diffuse: [0.8, 0.8, 0.8],
-            };
+            let mut mat = Mat::new(strip_name(&name));
             fill_material_from_children(node, &mut mat);
             doc.materials.insert(id, mat);
+        }
+        "Texture" => {
+            let id = prop_i64(node.props.get(0)).unwrap_or(0);
+            let name = prop_string(node.props.get(1)).unwrap_or_default();
+            let mut t = Tex {
+                name: strip_name(&name),
+                ..Default::default()
+            };
+            for ch in &node.children {
+                if ch.name.eq_ignore_ascii_case("FileName") {
+                    t.file = prop_string(ch.props.first()).unwrap_or_default();
+                } else if ch.name.eq_ignore_ascii_case("RelativeFilename") {
+                    t.relative = prop_string(ch.props.first()).unwrap_or_default();
+                }
+            }
+            doc.textures.insert(id, t);
+        }
+        "Video" => {
+            let id = prop_i64(node.props.get(0)).unwrap_or(0);
+            let mut v = Video::default();
+            for ch in &node.children {
+                if ch.name.eq_ignore_ascii_case("FileName") {
+                    v.file = prop_string(ch.props.first()).unwrap_or_default();
+                } else if ch.name.eq_ignore_ascii_case("RelativeFilename") {
+                    v.relative = prop_string(ch.props.first()).unwrap_or_default();
+                } else if ch.name == "Content" {
+                    if let Some(BinProp::Bytes(b)) = ch.props.first() {
+                        v.content = b.clone();
+                    }
+                }
+            }
+            doc.videos.insert(id, v);
         }
         _ => {
             for ch in &node.children {
                 ingest_object(ch, doc);
             }
         }
+    }
+}
+
+fn bin_f32_triplets(p: Option<&BinProp>, n: usize) -> Vec<Vec<f32>> {
+    match p {
+        Some(BinProp::F64Arr(a)) => a
+            .chunks_exact(n)
+            .map(|c| c.iter().map(|&x| x as f32).collect())
+            .collect(),
+        Some(BinProp::F32Arr(a)) => a.chunks_exact(n).map(|c| c.to_vec()).collect(),
+        _ => Vec::new(),
     }
 }
 
@@ -1343,36 +1947,67 @@ fn fill_geom_from_children(node: &BinNode, g: &mut Geom) {
             }
             "LayerElementNormal" => {
                 for n in &ch.children {
-                    if n.name == "Normals" {
-                        if let Some(BinProp::F64Arr(a)) = n.props.first() {
-                            for c in a.chunks_exact(3) {
-                                g.normals.push([c[0] as f32, c[1] as f32, c[2] as f32]);
-                            }
-                        } else if let Some(BinProp::F32Arr(a)) = n.props.first() {
-                            for c in a.chunks_exact(3) {
+                    match n.name.as_str() {
+                        "Normals" => {
+                            for c in bin_f32_triplets(n.props.first(), 3) {
                                 g.normals.push([c[0], c[1], c[2]]);
                             }
                         }
+                        "NormalsIndex" => {
+                            if let Some(BinProp::I32Arr(a)) = n.props.first() {
+                                g.normal_indices = a.clone();
+                            }
+                        }
+                        "MappingInformationType" => {
+                            g.normal_mapping = prop_string(n.props.first()).unwrap_or_default()
+                        }
+                        "ReferenceInformationType" => {
+                            g.normal_ref = prop_string(n.props.first()).unwrap_or_default()
+                        }
+                        _ => {}
                     }
                 }
             }
             "LayerElementUV" => {
+                // Only the first UV set (a mesh can carry several LayerElementUV blocks).
+                if !g.uvs.is_empty() {
+                    continue;
+                }
                 for n in &ch.children {
-                    if n.name == "UV" {
-                        if let Some(BinProp::F64Arr(a)) = n.props.first() {
-                            for c in a.chunks_exact(2) {
-                                g.uvs.push([c[0] as f32, c[1] as f32]);
-                            }
-                        } else if let Some(BinProp::F32Arr(a)) = n.props.first() {
-                            for c in a.chunks_exact(2) {
+                    match n.name.as_str() {
+                        "UV" => {
+                            for c in bin_f32_triplets(n.props.first(), 2) {
                                 g.uvs.push([c[0], c[1]]);
                             }
                         }
-                    }
-                    if n.name == "UVIndex" {
-                        if let Some(BinProp::I32Arr(a)) = n.props.first() {
-                            g.uv_indices = a.clone();
+                        "UVIndex" => {
+                            if let Some(BinProp::I32Arr(a)) = n.props.first() {
+                                g.uv_indices = a.clone();
+                            }
                         }
+                        "MappingInformationType" => {
+                            g.uv_mapping = prop_string(n.props.first()).unwrap_or_default()
+                        }
+                        "ReferenceInformationType" => {
+                            g.uv_ref = prop_string(n.props.first()).unwrap_or_default()
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            "LayerElementMaterial" => {
+                for n in &ch.children {
+                    match n.name.as_str() {
+                        "Materials" => {
+                            if let Some(BinProp::I32Arr(a)) = n.props.first() {
+                                g.material_ids = a.clone();
+                            }
+                        }
+                        "MappingInformationType" => {
+                            g.material_mapping =
+                                prop_string(n.props.first()).unwrap_or_default()
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -1390,13 +2025,22 @@ fn fill_model_from_children(node: &BinNode, m: &mut Model) {
                 }
                 let key = prop_string(p.props.get(0)).unwrap_or_default();
                 let nums = prop_trailing_f32(p);
+                if key == "RotationOrder" {
+                    if let Some(&o) = nums.last() {
+                        m.rotation_order = o as i32;
+                    }
+                }
                 if nums.len() >= 3 {
                     let v = [
                         nums[nums.len() - 3],
                         nums[nums.len() - 2],
                         nums[nums.len() - 1],
                     ];
-                    if key.contains("Lcl Translation") {
+                    if key == "PreRotation" {
+                        m.pre_rotation_deg = v;
+                    } else if key == "PostRotation" {
+                        m.post_rotation_deg = v;
+                    } else if key.contains("Lcl Translation") {
                         m.translation = v;
                     } else if key.contains("Lcl Rotation") {
                         m.rotation_deg = v;
@@ -1423,10 +2067,20 @@ fn fill_global_settings(node: &BinNode, doc: &mut FbxDoc) {
                     continue;
                 }
                 let key = prop_string(p.props.get(0)).unwrap_or_default();
-                if key.contains("UnitScaleFactor") {
-                    let nums = prop_trailing_f32(p);
+                // Exact match: "OriginalUnitScaleFactor" is the unit of the authoring app,
+                // not the unit the stored numbers are in.
+                let nums = prop_trailing_f32(p);
+                if key == "UnitScaleFactor" {
                     if let Some(&v) = nums.last() {
                         doc.unit_to_meters = unit_factor_to_meters(v);
+                    }
+                } else if key == "UpAxis" {
+                    if let Some(&v) = nums.last() {
+                        doc.up_axis = v as i32;
+                    }
+                } else if key == "UpAxisSign" {
+                    if let Some(&v) = nums.last() {
+                        doc.up_sign = if v < 0.0 { -1 } else { 1 };
                     }
                 }
             }
@@ -1442,14 +2096,29 @@ fn fill_material_from_children(node: &BinNode, mat: &mut Mat) {
                     continue;
                 }
                 let key = prop_string(p.props.get(0)).unwrap_or_default();
-                if key.contains("Diffuse") {
-                    let nums = prop_trailing_f32(p);
-                    if nums.len() >= 3 {
-                        mat.diffuse = [
-                            nums[nums.len() - 3],
-                            nums[nums.len() - 2],
-                            nums[nums.len() - 1],
-                        ];
+                let nums = prop_trailing_f32(p);
+                let rgb = |n: &Vec<f32>| {
+                    if n.len() >= 3 {
+                        Some([n[n.len() - 3], n[n.len() - 2], n[n.len() - 1]])
+                    } else {
+                        None
+                    }
+                };
+                if key == "DiffuseColor"
+                    || key == "Diffuse"
+                    || key.to_ascii_lowercase().contains("base_color")
+                    || key.to_ascii_lowercase().contains("basecolor")
+                {
+                    if let Some(c) = rgb(&nums) {
+                        mat.diffuse = c;
+                    }
+                } else if key == "EmissiveColor" || key == "Emissive" {
+                    if let Some(c) = rgb(&nums) {
+                        mat.emissive = c;
+                    }
+                } else if key == "Opacity" {
+                    if let Some(&o) = nums.last() {
+                        mat.opacity = o.clamp(0.0, 1.0);
                     }
                 }
             }
@@ -1458,18 +2127,20 @@ fn fill_material_from_children(node: &BinNode, mat: &mut Mat) {
 }
 
 fn parse_bin_connection(node: &BinNode, doc: &mut FbxDoc) {
-    // C: "OO", child, parent  OR typed links
-    let mut ids: Vec<i64> = Vec::new();
-    for p in &node.props {
-        match p {
-            BinProp::I64(v) => ids.push(*v),
-            BinProp::I32(v) => ids.push(*v as i64),
-            _ => {}
-        }
-    }
-    if ids.len() >= 2 {
-        doc.connections.push((ids[0], ids[1]));
-    }
+    // C: "OO", child, parent      C: "OP", child, parent, "PropertyName"
+    let ty = prop_string(node.props.get(0)).unwrap_or_else(|| "OO".into());
+    let (Some(child), Some(parent)) = (
+        prop_i64(node.props.get(1)),
+        prop_i64(node.props.get(2)),
+    ) else {
+        return;
+    };
+    doc.connections.push(Conn {
+        ty,
+        child,
+        parent,
+        prop: prop_string(node.props.get(3)).unwrap_or_default(),
+    });
 }
 
 fn prop_i64(p: Option<&BinProp>) -> Option<i64> {
@@ -2132,5 +2803,126 @@ Connections:  {
         }
         // 50 cm → 0.5 m
         assert!((max_abs - 0.5).abs() < 0.05, "expected 0.5m, got {max_abs}");
+    }
+
+    #[test]
+    fn mesh_parented_to_bone_keeps_hierarchy() {
+        // 100 file units per metre -> factor 1.0
+        let text = r#"; FBX 7.4.0
+GlobalSettings:  {
+    Properties70:  {
+        P: "UnitScaleFactor", "double", "Number", "",100
+    }
+}
+Objects:  {
+    Geometry: 1, "Geometry::Tri", "Mesh" {
+        Vertices: *9 {
+            a: 0,0,0, 1,0,0, 0,1,0
+        }
+        PolygonVertexIndex: *3 {
+            a: 0,1,-3
+        }
+    }
+    Model: 2, "Model::Body", "Mesh" {
+    }
+    Model: 3, "Model::Bone", "LimbNode" {
+        Properties70:  {
+            P: "Lcl Translation", "Lcl Translation", "", "A",5,0,0
+        }
+    }
+}
+Connections:  {
+    C: "OO",1,2
+    C: "OO",2,3
+    C: "OO",3,0
+}
+"#;
+        let loaded = load_fbx_str(text).expect("import");
+        assert_eq!(loaded.objects.len(), 1);
+        let x = loaded.objects[0].translation.x;
+        assert!((x - 5.0).abs() < 0.01, "bone offset lost, x = {x}");
+    }
+
+    #[test]
+    fn uvs_follow_polygon_vertex_mapping() {
+        let text = r#"; FBX 7.4.0
+Objects:  {
+    Geometry: 1, "Geometry::Tri", "Mesh" {
+        Vertices: *9 {
+            a: 0,0,0, 1,0,0, 0,1,0
+        }
+        PolygonVertexIndex: *3 {
+            a: 0,1,-3
+        }
+        LayerElementUV: 0 {
+            MappingInformationType: "ByPolygonVertex"
+            ReferenceInformationType: "IndexToDirect"
+            UV: *6 {
+                a: 0,0, 1,0, 0,1
+            }
+            UVIndex: *3 {
+                a: 2,1,0
+            }
+        }
+    }
+    Model: 2, "Model::Tri", "Mesh" {
+    }
+}
+Connections:  {
+    C: "OO",1,2
+}
+"#;
+        let loaded = load_fbx_str(text).expect("import");
+        let m = &loaded.objects[0].mesh;
+        assert_eq!(m.vertices.len(), 3);
+        // corner k uses UV[UVIndex[k]], v is flipped
+        assert_eq!(m.vertices[0].uv, [0.0, 0.0]);
+        assert_eq!(m.vertices[1].uv, [1.0, 1.0]);
+        assert_eq!(m.vertices[2].uv, [0.0, 1.0]);
+    }
+
+    #[test]
+    fn embedded_texture_reaches_material() {
+        let text = format!(
+            r#"; FBX 7.4.0
+Objects:  {{
+    Geometry: 1, "Geometry::Tri", "Mesh" {{
+        Vertices: *9 {{
+            a: 0,0,0, 1,0,0, 0,1,0
+        }}
+        PolygonVertexIndex: *3 {{
+            a: 0,1,-3
+        }}
+    }}
+    Model: 2, "Model::Tri", "Mesh" {{
+    }}
+    Material: 20, "Material::mat", "" {{
+        Properties70:  {{
+            P: "DiffuseColor", "Color", "", "A",0.5,0.5,0.5
+        }}
+    }}
+    Texture: 10, "Texture::tex", "" {{
+        FileName: "C:\art\tex.png"
+        RelativeFilename: "tex.png"
+    }}
+    Video: 11, "Video::tex", "Clip" {{
+        Filename: "C:\art\tex.png"
+        Content: "{}"
+    }}
+}}
+Connections:  {{
+    C: "OO",1,2
+    C: "OO",20,2
+    C: "OO",11,10
+    C: "OP",10,20, "DiffuseColor"
+}}
+"#,
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg=="
+        );
+        let loaded = load_fbx_str(&text).expect("import");
+        assert_eq!(loaded.textures.len(), 1);
+        assert_eq!((loaded.textures[0].width, loaded.textures[0].height), (1, 1));
+        let mat = &loaded.materials[loaded.objects[0].material.expect("material")];
+        assert_eq!(mat.base_color_tex, Some(0));
     }
 }

@@ -2681,7 +2681,9 @@ impl App {
         match res {
             Ok(scene) => {
                 let n = scene.objects.len();
+                let has_skeletal_animation = !scene.animation.bone_tracks.is_empty();
                 self.doc.import_scene(scene);
+                if has_skeletal_animation { self.apply_animation_frame(); }
                 self.frame(false);
                 self.status(format!("Imported {n} object(s) from {}", path.display()));
             }
@@ -4215,6 +4217,37 @@ impl App {
             if let Some(v) = scl {
                 o.scale = v;
             }
+        }
+        // Evaluate imported skeletal tracks after object transforms. Pose values are
+        // deltas from the armature's imported rest pose; reset first so switching
+        // clips or scrubbing before the first key cannot leave stale bone poses.
+        let active_clip = self.doc.scene.animation.active_clip;
+        let bone_tracks = active_clip
+            .and_then(|index| self.doc.scene.animation.bone_tracks.get(index))
+            .cloned().unwrap_or_default();
+        let mut armature_ids: Vec<u64> = self.doc.scene.animation.bone_tracks.iter()
+            .flat_map(|clip_tracks| clip_tracks.keys().copied()).collect();
+        armature_ids.sort_unstable();
+        armature_ids.dedup();
+        for &armature_id in &armature_ids {
+            let Some(idx) = self.doc.scene.index_of(armature_id) else { continue };
+            let tracks = bone_tracks.get(&armature_id);
+            if let ObjectKind::Armature(armature) = &mut self.doc.scene.objects[idx].kind {
+                for (bone_index, bone) in armature.bones.iter_mut().enumerate() {
+                    bone.pose_loc = [0.0, 0.0, 0.0];
+                    bone.pose_rot = [0.0, 0.0, 0.0, 1.0];
+                    bone.pose_scale = [1.0, 1.0, 1.0];
+                    if let Some(track) = tracks.and_then(|tracks| tracks.get(&(bone_index as u32))) {
+                        let (loc, rot, scale) = track.eval(frame);
+                        if let Some(v) = loc { bone.pose_loc = v.to_array(); }
+                        if let Some(v) = rot { bone.pose_rot = v.normalize().to_array(); }
+                        if let Some(v) = scale { bone.pose_scale = v.to_array(); }
+                    }
+                }
+            }
+        }
+        if !armature_ids.is_empty() {
+            self.doc.apply_all_skinning();
         }
         // Mesh sequence caches (fluid bakes, Alembic): swap in the mesh for this frame.
         if forge_core::apply_mesh_caches(&mut self.doc.scene, frame) {
