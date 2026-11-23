@@ -20,18 +20,118 @@ type TexResolver<'a> = &'a dyn Fn(&str) -> Option<Vec<u8>>;
 
 #[cfg(not(target_arch = "wasm32"))]
 pub fn load_fbx(path: &Path) -> Result<Scene> {
+    // Prefer ufbx for skins/bones/animation. Always try the built-in parser for
+    // materials/textures (it follows FBX connections + embedded Video bytes better)
+    // and merge those onto the ufbx scene when needed.
     let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
-    // External textures are searched next to the file (and in the usual texture folders).
     let dir = path.parent().map(|p| p.to_path_buf()).unwrap_or_default();
     let stem = path
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("")
         .to_string();
-    load_fbx_bytes_with(&bytes, &move |name: &str| {
-        crate::find_texture_file(&dir, &stem, name)
-    })
+    let resolver = move |name: &str| crate::find_texture_file(&dir, &stem, name);
+    let builtin = load_fbx_bytes_with(&bytes, &resolver);
+
+    match crate::fbx_ufbx::load_fbx_ufbx(path) {
+        Ok(mut scene) => {
+            if let Ok(b) = builtin {
+                merge_fbx_materials_textures(&mut scene, b);
+            }
+            return Ok(scene);
+        }
+        Err(e) => {
+            eprintln!("ufbx FBX import failed ({e:#}); falling back to built-in parser");
+        }
+    }
+    builtin
 }
+
+/// Copy materials/textures from the built-in parse onto a ufbx scene when the
+/// ufbx path left albedo maps empty (common with embedded FBX Video nodes).
+fn merge_fbx_materials_textures(dst: &mut Scene, src: Scene) {
+    if src.textures.is_empty() && src.materials.is_empty() {
+        eprintln!("FBX: built-in parser found no textures/materials to merge");
+        return;
+    }
+
+    let tex_off = dst.textures.len();
+    let mat_off = dst.materials.len();
+
+    let mut tex = (*dst.textures).clone();
+    tex.extend(src.textures.iter().cloned());
+    dst.textures = Arc::new(tex);
+
+    for mut m in src.materials {
+        m.offset_textures(tex_off);
+        if m.base_color_tex.is_some() {
+            let c = m.base_color;
+            if c[0] + c[1] + c[2] < 0.05 {
+                m.base_color = [1.0, 1.0, 1.0, 1.0];
+            }
+        }
+        // Wire a shading graph so Shading mode keeps the map visible.
+        if m.shader_graph.is_none() {
+            m.shader_graph = Some(forge_core::ShaderGraph::from_imported_material(&m));
+        }
+        dst.materials.push(m);
+    }
+
+    fn norm_name(s: &str) -> String {
+        s.rsplit("::").next().unwrap_or(s).to_ascii_lowercase()
+    }
+
+    // Prefer materials that actually have an albedo map.
+    let textured_mi = dst.materials.iter().enumerate().rev().find_map(|(i, m)| {
+        if i >= mat_off && m.base_color_tex.is_some() {
+            Some(i)
+        } else {
+            None
+        }
+    });
+
+    let mut assigned = 0usize;
+    for o in &mut dst.objects {
+        if o.mesh.indices.is_empty() {
+            continue;
+        }
+        let oname = norm_name(&o.name);
+        let matched = src.objects.iter().find(|x| {
+            norm_name(&x.name) == oname
+                || oname.contains(&norm_name(&x.name))
+                || norm_name(&x.name).contains(&oname)
+        });
+        let new_mi = matched
+            .and_then(|so| so.material.map(|i| i + mat_off))
+            .or(textured_mi);
+        let Some(new_mi) = new_mi else {
+            continue;
+        };
+        o.material = Some(new_mi);
+        let mesh = Arc::make_mut(&mut o.mesh);
+        if mesh.groups.is_empty() {
+            mesh.groups.push(MeshGroup {
+                first_index: 0,
+                index_count: mesh.indices.len() as u32,
+                material: Some(new_mi),
+            });
+        } else {
+            for g in mesh.groups.iter_mut() {
+                g.material = Some(new_mi);
+            }
+        }
+        assigned += 1;
+    }
+
+    eprintln!(
+        "FBX: merged materials/textures ({} textures, {} materials, {} meshes assigned)",
+        dst.textures.len(),
+        dst.materials.len(),
+        assigned
+    );
+}
+
+
 
 #[cfg(target_arch = "wasm32")]
 pub fn load_fbx(_path: &Path) -> Result<Scene> {
@@ -1113,12 +1213,26 @@ fn convert_doc(doc: &FbxDoc, resolver: TexResolver) -> Result<Scene> {
         }
     }
 
-    // Reconstruct FBX LimbNode models as editable armature bones. FBX stores
-    // bones as Model objects connected by OO hierarchy links; they are not mesh
-    // geometry and therefore must be imported independently of the geometry loop.
+    // Reconstruct FBX LimbNode / Root / Null models as editable armature bones.
+    // FBX stores bones as Model objects connected by OO hierarchy links.
+    // Accept the class names used by Blender, Maya, 3ds Max and Unity. Also
+    // pull in Null/Locator nodes when the file already contains at least one
+    // explicit LimbNode so pure-hierarchy skeletons still produce bones.
+    let has_explicit_limb = doc.models.values().any(|m| {
+        let k = m.kind.to_ascii_lowercase();
+        k == "limbnode" || k == "limb" || k == "root"
+    });
     let limb_ids: Vec<i64> = doc.models.iter()
-        .filter_map(|(&id, m)| (m.kind.eq_ignore_ascii_case("limbnode") || m.kind.eq_ignore_ascii_case("root") && parents.contains_key(&id)).then_some(id))
+        .filter_map(|(&id, m)| {
+            let k = m.kind.to_ascii_lowercase();
+            let is_bone_class = k == "limbnode" || k == "root" || k == "limb"
+                || k == "bone" || k.contains("limb");
+            let is_null_in_skeleton = has_explicit_limb
+                && (k == "null" || k == "locator" || k == "empty");
+            (is_bone_class || is_null_in_skeleton).then_some(id)
+        })
         .collect();
+    let mut _armature_object_id: Option<u64> = None;
     if !limb_ids.is_empty() {
         let id_to_bone: HashMap<i64, u32> = limb_ids.iter().enumerate().map(|(i, id)| (*id, i as u32)).collect();
         let mut arm = forge_core::ArmatureData { bones: Vec::new(), selected: BTreeSet::new(), active: None };
@@ -1134,6 +1248,11 @@ fn convert_doc(doc: &FbxDoc, resolver: TexResolver) -> Result<Scene> {
             let model = &doc.models[&mid];
             let mut bone = forge_core::Bone::new(model.name.clone(), head, tail);
             bone.parent = parents.get(&mid).and_then(|p| id_to_bone.get(p)).copied();
+            // Store rest orientation from the model world rotation so pose
+            // evaluation starts from the correct bind frame.
+            let w = root_fix * model_world(mid, doc, &parents);
+            let (_, rot, _) = w.to_scale_rotation_translation();
+            bone.rest_orientation = Some(rot.to_array());
             arm.bones.push(bone);
         }
         if !arm.bones.is_empty() {
@@ -1142,6 +1261,7 @@ fn convert_doc(doc: &FbxDoc, resolver: TexResolver) -> Result<Scene> {
             let mut arm_obj = Object::new("Armature", MeshData::default());
             arm_obj.id = scene.alloc_id();
             arm_obj.kind = ObjectKind::Armature(arm);
+            _armature_object_id = Some(arm_obj.id);
             scene.objects.push(arm_obj);
         }
     }

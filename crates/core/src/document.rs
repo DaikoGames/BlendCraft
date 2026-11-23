@@ -1931,8 +1931,12 @@ impl Document {
             .iter()
             .find(|o| o.id == id)
             .ok_or_else(|| "Object not found".to_string())?;
-        if !matches!(obj.kind, crate::ObjectKind::Mesh) {
-            return Err("Only mesh objects can enter UV Editing".into());
+        // Any object with real mesh geometry (skinned FBX meshes are still Mesh).
+        if obj.mesh.indices.is_empty() || obj.mesh.vertices.is_empty() {
+            return Err("Object has no mesh geometry for UV Editing".into());
+        }
+        if matches!(obj.kind, crate::ObjectKind::Armature(_)) {
+            return Err("Select the mesh object, not the armature".into());
         }
         self.checkpoint();
         self.selection.clear();
@@ -3277,36 +3281,61 @@ impl Document {
 
     /// Recompute every skinned mesh from rest pose + current armature pose.
     pub fn apply_all_skinning(&mut self) {
-        // Armature world + deform (armature local)
-        let mut arm_info: Vec<(u64, glam::Mat4, Vec<glam::Mat4>)> = Vec::new();
+        // Armature world + pose / deform matrices (armature local)
+        let mut arm_info: Vec<(u64, glam::Mat4, Vec<glam::Mat4>, Vec<glam::Mat4>)> = Vec::new();
         {
             let worlds = self.scene.world_matrices();
             for (i, o) in self.scene.objects.iter().enumerate() {
                 if let ObjectKind::Armature(a) = &o.kind {
-                    arm_info.push((o.id, worlds[i], a.deform_matrices_hierarchical()));
+                    arm_info.push((
+                        o.id,
+                        worlds[i],
+                        a.deform_matrices_hierarchical(),
+                        a.pose_world_matrices(),
+                    ));
                 }
             }
         }
         let worlds = self.scene.world_matrices();
         for (oi, o) in self.scene.objects.iter_mut().enumerate() {
             let Some(skin) = o.skin.clone() else { continue };
-            let Some((_, arm_world, deform_arm)) =
-                arm_info.iter().find(|(id, _, _)| *id == skin.armature_id)
+            let Some((_, arm_world, deform_arm, pose_world)) =
+                arm_info.iter().find(|(id, _, _, _)| *id == skin.armature_id)
             else {
                 continue;
             };
-            // Mesh local deform mats: convert armature-local deform into mesh-local
-            // rest was weighted in mesh-local with bones mapped to mesh at bind.
-            // Pose deform in armature space D_arm; mesh-local D = inv(mesh_world) * arm_world * D_arm * inv(arm_world) * mesh_world
-            // At bind, bones were mapped with to_mesh = inv(mesh_w)*arm_w. Rest is mesh local.
-            // Approximate: D_mesh ≈ inv(local) * D_arm * local when parented (mesh_world = arm_world * local)
+            // Prefer true inverse-bind matrices when the importer supplied them.
+            // LBS: world = joint_global * IBM * vertex_bind
+            // joint_global = arm_world * pose_world (pose is armature-local).
+            // Vertices are stored in mesh-local; we write:
+            //   deformed_mesh_local = inv(mesh_world) * arm_world * pose * IBM * v
+            // so after the object's world matrix the result matches joint_global*IBM*v.
+            // Do NOT conjugate with from_mesh on the right — IBM already maps
+            // mesh-bind → joint-local; the vertex is in mesh-bind space.
             let mesh_world = worlds[oi];
-            let to_mesh = mesh_world.inverse() * *arm_world;
-            let from_mesh = to_mesh.inverse();
-            let deform_mesh: Vec<glam::Mat4> = deform_arm
-                .iter()
-                .map(|d| to_mesh * *d * from_mesh)
-                .collect();
+            let deform_mesh: Vec<glam::Mat4> = if !skin.inverse_binds.is_empty()
+                && skin.inverse_binds.len() == pose_world.len()
+            {
+                let to_world_from_arm = *arm_world;
+                let to_mesh = mesh_world.inverse();
+                pose_world
+                    .iter()
+                    .zip(skin.inverse_binds.iter())
+                    .map(|(pose, ibm)| {
+                        let inv_bind = glam::Mat4::from_cols_array(ibm);
+                        to_mesh * to_world_from_arm * *pose * inv_bind
+                    })
+                    .collect()
+            } else {
+                // Approximate path: pose * rest^{-1} in armature space, then
+                // change of basis into mesh-local.
+                let to_mesh = mesh_world.inverse() * *arm_world;
+                let from_mesh = to_mesh.inverse();
+                deform_arm
+                    .iter()
+                    .map(|d| to_mesh * *d * from_mesh)
+                    .collect()
+            };
             let (pos, nrm) = skin.deform(&deform_mesh);
             let mut mesh = (*o.mesh).clone();
             for (i, v) in mesh.vertices.iter_mut().enumerate() {

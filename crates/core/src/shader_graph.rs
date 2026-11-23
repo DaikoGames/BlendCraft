@@ -1999,6 +1999,87 @@ impl Default for ShaderGraph {
     }
 }
 
+impl ShaderGraph {
+    /// Build a Principled→Output graph, wiring imported albedo/normal textures so
+    /// Shading mode and GPU graph path keep GLB/FBX materials visible.
+    pub fn from_imported_material(m: &crate::Material) -> Self {
+        let mut g = Self::default();
+        if let Some(pnode) = g.nodes.iter_mut().find(|n| n.kind == ShaderNodeKind::Principled) {
+            pnode.color = if m.base_color_tex.is_some() {
+                [1.0, 1.0, 1.0, m.base_color[3].clamp(0.0, 1.0).max(1.0)]
+            } else {
+                m.base_color
+            };
+            pnode.props[0] = m.metallic;
+            pnode.props[1] = m.roughness;
+            pnode.props[2] = 1.45;
+            pnode.props[3] = m.base_color[3].clamp(0.0, 1.0).max(0.0);
+        }
+        let principled_id = g
+            .nodes
+            .iter()
+            .find(|n| n.kind == ShaderNodeKind::Principled)
+            .map(|n| n.id)
+            .unwrap_or(1);
+        let mut next = g.next_id.max(3);
+        if let Some(ti) = m.base_color_tex {
+            let mut img = ShaderNode::with_kind(next, ShaderNodeKind::ImageTexture, [40.0, 40.0]);
+            img.image_index = Some(ti);
+            let img_id = next;
+            next += 1;
+            g.nodes.push(img);
+            g.links.push(ShaderLink {
+                from: img_id,
+                to: principled_id,
+                from_socket: 0,
+                to_socket: 0,
+            });
+        }
+        if let Some(ti) = m.normal_tex {
+            let mut img = ShaderNode::with_kind(next, ShaderNodeKind::ImageTexture, [40.0, 260.0]);
+            img.image_index = Some(ti);
+            let img_id = next;
+            next += 1;
+            g.nodes.push(img);
+            g.links.push(ShaderLink {
+                from: img_id,
+                to: principled_id,
+                from_socket: 0,
+                to_socket: 5, // Normal on Principled
+            });
+        }
+        if let Some(ti) = m.emissive_tex {
+            let mut img = ShaderNode::with_kind(next, ShaderNodeKind::ImageTexture, [40.0, 480.0]);
+            img.image_index = Some(ti);
+            let img_id = next;
+            next += 1;
+            g.nodes.push(img);
+            g.links.push(ShaderLink {
+                from: img_id,
+                to: principled_id,
+                from_socket: 0,
+                to_socket: 6,
+            });
+        }
+        g.next_id = next;
+        g
+    }
+
+    /// True when the graph is only the empty Principled→Output default (no images).
+    pub fn is_trivial_untextured(&self) -> bool {
+        let has_image = self
+            .nodes
+            .iter()
+            .any(|n| n.kind == ShaderNodeKind::ImageTexture && n.image_index.is_some());
+        !has_image
+            && self.nodes.len() <= 2
+            && self
+                .nodes
+                .iter()
+                .all(|n| matches!(n.kind, ShaderNodeKind::Principled | ShaderNodeKind::Output))
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct GraphEvalResult {
     pub base_color: [f32; 4],

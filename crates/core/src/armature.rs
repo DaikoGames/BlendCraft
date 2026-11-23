@@ -486,6 +486,84 @@ impl ArmatureData {
             .collect()
     }
 
+    /// Hierarchical pose matrices in armature space (the left factor of the
+    /// classic LBS deform `pose * inv_bind`). Used when the skin supplies true
+    /// inverse-bind matrices from the source file.
+    pub fn pose_world_matrices(&self) -> Vec<Mat4> {
+        let n = self.bones.len();
+        let mut rest_world = vec![Mat4::IDENTITY; n];
+        let mut pose_world = vec![Mat4::IDENTITY; n];
+        let order = self.topo_order();
+        const CONNECT_EPS: f32 = 1.0e-3;
+
+        for &i in &order {
+            let b = &self.bones[i];
+            rest_world[i] = Self::rest_matrix(b);
+            let rest_rot = b.rest_rot_q();
+
+            if b.uses_absolute_local_pose() {
+                let local = Mat4::from_scale_rotation_translation(
+                    b.pose_scale_v(),
+                    b.pose_rot_q(),
+                    b.pose_loc_v(),
+                );
+                if let Some(p) = b.parent {
+                    let pi = p as usize;
+                    pose_world[i] = pose_world[pi] * local;
+                } else {
+                    let rest_local = Mat4::from_scale_rotation_translation(
+                        Vec3::from(b.rest_local_scale.unwrap_or([1.0, 1.0, 1.0])),
+                        Quat::from_xyzw(
+                            b.rest_local_rot.unwrap_or([0.0, 0.0, 0.0, 1.0])[0],
+                            b.rest_local_rot.unwrap_or([0.0, 0.0, 0.0, 1.0])[1],
+                            b.rest_local_rot.unwrap_or([0.0, 0.0, 0.0, 1.0])[2],
+                            b.rest_local_rot.unwrap_or([0.0, 0.0, 0.0, 1.0])[3],
+                        )
+                        .normalize(),
+                        Vec3::from(b.rest_local_loc.unwrap_or([0.0, 0.0, 0.0])),
+                    );
+                    pose_world[i] = rest_world[i] * rest_local.inverse() * local;
+                }
+                continue;
+            }
+
+            if let Some(p) = b.parent {
+                let pi = p as usize;
+                let parent = &self.bones[pi];
+                let parent_len = parent.length().max(1e-5);
+                let at_parent_tip =
+                    b.head_v().distance(parent.tail_v()) <= CONNECT_EPS.max(parent_len * 1e-4);
+                let at_parent_head =
+                    b.head_v().distance(parent.head_v()) <= CONNECT_EPS.max(parent_len * 1e-4);
+
+                let (_, parent_pose_rot, _) = pose_world[pi].to_scale_rotation_translation();
+                let (_, parent_rest_rot, _) = rest_world[pi].to_scale_rotation_translation();
+                let local_rest_rot = (parent_rest_rot.inverse() * rest_rot).normalize();
+                let rot = (parent_pose_rot * local_rest_rot * b.pose_rot_q()).normalize();
+                let (ps, _, _) = pose_world[pi].to_scale_rotation_translation();
+                let scale = ps * b.pose_scale_v();
+
+                let parent_delta = pose_world[pi] * rest_world[pi].inverse();
+                let mut posed_head =
+                    parent_delta.transform_point3(b.head_v()) + parent_pose_rot * b.pose_loc_v();
+                if at_parent_tip {
+                    posed_head = pose_world[pi].transform_point3(Vec3::new(0.0, parent_len, 0.0));
+                } else if at_parent_head {
+                    posed_head = pose_world[pi].transform_point3(Vec3::ZERO);
+                }
+
+                pose_world[i] = Mat4::from_scale_rotation_translation(scale, rot, posed_head);
+            } else {
+                pose_world[i] = Mat4::from_scale_rotation_translation(
+                    b.pose_scale_v(),
+                    (rest_rot * b.pose_rot_q()).normalize(),
+                    b.head_v() + b.pose_loc_v(),
+                );
+            }
+        }
+        pose_world
+    }
+
     fn topo_order(&self) -> Vec<usize> {
         let n = self.bones.len();
         let mut indeg = vec![0u32; n];
@@ -721,6 +799,14 @@ pub struct SkinBinding {
     pub weights: Vec<[f32; 4]>,
     pub rest_positions: Vec<[f32; 3]>,
     pub rest_normals: Vec<[f32; 3]>,
+    /// Optional inverse-bind matrices (column-major 4×4, one per bone, in the same
+    /// order as the armature bones / glTF skin joints). When present and the same
+    /// length as the armature, LBS uses `pose_world * inv_bind` instead of the
+    /// approximate `pose * rest.inverse()`. This is required for correct alignment
+    /// of many glTF/GLB files where the mesh bind space differs from the joint
+    /// rest matrices.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inverse_binds: Vec<[f32; 16]>,
 }
 
 impl SkinBinding {
@@ -762,6 +848,7 @@ impl SkinBinding {
             weights,
             rest_positions: positions.to_vec(),
             rest_normals: normals.to_vec(),
+            inverse_binds: Vec::new(),
         }
     }
 

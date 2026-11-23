@@ -2571,7 +2571,7 @@ impl App {
         }
     }
 
-    /// Import every model (.fbx / .obj / .glb) inside a Unity `.unitypackage`.
+    /// Import every model (.fbx / .obj / .glb / .gltf) inside a Unity `.unitypackage`.
     fn import_unitypackage(&mut self, path: &Path) {
         #[cfg(target_arch = "wasm32")]
         {
@@ -2585,7 +2585,7 @@ impl App {
                     if models.is_empty() {
                         let extra = notes.first().map(|n| format!(" ({n})")).unwrap_or_default();
                         self.status(format!(
-                            "No importable models (.fbx/.obj/.glb) found in {}{extra}",
+                            "No importable models (.fbx/.obj/.glb/.gltf) found in {}{extra}",
                             path.display()
                         ));
                         return;
@@ -2681,9 +2681,15 @@ impl App {
         match res {
             Ok(scene) => {
                 let n = scene.objects.len();
-                let has_skeletal_animation = !scene.animation.bone_tracks.is_empty();
+                let has_skin = scene.objects.iter().any(|o| o.skin.is_some());
                 self.doc.import_scene(scene);
-                if has_skeletal_animation { self.apply_animation_frame(); }
+                // Show the imported rest / bind pose. Apply skinning so the mesh
+                // matches the bones, but do NOT evaluate animation keys — that was
+                // forcing the first frame of the clip onto every bone.
+                // Scrubbing the timeline or pressing play still applies animation.
+                if has_skin {
+                    self.doc.apply_all_skinning();
+                }
                 self.frame(false);
                 self.status(format!("Imported {n} object(s) from {}", path.display()));
             }

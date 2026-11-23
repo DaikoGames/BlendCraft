@@ -298,7 +298,10 @@ impl AnimationData {
         if let Some(i) = self.active_clip {
             self.frame_start = self.clips[i].frame_start;
             self.frame_end = self.clips[i].frame_end.max(self.frame_start);
-            self.set_frame(self.frame_current);
+            // Always jump to the start of the newly selected action so playback
+            // and scrubbing use that clip's keys (not a frame left over from
+            // the previous clip that may fall outside this clip's range).
+            self.frame_current = self.frame_start;
             self.playing = false;
         }
     }

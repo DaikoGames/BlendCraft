@@ -1,3 +1,29 @@
+## UV Editing restored to header + .gltf import (2026-11-23b)
+
+- **UV Editing** button is back in the main header mode bar (after Sculpt Mode); it toggles UV mode and cleanly exits other modes/workspaces first. `U` shortcut and the Mode / Tools menu entries are unchanged.
+- **.gltf import**: `.gltf` (JSON + external `.bin`/images, or embedded data URIs) loads alongside `.glb` via File > Import, drag & drop, and CLI. A missing/unreadable texture no longer aborts the import; textures are searched next to the model and in common sub-folders.
+- **.unitypackage**: `.gltf` models inside packages are imported too, with their `.bin` / image side files.
+
+## FBX: animation stacks via ufbx (2026-11-23)
+
+- ufbx remains the FBX backend (best practical option for skins + bind poses + curves).
+- Each anim stack is sampled with `Node::evaluate_transform` into BlendCraft bone tracks
+  (absolute local TRS), same clip model as glTF — multi-clip switch/play works.
+- Gaps left: rich PBR textures from FBX vendor materials; those still prefer GLB.
+
+## FBX skeletal import via ufbx (2026-11-22e)
+
+- FBX import prefers **ufbx**: real skin clusters, inverse bind matrices, bone hierarchy.
+- Units/axes follow ufbx defaults; skinned meshes stay at identity so IBMs match rest positions.
+- No auto-weights (those tore meshes). Built-in parser remains the fallback for simple mesh FBX.
+- Animation curves are not yet sampled into BlendCraft clips (use GLB for multi-clip animation).
+
+## Skeletal import overhaul (2026-11-22)
+
+- **GLB/glTF bind pose**: Rest pose is recovered from inverse-bind matrices when present (`inv(IBM)` hierarchy), so the armature opens in the real T-pose even when node transforms were left in the first animation frame. Skinning uses `pose_world × IBM`.
+- **Import does not apply the first anim key**: After load, skinning is applied at rest only; timeline scrub / play still drives animation.
+- **FBX via ufbx**: `load_fbx` prefers the `ufbx` crate (skins, bind poses, bone hierarchy). Falls back to the built-in parser if ufbx fails. First `cargo build` may need minor field adjustments to match the installed `ufbx` version.
+
 ## Export: materials, textures, bones (2026-11-20d)
 
 - **OBJ**: writes a sibling `.mtl` with Kd / map_Kd / map_Bump, embeds PNG textures next to the OBJ, and `usemtl` per object/group.

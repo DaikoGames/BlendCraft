@@ -982,28 +982,40 @@ impl CyclesState {
         // One shared texture snapshot for all graph materials (avoids N clones).
         let shared_textures: Arc<Vec<TextureData>> = Arc::new(scene.textures.as_ref().clone());
 
+        // Keep texture indices identical to Scene::textures so material.base_color_tex
+        // (and other slots) map 1:1. Previously only used albedos were compacted into
+        // a new list, which was easy to desync from material indices on import.
+        for t in scene.textures.iter() {
+            geo.textures.push(tex_from_data(t));
+        }
+
         // Resolve every material once. Prefer live shader-graph evaluation so procedural
         // shading works even on meshes with broken/missing UVs.
         let mut mat_map: HashMap<usize, u32> = HashMap::new();
         for (mi, mat) in scene.materials.iter().enumerate() {
             let tex_idx = mat
                 .base_color_tex
-                .and_then(|ti| scene.textures.get(ti))
-                .map(|t| {
-                    let idx = geo.textures.len() as i32;
-                    geo.textures.push(tex_from_data(t));
-                    idx
+                .filter(|&ti| {
+                    scene.textures.get(ti).map_or(false, |t| {
+                        t.width > 0 && t.height > 0 && !t.rgba8.is_empty()
+                    })
                 })
+                .map(|ti| ti as i32)
                 .unwrap_or(-1);
 
             let graph_idx = if let Some(graph) = mat.shader_graph.as_ref() {
-                let idx = geo.graphs.len() as i32;
-                geo.graphs.push(GraphEvalData {
-                    graph: graph.clone(),
-                    material: mat.clone(),
-                    textures: Arc::clone(&shared_textures),
-                });
-                idx
+                // Don't let an empty Principled graph hide an imported albedo map.
+                if graph.is_trivial_untextured() && mat.base_color_tex.is_some() {
+                    -1
+                } else {
+                    let idx = geo.graphs.len() as i32;
+                    geo.graphs.push(GraphEvalData {
+                        graph: graph.clone(),
+                        material: mat.clone(),
+                        textures: Arc::clone(&shared_textures),
+                    });
+                    idx
+                }
             } else {
                 -1
             };
@@ -1225,18 +1237,15 @@ impl CyclesState {
 }
 
 fn convert_material(m: &Material, tex_index: i32, graph_index: i32) -> Mat {
-    // When a base-color texture is bound (and no live graph), let the texture drive albedo.
-    // With a live graph, albedo is filled per-hit in `shade_mat`.
-    let albedo = if tex_index >= 0 && graph_index < 0 {
-        Vec3::ONE
-    } else {
-        Vec3::new(m.base_color[0], m.base_color[1], m.base_color[2])
-    };
+    // Always keep the base-color *factor* as albedo. Textured materials multiply
+    // sample_tex(...) * albedo in shade_mat (glTF convention). Previously albedo
+    // was forced to ONE whenever a texture index was set, so a missing/empty
+    // texture or bad UVs produced a washed-out white surface in Cycles.
     Mat {
-        albedo,
+        albedo: Vec3::new(m.base_color[0], m.base_color[1], m.base_color[2]).max(Vec3::ZERO),
         emission: Vec3::new(m.emissive[0], m.emissive[1], m.emissive[2]),
         metallic: m.metallic,
-        roughness: m.roughness,
+        roughness: m.roughness.max(0.02),
         tex: tex_index,
         graph: graph_index,
     }
@@ -1300,7 +1309,7 @@ fn sample_tex(tex: &TexImage, u: f32, v: f32) -> Vec3 {
     let u = u - u.floor();
     let v = v - v.floor();
     let x = u * (w - 1.0).max(0.0);
-    let y = (1.0 - v) * (h - 1.0).max(0.0); // V flips to match typical image origin
+    let y = v * (h - 1.0).max(0.0); // glTF UV origin = top-left, matches row-major RGBA
     let x0 = x.floor() as u32;
     let y0 = y.floor() as u32;
     let x1 = (x0 + 1).min(tex.width.saturating_sub(1));
@@ -1350,16 +1359,20 @@ fn shade_mat(geo: &Geometry, mat: &Mat, u: f32, v: f32, position: Vec3) -> Mat {
     }
     if mat.tex >= 0 {
         if let Some(tex) = geo.textures.get(mat.tex as usize) {
-            let albedo = sample_tex(tex, u, v) * mat.albedo;
-            return Mat {
-                albedo,
-                emission: mat.emission,
-                metallic: mat.metallic,
-                roughness: mat.roughness,
-                tex: -1,
-                graph: -1,
-            };
+            if tex.width > 0 && tex.height > 0 && !tex.rgba.is_empty() {
+                let albedo = sample_tex(tex, u, v) * mat.albedo;
+                return Mat {
+                    albedo,
+                    emission: mat.emission,
+                    metallic: mat.metallic,
+                    roughness: mat.roughness,
+                    tex: -1,
+                    graph: -1,
+                };
+            }
         }
+        // Texture index set but data missing — keep factor color, not white.
+        return *mat;
     }
     *mat
 }

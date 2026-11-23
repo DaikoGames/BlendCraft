@@ -1,4 +1,4 @@
-//! File import/export. glTF 2.0 / GLB (geometry, node transforms, PBR materials, textures)
+//! File import/export. glTF 2.0 (.gltf and .glb) (geometry, node transforms, PBR materials, textures)
 //! and HDR environment maps.
 use anyhow::{Context, Result};
 use forge_core::{
@@ -12,6 +12,7 @@ use std::sync::Arc;
 mod alembic;
 mod export;
 mod fbx;
+mod fbx_ufbx;
 mod obj;
 mod usd;
 #[cfg(not(target_arch = "wasm32"))]
@@ -119,18 +120,75 @@ pub(crate) fn find_texture_file(dir: &Path, model_stem: &str, name: &str) -> Opt
     None
 }
 
+/// Reads a `.glb` or `.gltf` (JSON + external `.bin` / image files, or data URIs).
+///
+/// Same steps as `gltf::import`, except that an image that cannot be read or decoded does
+/// not abort the whole import: it becomes an empty placeholder that `load_gltf` then
+/// retries via `find_texture_file` (common for `.gltf` files whose textures were moved).
+#[cfg(not(target_arch = "wasm32"))]
+fn import_gltf_tolerant(
+    path: &Path,
+) -> Result<(gltf::Document, Vec<gltf::buffer::Data>, Vec<gltf::image::Data>)> {
+    let ctx = || format!("reading {}", path.display());
+    let gltf::Gltf { document, blob } = gltf::Gltf::open(path).with_context(ctx)?;
+    let base = path.parent();
+    let buffers = gltf::import_buffers(&document, base, blob).with_context(ctx)?;
+    let images = match gltf::import_images(&document, base, &buffers) {
+        Ok(images) => images,
+        Err(_) => document
+            .images()
+            .map(|_| gltf::image::Data {
+                pixels: Vec::new(),
+                format: gltf::image::Format::R8G8B8A8,
+                width: 0,
+                height: 0,
+            })
+            .collect(),
+    };
+    Ok((document, buffers, images))
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 pub fn load_gltf(path: &Path) -> Result<Scene> {
-    let (doc, buffers, images) =
-        gltf::import(path).with_context(|| format!("reading {}", path.display()))?;
+    let (doc, buffers, images) = import_gltf_tolerant(path)?;
     let mut scene = Scene::default();
     scene.materials = doc.materials().map(|m| convert_material(&m)).collect();
-    scene.textures = Arc::new(
-        doc.images()
-            .zip(images.iter())
-            .map(|(img, data)| convert_image(img.name().unwrap_or("Image"), data))
-            .collect::<Vec<_>>(),
-    );
+    // Decode every image. glTF embeds PNG/JPEG in the GLB binary (or as URIs).
+    // If the crate returns empty data (rare decode miss), fall back to decoding the
+    // buffer-view bytes with the `image` crate so Cycles still gets albedo maps.
+    let mut textures = Vec::with_capacity(images.len());
+    for (img, data) in doc.images().zip(images.iter()) {
+        let name = img.name().unwrap_or("Image");
+        let mut tex = convert_image(name, data);
+        if tex.width == 0 || tex.height == 0 || tex.rgba8.is_empty() {
+            // Buffer-view embedded image (typical for .glb)
+            match img.source() {
+                gltf::image::Source::View { view, mime_type: _ } => {
+                    let buf = &buffers[view.buffer().index()].0;
+                    let start = view.offset();
+                    let end = start + view.length();
+                    if end <= buf.len() {
+                        if let Some(decoded) = decode_image_bytes(&buf[start..end], name) {
+                            tex = decoded;
+                        }
+                    }
+                }
+                gltf::image::Source::Uri { uri, .. } => {
+                    if let Some(bytes) = find_texture_file(
+                        path.parent().unwrap_or_else(|| Path::new(".")),
+                        path.file_stem().and_then(|s| s.to_str()).unwrap_or(""),
+                        uri,
+                    ) {
+                        if let Some(decoded) = decode_image_bytes(&bytes, name) {
+                            tex = decoded;
+                        }
+                    }
+                }
+            }
+        }
+        textures.push(tex);
+    }
+    scene.textures = Arc::new(textures);
     // Roots of the default scene; files without any scene fall back to every parentless node.
     let roots: Vec<gltf::Node> = match doc.default_scene().or_else(|| doc.scenes().next()) {
         Some(s) => s.nodes().collect(),
@@ -165,6 +223,7 @@ pub fn load_gltf(path: &Path) -> Result<Scene> {
         }
     }
     let mut armature_ids: HashMap<usize, u64> = HashMap::new();
+    let mut armature_worlds: HashMap<u64, Mat4> = HashMap::new();
     let mut node_to_bone: HashMap<usize, (u64, u32)> = HashMap::new();
     let mut node_rest_trs: HashMap<usize, (Vec3, glam::Quat, Vec3)> = HashMap::new();
     for skin in doc.skins() {
@@ -184,16 +243,18 @@ pub fn load_gltf(path: &Path) -> Result<Scene> {
             }).and_then(|root| worlds.get(&root.index()).copied()))
             .unwrap_or(Mat4::IDENTITY);
         let world_to_armature = armature_world.inverse();
+
+        // Rest pose always comes from joint NODE transforms so animation channels
+        // (absolute local TRS on those nodes) stay in the same space.
+        // Inverse-bind matrices are stored on SkinBinding and used only for LBS
+        // skinning — they are NOT used to replace rest (that mixed spaces and
+        // broke both T-pose display and animation).
         let mut arm = ArmatureData::default();
         arm.bones.clear();
         for joint in &joints {
             let joint_world = worlds.get(&joint.index()).copied().unwrap_or(Mat4::IDENTITY);
             let joint_local = world_to_armature * joint_world;
             let head = joint_local.transform_point3(Vec3::ZERO);
-            // Full armature-space orientation of the joint. Stored on the bone so
-            // rest_matrix / hierarchical pose use the same frame as glTF local TRS
-            // (including twist). Head→tail alone cannot recover twist and was the
-            // main reason imported animations looked rotated wrong.
             let (_, joint_rot, _) = joint_local.to_scale_rotation_translation();
             let joint_rot = joint_rot.normalize();
             let local_y = (joint_rot * Vec3::Y).normalize_or_zero();
@@ -202,8 +263,6 @@ pub fn load_gltf(path: &Path) -> Result<Scene> {
             } else {
                 head + Vec3::Y * 0.1
             };
-            // Prefer a child joint as the bone tail when present (display length).
-            // Orientation still comes from rest_orientation, not from this vector.
             if let Some(child) = joint.children().find(|c| joint_to_bone.contains_key(&c.index())) {
                 let child_world = worlds.get(&child.index()).copied().unwrap_or(Mat4::IDENTITY);
                 let child_head = (world_to_armature * child_world).transform_point3(Vec3::ZERO);
@@ -223,9 +282,7 @@ pub fn load_gltf(path: &Path) -> Result<Scene> {
             let mut bone = Bone::new(joint.name().unwrap_or("Joint"), head, tail);
             bone.parent = parent_bone;
             bone.rest_orientation = Some(joint_rot.to_array());
-            // Absolute local TRS relative to the parent node (glTF joint.transform).
-            // Pose channels store the same absolute local values; hierarchical eval
-            // composes parent * local so root/hip motion no longer drifts on +Y.
+            // Absolute local TRS of the joint node (same space as animation keys).
             let (lt, lr, ls) = joint.transform().decomposed();
             let lr = glam::Quat::from_array(lr).normalize();
             bone.rest_local_loc = Some(lt);
@@ -245,6 +302,7 @@ pub fn load_gltf(path: &Path) -> Result<Scene> {
         arm_obj.id = scene.alloc_id();
         arm_obj.kind = ObjectKind::Armature(arm);
         armature_ids.insert(skin.index(), arm_obj.id);
+        armature_worlds.insert(arm_obj.id, armature_world);
         for (bone_index, joint) in joints.iter().enumerate() {
             node_to_bone.insert(joint.index(), (arm_obj.id, bone_index as u32));
             let (t, r, scale) = joint.transform().decomposed();
@@ -253,7 +311,7 @@ pub fn load_gltf(path: &Path) -> Result<Scene> {
         scene.objects.push(arm_obj);
     }
     for node in &roots {
-        visit(&node, Mat4::IDENTITY, &buffers, &worlds, &armature_ids, &mut scene);
+        visit(&node, Mat4::IDENTITY, &buffers, &worlds, &armature_ids, &armature_worlds, &mut scene);
     }
     // Import glTF animation channels into per-armature bone tracks. glTF node
     // animation targets the joint node; node_to_bone maps that node to the
@@ -511,6 +569,7 @@ fn visit(
     buffers: &[gltf::buffer::Data],
     worlds: &HashMap<usize, Mat4>,
     armature_ids: &HashMap<usize, u64>,
+    armature_worlds: &HashMap<u64, Mat4>,
     scene: &mut Scene,
 ) {
     let world = parent * Mat4::from_cols_array_2d(&node.transform().matrix());
@@ -523,10 +582,21 @@ fn visit(
             let Some(pos) = reader.read_positions() else {
                 continue;
             };
-            let mut positions: Vec<[f32; 3]> = pos.collect();
-            let mut normals: Option<Vec<[f32; 3]>> = reader.read_normals().map(|n| n.collect());
-            let uvs: Option<Vec<[f32; 2]>> =
-                reader.read_tex_coords(0).map(|t| t.into_f32().collect());
+            let positions: Vec<[f32; 3]> = pos.collect();
+            let normals: Option<Vec<[f32; 3]>> = reader.read_normals().map(|n| n.collect());
+            // Prefer the UV set referenced by the base-color texture (often 0, sometimes 1).
+            // Many GLBs put albedo on TEXCOORD_1; only reading set 0 left Cycles sampling
+            // black/white while the mesh looked textured in other apps.
+            let uv_set = prim
+                .material()
+                .pbr_metallic_roughness()
+                .base_color_texture()
+                .map(|info| info.tex_coord())
+                .unwrap_or(0);
+            let uvs: Option<Vec<[f32; 2]>> = reader
+                .read_tex_coords(uv_set)
+                .or_else(|| reader.read_tex_coords(0))
+                .map(|t| t.into_f32().collect());
             let raw_indices: Vec<u32> = match reader.read_indices() {
                 Some(idx) => idx.into_u32().collect(),
                 None => (0..positions.len() as u32).collect(),
@@ -534,20 +604,39 @@ fn visit(
             let Some(indices) = triangle_indices(prim.mode(), raw_indices) else {
                 continue; // points / lines
             };
-            // JOINTS_n and WEIGHTS_n are vertex attributes on each primitive,
-            // not properties of gltf::Skin. Read them from the mesh primitive reader.
+            // JOINTS_n / WEIGHTS_n + inverse-bind matrices (the latter is required for
+            // correct bone↔mesh alignment on real-world GLB files).
             let skin_binding = if let Some(armature_id) = skin_armature_id {
                 match (reader.read_joints(0), reader.read_weights(0)) {
                     (Some(joints), Some(weights)) => {
                         let joints: Vec<[u16; 4]> = joints.into_u16().collect();
                         let weights: Vec<[f32; 4]> = weights.into_f32().collect();
                         if joints.len() == positions.len() && weights.len() == positions.len() {
+                            let mut inverse_binds: Vec<[f32; 16]> = Vec::new();
+                            if let Some(skin) = node.skin() {
+                                let skin_reader = skin.reader(|b| Some(&buffers[b.index()].0[..]));
+                                if let Some(ibms) = skin_reader.read_inverse_bind_matrices() {
+                                    for m in ibms {
+                                        // glTF matrices are column-major; build Mat4 then flatten
+                                        // with to_cols_array so storage matches from_cols_array
+                                        // used at skinning time.
+                                        let mat = Mat4::from_cols(
+                                            glam::Vec4::new(m[0][0], m[0][1], m[0][2], m[0][3]),
+                                            glam::Vec4::new(m[1][0], m[1][1], m[1][2], m[1][3]),
+                                            glam::Vec4::new(m[2][0], m[2][1], m[2][2], m[2][3]),
+                                            glam::Vec4::new(m[3][0], m[3][1], m[3][2], m[3][3]),
+                                        );
+                                        inverse_binds.push(mat.to_cols_array());
+                                    }
+                                }
+                            }
                             Some(forge_core::SkinBinding {
                                 armature_id,
                                 joints,
                                 weights,
                                 rest_positions: positions.clone(),
                                 rest_normals: normals.clone().unwrap_or_else(|| vec![[0.0, 1.0, 0.0]; positions.len()]),
+                                inverse_binds,
                             })
                         } else { None }
                     }
@@ -578,8 +667,9 @@ fn visit(
             } else {
                 md.name.clone()
             };
-            // glTF skinned vertex positions are in mesh bind space; their skin
-            // is evaluated relative to joint transforms, not baked into vertices.
+            // glTF skinned vertex positions are now in armature-local bind space;
+            // the mesh object itself stays at the identity so skinning does not
+            // double-apply the armature transform.
             let obj_world = if skin_binding.is_some() { Mat4::IDENTITY } else { world };
             let mut obj = Object::from_matrix(name, obj_world, Arc::new(md));
             obj.material = prim.material().index();
@@ -588,7 +678,7 @@ fn visit(
         }
     }
     for child in node.children() {
-        visit(&child, world, buffers, worlds, armature_ids, scene);
+        visit(&child, world, buffers, worlds, armature_ids, armature_worlds, scene);
     }
 }
 

@@ -541,6 +541,28 @@ pub fn draw(
                     if doc.weight_paint_mode { actions.push(Action::ToggleWeightPaintMode); }
                     if !in_sculpt { actions.push(Action::ToggleSculptMode); }
                 }
+                if ui
+                    .add_enabled(
+                        mesh_ok || doc.uv_mode,
+                        egui::SelectableLabel::new(doc.uv_mode, "UV Editing"),
+                    )
+                    .clicked()
+                {
+                    st.shading_mode = false;
+                    st.animation_mode = false;
+                    st.rendering_mode = false;
+                    st.compositing_mode = false;
+                    st.geometry_nodes_mode = false;
+                    st.scripting_mode = false;
+                    if in_edit { actions.push(Action::ToggleEditMode); }
+                    if in_pose { actions.push(Action::TogglePoseMode); }
+                    if in_sculpt { actions.push(Action::ToggleSculptMode); }
+                    if doc.paint_mode { actions.push(Action::TogglePaintMode); }
+                    if doc.vertex_paint_mode { actions.push(Action::ToggleVertexPaintMode); }
+                    if doc.weight_paint_mode { actions.push(Action::ToggleWeightPaintMode); }
+                    // Toggles: enters UV mode if off, exits to Object Mode if on.
+                    actions.push(Action::ToggleUvMode);
+                }
 
                 ui.separator();
 
@@ -2369,27 +2391,25 @@ fn draw_shading_editor(
         return;
     };
 
-    // Load persisted graph for this material once (or when empty).
-    if let Some(g) = doc.scene.materials[mi].shader_graph.clone() {
-        if st.shader_nodes.is_empty()
-            || st.shader_nodes.iter().map(|n| n.id).collect::<Vec<_>>()
-                != g.nodes.iter().map(|n| n.id).collect::<Vec<_>>()
-        {
-            // Only replace when the material graph differs from the UI session
-            // and the UI was empty or just switched materials.
-        }
-    }
-    // Prefer material graph when UI has only the default empty ensure state and material has one.
-    if let Some(g) = &doc.scene.materials[mi].shader_graph {
-        if !g.nodes.is_empty() && (st.shader_nodes.is_empty() || st.shader_material_mi != Some(mi))
-        {
-            load_graph_into_ui(st, g);
-        }
-    } else if st.shader_material_mi != Some(mi) {
-        // Fresh material → default graph
-        let g = ShaderGraph::default();
+    // Load / build graph for this material when switching materials or starting empty.
+    // Imported GLB/FBX materials often have base_color_tex but no nodes — build
+    // Image Texture → Principled so Shading mode does not wipe the map to white.
+    if st.shader_material_mi != Some(mi) || st.shader_nodes.is_empty() {
+        let mat = &doc.scene.materials[mi];
+        let g = match &mat.shader_graph {
+            Some(existing)
+                if !existing.nodes.is_empty()
+                    && !(existing.is_trivial_untextured() && mat.base_color_tex.is_some()) =>
+            {
+                existing.clone()
+            }
+            _ => {
+                let built = ShaderGraph::from_imported_material(mat);
+                doc.scene.materials[mi].shader_graph = Some(built.clone());
+                built
+            }
+        };
         load_graph_into_ui(st, &g);
-        doc.scene.materials[mi].shader_graph = Some(g);
     }
     st.shader_material_mi = Some(mi);
 
@@ -9573,7 +9593,7 @@ fn menu_bar(
                 ui,
                 actions,
                 b,
-                "Import… (glTF, GLB, OBJ, FBX, Alembic, Unity package)",
+                "Import… (glTF .gltf/.glb, OBJ, FBX, Alembic, Unity package)",
                 Action::Import,
                 true,
             );

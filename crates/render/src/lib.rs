@@ -1133,6 +1133,10 @@ fn vs_main(@location(0) pos: vec3<f32>) -> @builtin(position) vec4<f32> {
             flags |= 4;
         }
         let graph_program = m.shader_graph.as_ref().and_then(|graph| {
+            // Trivial Principled→Output with no image nodes must not hide imported textures.
+            if graph.is_trivial_untextured() && m.base_color_tex.is_some() {
+                return None;
+            }
             match shader_graph_wgsl::shader_source(
                 graph,
                 include_str!("common.wgsl"),
