@@ -38,8 +38,11 @@ jobs:
 
       - run: cargo test -p forge-core -p forge-video -p forge-app
 
+  # ---------------------------------------------------------------------------
+  # Browser website: same application as desktop, packaged as static files.
+  # ---------------------------------------------------------------------------
   wasm:
-    name: WebAssembly (WebApp)
+    name: Website (WASM)
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
@@ -49,49 +52,112 @@ jobs:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
         with:
-          key: wasm
+          prefix-key: wasm
 
       - name: Install wasm-bindgen-cli
-        run: cargo install wasm-bindgen-cli --version 0.2.100 --locked || cargo install wasm-bindgen-cli --locked
+        run: cargo install wasm-bindgen-cli --locked
 
-      - name: Build forge-core / forge-io for wasm
-        run: cargo check -p forge-core -p forge-io --target wasm32-unknown-unknown --no-default-features
-
-      - name: Build application as WASM (no Python scripting)
+      - name: Build application for wasm32
         run: |
-          # Scripting is desktop-only; disable default features for the browser build.
-          cargo build --release -p forge-app --target wasm32-unknown-unknown --no-default-features
+          cargo build --release -p forge-app \
+            --target wasm32-unknown-unknown \
+            --no-default-features
 
-      - name: Package static WebApp
+      - name: Package static website
         run: |
-          set -e
+          set -euo pipefail
           OUT=web-dist
           rm -rf "$OUT"
           mkdir -p "$OUT"
-          # wasm-bindgen produces the JS glue + .wasm that the HTML loads.
-          wasm-bindgen --target web --out-dir "$OUT" --out-name forge_app \
-            target/wasm32-unknown-unknown/release/forge_app.wasm
-          # Entry point and any static assets.
+
+          WASM_IN="target/wasm32-unknown-unknown/release/forge_app.wasm"
+          test -f "$WASM_IN"
+
+          wasm-bindgen --target web --out-dir "$OUT" --out-name forge_app "$WASM_IN"
+
           cp web/index.html "$OUT/"
-          # Optional: copy logo for favicon-like use if present.
           if [ -f crates/app/logo.png ]; then
-            cp crates/app/logo.png "$OUT/" || true
+            cp crates/app/logo.png "$OUT/"
           fi
-          # Sanity: required files must exist.
+          if [ -f web/serve.sh ]; then
+            cp web/serve.sh "$OUT/"
+            chmod +x "$OUT/serve.sh"
+          fi
+
+          cat > "$OUT/README.txt" << 'EOF'
+          BlendCraft browser website
+          ==========================
+          Upload this entire folder to any static host, or run:
+            python3 -m http.server 8080
+          Then open http://127.0.0.1:8080/
+          EOF
+          sed -i 's/^          //' "$OUT/README.txt"
+
           test -f "$OUT/index.html"
           test -f "$OUT/forge_app.js"
           test -f "$OUT/forge_app_bg.wasm" -o -f "$OUT/forge_app.wasm"
-          ls -lh "$OUT"
-          (cd "$OUT" && zip -r ../blendcraft-webapp.zip .)
-          ls -lh blendcraft-webapp.zip
 
-      - name: Upload WebApp ZIP
+          (cd "$OUT" && zip -r ../blendcraft-website.zip .)
+          ls -lh blendcraft-website.zip
+
+      - name: Upload website ZIP
         uses: actions/upload-artifact@v5
         with:
-          name: blendcraft-webapp
-          path: blendcraft-webapp.zip
+          name: blendcraft-website
+          path: blendcraft-website.zip
           if-no-files-found: error
 
+  # Optional: deploy the website ZIP to GitHub Pages.
+  # Repo Settings → Pages → Source: GitHub Actions
+  website:
+    name: Deploy GitHub Pages
+    needs: [wasm]
+    runs-on: ubuntu-24.04
+    if: github.event_name != 'pull_request'
+    continue-on-error: true
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Download website artifact
+        uses: actions/download-artifact@v5
+        with:
+          name: blendcraft-website
+          path: webapp
+
+      - name: Unpack site root
+        run: |
+          set -euo pipefail
+          mkdir -p site
+          if [ -f webapp/blendcraft-website.zip ]; then
+            unzip -o webapp/blendcraft-website.zip -d site
+          else
+            cp -a webapp/. site/
+          fi
+          if [ ! -f site/index.html ]; then
+            found=$(find site -name index.html | head -n1 || true)
+            if [ -n "$found" ]; then
+              dir=$(dirname "$found")
+              cp -a "$dir"/. site/
+            fi
+          fi
+          test -f site/index.html
+          ls -la site
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+      - id: deployment
+        uses: actions/deploy-pages@v4
+
+  # ---------------------------------------------------------------------------
+  # Desktop / native binaries
+  # ---------------------------------------------------------------------------
   build:
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
@@ -106,15 +172,24 @@ jobs:
           - { name: windows-x64,   os: windows-latest,   target: x86_64-pc-windows-msvc,        zig: false, scripting: true,  ext: ".exe", experimental: false }
           - { name: macos-x64,     os: macos-15-intel,   target: x86_64-apple-darwin,           zig: false, scripting: true,  ext: "",     experimental: false }
           - { name: macos-arm64,   os: macos-latest,     target: aarch64-apple-darwin,          zig: false, scripting: true,  ext: "",     experimental: false }
-          - { name: linux-x86,     os: ubuntu-24.04,     target: i686-unknown-linux-gnu,        zig: true,  scripting: true, ext: "",     experimental: true  }
-          - { name: linux-armv7,   os: ubuntu-24.04,     target: armv7-unknown-linux-gnueabihf, zig: true,  scripting: true, ext: "",     experimental: true  }
-          - { name: linux-riscv64, os: ubuntu-24.04,     target: riscv64gc-unknown-linux-gnu,   zig: true,  scripting: true, ext: "",     experimental: true  }
-          - { name: linux-riscv64-musl, os: ubuntu-24.04, target: riscv64gc-unknown-linux-musl, zig: true,  scripting: true, ext: "",     experimental: true  }
-          - { name: windows-x86,   os: windows-latest,   target: i686-pc-windows-msvc,          zig: false, scripting: true, ext: ".exe", experimental: true  }
-          - { name: windows-arm64, os: windows-latest,   target: aarch64-pc-windows-msvc,       zig: false, scripting: true, ext: ".exe", experimental: true  }
+          - { name: linux-x86,     os: ubuntu-24.04,     target: i686-unknown-linux-gnu,        zig: true,  scripting: true,  ext: "",     experimental: true  }
+          - { name: linux-armv7,   os: ubuntu-24.04,     target: armv7-unknown-linux-gnueabihf, zig: true,  scripting: true,  ext: "",     experimental: true  }
+          - { name: linux-riscv64, os: ubuntu-24.04,     target: riscv64gc-unknown-linux-gnu,   zig: true,  scripting: true,  ext: "",     experimental: true  }
+          - { name: linux-riscv64-musl, os: ubuntu-24.04, target: riscv64gc-unknown-linux-musl, zig: true,  scripting: true,  ext: "",     experimental: true  }
+          - { name: windows-x86,   os: windows-latest,   target: i686-pc-windows-msvc,          zig: false, scripting: true,  ext: ".exe", experimental: true  }
+          - { name: windows-arm64, os: windows-latest,   target: aarch64-pc-windows-msvc,       zig: false, scripting: true,  ext: ".exe", experimental: true  }
 
     steps:
       - uses: actions/checkout@v5
+
+      - name: Detect binary name
+        shell: bash
+        run: |
+          BIN=$(cargo metadata --no-deps --format-version 1 \
+            | jq -r --arg pkg "$APP_PACKAGE" '.packages[] | select(.name==$pkg) | .targets[] | select(.kind | index("bin")) | .name' \
+            | head -n1 | tr -d '\r')
+          test -n "$BIN" || { echo "No binary target found"; exit 1; }
+          echo "BIN=$BIN" >> "$GITHUB_ENV"
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -124,26 +199,8 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
-      - name: Detect binary name
-        shell: bash
-        run: |
-          BIN=$(cargo metadata --no-deps --format-version 1 \
-            | jq -r --arg pkg "$APP_PACKAGE" '.packages[] | select(.name==$pkg) | .targets[] | select(.kind | index("bin")) | .name' \
-            | head -n1 | tr -d '\r')
-          test -n "$BIN" || { echo "No binary target found in package $APP_PACKAGE"; exit 1; }
-          echo "Binary name: $BIN"
-          echo "BIN=$BIN" >> "$GITHUB_ENV"
-
-      - name: Verify Windows app icon assets
-        if: runner.os == 'Windows'
-        shell: bash
-        run: |
-          test -f crates/app/icon.ico || { echo "Missing crates/app/icon.ico"; exit 1; }
-          test -f crates/app/build.rs || { echo "Missing crates/app/build.rs"; exit 1; }
-          test -f crates/app/logo.png || { echo "Missing crates/app/logo.png"; exit 1; }
-
-      - name: Install Linux build dependencies (native)
-        if: runner.os == 'Linux' && !matrix.zig
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
         run: |
           echo "nameserver 8.8.8.8" | sudo tee /etc/resolv.conf > /dev/null
           echo "nameserver 1.1.1.1" | sudo tee -a /etc/resolv.conf > /dev/null
@@ -155,27 +212,72 @@ jobs:
             libxi-dev libxkbcommon-dev libwayland-dev libgl1-mesa-dev libasound2-dev \
             libudev-dev
 
-      - name: Install zig + cargo-zigbuild
+      - name: Install Zig (cross targets)
         if: matrix.zig
-        run: python3 -m pip install --break-system-packages cargo-zigbuild ziglang
+        uses: mlugg/setup-zig@v1
+        with:
+          version: 0.13.0
 
-      - name: Build (with RustPython scripting)
-        if: ${{ !matrix.zig && matrix.scripting }}
-        run: cargo build --release -p ${{ env.APP_PACKAGE }} --target ${{ matrix.target }}
+      - name: Build (native / MSVC)
+        if: ${{ !matrix.zig }}
+        shell: bash
+        run: |
+          set -e
+          if [ "${{ matrix.scripting }}" = "true" ]; then
+            cargo build --release -p "$APP_PACKAGE" --target "${{ matrix.target }}"
+          else
+            cargo build --release -p "$APP_PACKAGE" --target "${{ matrix.target }}" --no-default-features
+          fi
 
-      - name: Build (without scripting)
-        if: ${{ !matrix.zig && !matrix.scripting }}
-        run: cargo build --release -p ${{ env.APP_PACKAGE }} --no-default-features --target ${{ matrix.target }}
+      - name: Build (Zig linker)
+        if: matrix.zig
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -e
+          case "$TARGET" in
+            i686-unknown-linux-gnu)
+              export CARGO_TARGET_I686_UNKNOWN_LINUX_GNU_LINKER="$PWD/zig-cc"
+              cat > zig-cc <<'EOF'
+          #!/bin/sh
+          exec zig cc -target x86-linux-gnu.2.17 "$@"
+          EOF
+              ;;
+            armv7-unknown-linux-gnueabihf)
+              export CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_LINKER="$PWD/zig-cc"
+              cat > zig-cc <<'EOF'
+          #!/bin/sh
+          exec zig cc -target arm-linux-gnueabihf "$@"
+          EOF
+              ;;
+            riscv64gc-unknown-linux-gnu)
+              export CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_GNU_LINKER="$PWD/zig-cc"
+              cat > zig-cc <<'EOF'
+          #!/bin/sh
+          exec zig cc -target riscv64-linux-gnu "$@"
+          EOF
+              ;;
+            riscv64gc-unknown-linux-musl)
+              export CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_MUSL_LINKER="$PWD/zig-cc"
+              cat > zig-cc <<'EOF'
+          #!/bin/sh
+          exec zig cc -target riscv64-linux-musl "$@"
+          EOF
+              ;;
+            *)
+              echo "No zig linker mapping for $TARGET"
+              exit 1
+              ;;
+          esac
+          chmod +x zig-cc
+          if [ "${{ matrix.scripting }}" = "true" ]; then
+            cargo build --release -p "$APP_PACKAGE" --target "$TARGET"
+          else
+            cargo build --release -p "$APP_PACKAGE" --target "$TARGET" --no-default-features
+          fi
 
-      - name: Build (zigbuild, with RustPython scripting)
-        if: ${{ matrix.zig && matrix.scripting }}
-        run: cargo zigbuild --release -p ${{ env.APP_PACKAGE }} --target ${{ matrix.target }}
-
-      - name: Build (zigbuild, without scripting)
-        if: ${{ matrix.zig && !matrix.scripting }}
-        run: cargo zigbuild --release -p ${{ env.APP_PACKAGE }} --no-default-features --target ${{ matrix.target }}
-
-      - name: Package AppImage
+      - name: Package AppImage (Linux glibc)
         if: >
           runner.os == 'Linux' && (
             matrix.target == 'x86_64-unknown-linux-gnu' ||
@@ -183,18 +285,17 @@ jobs:
             matrix.target == 'i686-unknown-linux-gnu'
           )
         shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          BIN: ${{ env.BIN }}
         run: |
           set -e
-          BIN="${{ env.BIN }}"
-          TARGET="${{ matrix.target }}"
-          APPDIR="BlendCraft.AppDir"
-          rm -rf "$APPDIR" squashfs-root appimagetool
+          APPDIR=AppDir
+          rm -rf "$APPDIR"
           mkdir -p "$APPDIR/usr/bin" "$APPDIR/usr/share/icons/hicolor/256x256/apps"
-          cp "target/${TARGET}/release/${BIN}" "$APPDIR/usr/bin/${BIN}"
-          chmod +x "$APPDIR/usr/bin/${BIN}"
-          test -f crates/app/logo.png || { echo "missing crates/app/logo.png"; exit 1; }
+          cp "target/$TARGET/release/$BIN" "$APPDIR/usr/bin/$BIN"
+          chmod +x "$APPDIR/usr/bin/$BIN"
           if ! command -v convert >/dev/null 2>&1; then
-            sudo apt-get update -qq
             sudo apt-get install -y -qq --no-install-recommends imagemagick
           fi
           convert crates/app/logo.png -resize 256x256 "$APPDIR/usr/share/icons/hicolor/256x256/apps/blendcraft.png"
@@ -261,7 +362,7 @@ jobs:
       matrix:
         include:
           - { name: freebsd-x64, target: x86_64-unknown-freebsd, scripting: true,  experimental: false }
-          - { name: freebsd-x86, target: i686-unknown-freebsd,   scripting: true, experimental: true  }
+          - { name: freebsd-x86, target: i686-unknown-freebsd,   scripting: true,  experimental: true  }
     steps:
       - uses: actions/checkout@v5
       - name: Detect binary name
@@ -307,11 +408,8 @@ jobs:
           path: dist/${{ env.BIN }}
           if-no-files-found: error
 
-  # FreeBSD aarch64: cross-compile via the cross-rs Docker image.
-  # Native FreeBSD VMs on GHA are amd64-only, so we use cross with the
-  # aarch64-unknown-freebsd target. Scripting (RustPython) is disabled for
-  # this target because several of its native deps are not available in the
-  # FreeBSD aarch64 cross image; desktop FreeBSD x64 keeps full scripting.
+  # FreeBSD aarch64: best-effort via cross. Marked continue-on-error so a
+  # missing cross image does not fail the whole workflow.
   freebsd-arm64:
     name: freebsd-arm64
     runs-on: ubuntu-24.04
@@ -319,7 +417,7 @@ jobs:
     continue-on-error: true
     steps:
       - uses: actions/checkout@v5
-
+      - uses: dtolnay/rust-toolchain@stable
       - name: Detect binary name
         shell: bash
         run: |
@@ -330,26 +428,16 @@ jobs:
           echo "BIN=$BIN" >> "$GITHUB_ENV"
 
       - name: Install cross
-        run: cargo install cross --git https://github.com/cross-rs/cross --locked || cargo install cross --locked
+        run: cargo install cross --locked
 
-      - name: Build FreeBSD ARM64 binary (no scripting)
-        env:
-          CROSS_CONTAINER_IN_CONTAINER: "true"
+      - name: Build aarch64-unknown-freebsd (no scripting)
         run: |
-          set -e
-          # Prefer the cross image; fall back to cargo + build-std if the image is missing.
-          if cross build --release -p "$APP_PACKAGE" --target aarch64-unknown-freebsd --no-default-features 2>/tmp/cross-err.txt; then
-            echo "cross build succeeded"
-          else
-            cat /tmp/cross-err.txt || true
-            echo "cross failed; attempting cargo + build-std"
-            rustup component add rust-src
-            cargo build -Z build-std=std,core,alloc --release -p "$APP_PACKAGE" \
-              --target aarch64-unknown-freebsd --no-default-features
-          fi
+          set -euo pipefail
+          cross build --release -p "$APP_PACKAGE" \
+            --target aarch64-unknown-freebsd \
+            --no-default-features
           mkdir -p dist
-          cp "target/aarch64-unknown-freebsd/release/$BIN" dist/ || \
-            cp "target/aarch64-unknown-freebsd/release/$BIN" dist/
+          cp "target/aarch64-unknown-freebsd/release/$BIN" dist/
           file "dist/$BIN" || true
           ls -lh dist/
 
@@ -398,73 +486,44 @@ jobs:
           mkdir -p fp
           cp "flatpak-bin/$BIN" "fp/$BIN"
           chmod +x "fp/$BIN"
-          cd fp
-          cat > "$APP_ID.desktop" <<EOF
+          convert crates/app/logo.png -resize 128x128 fp/icon.png
+          cat > "fp/$APP_ID.desktop" <<EOF
           [Desktop Entry]
-          Type=Application
           Name=BlendCraft
-          Comment=Open-source 3D suite for game assets
           Exec=$BIN
           Icon=$APP_ID
+          Type=Application
           Categories=Graphics;3DGraphics;
-          Terminal=false
           EOF
-          sed -i 's/^[[:space:]]*//' "$APP_ID.desktop"
-          cat > "$APP_ID.metainfo.xml" <<EOF
-          <?xml version="1.0" encoding="UTF-8"?>
-          <component type="desktop-application">
-            <id>$APP_ID</id>
-            <name>BlendCraft</name>
-            <summary>Open-source 3D suite for game assets</summary>
-            <metadata_license>CC0-1.0</metadata_license>
-            <project_license>MIT</project_license>
-            <description>
-              <p>BlendCraft is an early, independent open-source 3D suite written in Rust.</p>
-            </description>
-            <launchable type="desktop-id">$APP_ID.desktop</launchable>
-            <url type="homepage">https://github.com/DaikoGames/BlendCraft</url>
-            <provides><binary>$BIN</binary></provides>
-            <releases><release version="$VERSION" date="$(date +%F)"/></releases>
-            <content_rating type="oars-1.1"/>
-          </component>
-          EOF
-          sed -i 's/^[[:space:]]*//' "$APP_ID.metainfo.xml"
-          LOGO="../crates/app/logo.png"
-          test -f "$LOGO"
-          mkdir -p "icons/hicolor/256x256/apps"
-          convert "$LOGO" -resize 256x256 "icons/hicolor/256x256/apps/$APP_ID.png"
-          cat > "$APP_ID.yml" <<EOF
+          sed -i 's/^[[:space:]]*//' "fp/$APP_ID.desktop"
+          cat > "fp/$APP_ID.yml" <<EOF
           app-id: $APP_ID
           runtime: org.freedesktop.Platform
-          runtime-version: '25.08'
+          runtime-version: '24.08'
           sdk: org.freedesktop.Sdk
           command: $BIN
           finish-args:
             - --share=ipc
-            - --share=network
             - --socket=x11
             - --socket=wayland
+            - --socket=pulseaudio
             - --device=dri
+            - --filesystem=home
           modules:
             - name: blendcraft
               buildsystem: simple
               build-commands:
-                - install -Dm755 $BIN /app/bin/$BIN
-                - install -Dm644 $APP_ID.desktop /app/share/applications/$APP_ID.desktop
-                - install -Dm644 $APP_ID.metainfo.xml /app/share/metainfo/$APP_ID.metainfo.xml
-                - mkdir -p /app/share/icons
-                - cp -a hicolor /app/share/icons/
+                - install -D $BIN /app/bin/$BIN
+                - install -D icon.png /app/share/icons/hicolor/128x128/apps/$APP_ID.png
+                - install -D $APP_ID.desktop /app/share/applications/$APP_ID.desktop
               sources:
                 - type: file
                   path: $BIN
                 - type: file
-                  path: $APP_ID.desktop
+                  path: icon.png
                 - type: file
-                  path: $APP_ID.metainfo.xml
-                - type: dir
-                  path: icons
+                  path: $APP_ID.desktop
           EOF
-          sed -i 's/^          //' "$APP_ID.yml"
       - name: Build Flatpak bundle
         working-directory: fp
         run: |
@@ -527,5 +586,6 @@ jobs:
           body: |
             ${{ env.IS_TAG != 'true' && format('Automatic build of commit {0}. Not a stable release.', github.sha) || '' }}
             Scripting uses embedded RustPython (no separate CPython runtime).
+            Website build is the blendcraft-website.zip artifact (static site).
             On Unix run chmod +x on downloaded binaries first.
           files: out/*
