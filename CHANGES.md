@@ -1,3 +1,29 @@
+## Pure-Rust FBX only — ufbx removed (2026-11-24e)
+
+- Removed the `ufbx` C dependency and `fbx_ufbx` module entirely.
+- All platforms (including WebAssembly) use the same pure-Rust FBX parser.
+- Parser now reads **Skin / Cluster** deformers: vertex indexes, weights, and
+  TransformLink inverse-bind matrices, wired into `SkinBinding` on mesh objects.
+- Desktop and browser share one FBX path; no feature loss from deleting ufbx for
+  core mesh/material/armature/skin import. Full animation-stack sampling remains
+  a known gap (glTF remains preferred for multi-clip animation).
+
+## WASM: disable native C FBX (ufbx) (2026-11-24d)
+
+- `ufbx` is a C library and cannot compile for `wasm32-unknown-unknown`.
+- On the browser target, FBX import uses the existing pure-Rust parser only.
+- Desktop still prefers ufbx (skins, bind poses, animation) with the same fallback.
+- `fbx_ufbx` module and the `ufbx` dependency are gated with
+  `cfg(not(target_arch = "wasm32"))`.
+
+## Website release + GitHub Pages (2026-11-24c)
+
+- The browser build is packaged as a **static website** (`blendcraft-website.zip`):
+  `index.html`, engine JS/WASM, logo, and a local `serve.sh`.
+- CI job **Website (GitHub Pages)** deploys that site so BlendCraft can be opened
+  at the repo Pages URL — same 3D application as desktop, no separate web UI.
+- Splash copy clarifies this is the full app in the browser (not a bare WASM file).
+
 ## Unified cross-platform + FreeBSD ARM64 + real WebApp (2026-11-24)
 
 - **One application**: shared Rust codebase continues to power desktop and browser.

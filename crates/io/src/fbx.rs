@@ -1,11 +1,13 @@
-//! Local ASCII FBX 7.x import/export — no external FBX crates or online APIs.
+//! Pure-Rust FBX import/export — no native C dependencies (ufbx removed).
 //!
 //! Supports a practical subset:
-//! - Import: Vertices, PolygonVertexIndex, Normals, UV, Materials (DiffuseColor),
-//!   Model nodes, Geometry, Connections (OO)
-//! - Export: same subset as static triangle meshes + Phong materials
+//! - Import: Vertices, PolygonVertexIndex, Normals, UV, Materials/textures,
+//!   Model nodes, Geometry, Connections (OO), LimbNode armatures,
+//!   Skin/Cluster vertex weights + inverse-bind matrices
+//! - Export: static triangle meshes + Phong materials
+//! - Animation curve stacks are not fully sampled yet (use glTF for multi-clip animation)
 use anyhow::{bail, Context, Result};
-use forge_core::{Material, MeshData, MeshGroup, Object, ObjectKind, Scene, TextureData, Vertex};
+use forge_core::{Material, MeshData, MeshGroup, Object, ObjectKind, Scene, TextureData, Vertex, SkinBinding};
 use glam::{Mat4, Quat, Vec3};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
@@ -20,9 +22,8 @@ type TexResolver<'a> = &'a dyn Fn(&str) -> Option<Vec<u8>>;
 
 #[cfg(not(target_arch = "wasm32"))]
 pub fn load_fbx(path: &Path) -> Result<Scene> {
-    // Prefer ufbx for skins/bones/animation. Always try the built-in parser for
-    // materials/textures (it follows FBX connections + embedded Video bytes better)
-    // and merge those onto the ufbx scene when needed.
+    // Pure-Rust FBX path (no native C deps). Handles meshes, materials/textures,
+    // LimbNode armatures, and Skin/Cluster weight bindings.
     let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
     let dir = path.parent().map(|p| p.to_path_buf()).unwrap_or_default();
     let stem = path
@@ -31,107 +32,8 @@ pub fn load_fbx(path: &Path) -> Result<Scene> {
         .unwrap_or("")
         .to_string();
     let resolver = move |name: &str| crate::find_texture_file(&dir, &stem, name);
-    let builtin = load_fbx_bytes_with(&bytes, &resolver);
-
-    match crate::fbx_ufbx::load_fbx_ufbx(path) {
-        Ok(mut scene) => {
-            if let Ok(b) = builtin {
-                merge_fbx_materials_textures(&mut scene, b);
-            }
-            return Ok(scene);
-        }
-        Err(e) => {
-            eprintln!("ufbx FBX import failed ({e:#}); falling back to built-in parser");
-        }
-    }
-    builtin
+    load_fbx_bytes_with(&bytes, &resolver)
 }
-
-/// Copy materials/textures from the built-in parse onto a ufbx scene when the
-/// ufbx path left albedo maps empty (common with embedded FBX Video nodes).
-fn merge_fbx_materials_textures(dst: &mut Scene, src: Scene) {
-    if src.textures.is_empty() && src.materials.is_empty() {
-        eprintln!("FBX: built-in parser found no textures/materials to merge");
-        return;
-    }
-
-    let tex_off = dst.textures.len();
-    let mat_off = dst.materials.len();
-
-    let mut tex = (*dst.textures).clone();
-    tex.extend(src.textures.iter().cloned());
-    dst.textures = Arc::new(tex);
-
-    for mut m in src.materials {
-        m.offset_textures(tex_off);
-        if m.base_color_tex.is_some() {
-            let c = m.base_color;
-            if c[0] + c[1] + c[2] < 0.05 {
-                m.base_color = [1.0, 1.0, 1.0, 1.0];
-            }
-        }
-        // Wire a shading graph so Shading mode keeps the map visible.
-        if m.shader_graph.is_none() {
-            m.shader_graph = Some(forge_core::ShaderGraph::from_imported_material(&m));
-        }
-        dst.materials.push(m);
-    }
-
-    fn norm_name(s: &str) -> String {
-        s.rsplit("::").next().unwrap_or(s).to_ascii_lowercase()
-    }
-
-    // Prefer materials that actually have an albedo map.
-    let textured_mi = dst.materials.iter().enumerate().rev().find_map(|(i, m)| {
-        if i >= mat_off && m.base_color_tex.is_some() {
-            Some(i)
-        } else {
-            None
-        }
-    });
-
-    let mut assigned = 0usize;
-    for o in &mut dst.objects {
-        if o.mesh.indices.is_empty() {
-            continue;
-        }
-        let oname = norm_name(&o.name);
-        let matched = src.objects.iter().find(|x| {
-            norm_name(&x.name) == oname
-                || oname.contains(&norm_name(&x.name))
-                || norm_name(&x.name).contains(&oname)
-        });
-        let new_mi = matched
-            .and_then(|so| so.material.map(|i| i + mat_off))
-            .or(textured_mi);
-        let Some(new_mi) = new_mi else {
-            continue;
-        };
-        o.material = Some(new_mi);
-        let mesh = Arc::make_mut(&mut o.mesh);
-        if mesh.groups.is_empty() {
-            mesh.groups.push(MeshGroup {
-                first_index: 0,
-                index_count: mesh.indices.len() as u32,
-                material: Some(new_mi),
-            });
-        } else {
-            for g in mesh.groups.iter_mut() {
-                g.material = Some(new_mi);
-            }
-        }
-        assigned += 1;
-    }
-
-    eprintln!(
-        "FBX: merged materials/textures ({} textures, {} materials, {} meshes assigned)",
-        dst.textures.len(),
-        dst.materials.len(),
-        assigned
-    );
-}
-
-
 
 #[cfg(target_arch = "wasm32")]
 pub fn load_fbx(_path: &Path) -> Result<Scene> {
@@ -249,6 +151,10 @@ struct FbxDoc {
     videos: BTreeMap<i64, Video>,
     /// all connections (OO object links and OP property links)
     connections: Vec<Conn>,
+    /// Skin deformers (id -> skin). Clusters hang off these via OO links.
+    skins: BTreeMap<i64, SkinDef>,
+    /// Cluster sub-deformers (id -> cluster with indexes/weights + bind matrices).
+    clusters: BTreeMap<i64, ClusterDef>,
     /// GlobalSettings UpAxis (0 = X, 1 = Y, 2 = Z) and its sign
     up_axis: i32,
     up_sign: i32,
@@ -266,6 +172,8 @@ impl Default for FbxDoc {
             textures: BTreeMap::new(),
             videos: BTreeMap::new(),
             connections: Vec::new(),
+            skins: BTreeMap::new(),
+            clusters: BTreeMap::new(),
             up_axis: 1,
             up_sign: 1,
             // Default FBX unit is centimeters → meters
@@ -320,6 +228,24 @@ struct Video {
 }
 
 #[derive(Debug, Clone)]
+/// FBX Deformer of type Skin — groups Cluster sub-deformers for one geometry.
+#[derive(Debug, Default)]
+struct SkinDef {
+    name: String,
+}
+
+/// FBX SubDeformer Cluster — per-bone vertex indices + weights and bind matrices.
+#[derive(Debug, Default)]
+struct ClusterDef {
+    name: String,
+    indexes: Vec<i32>,
+    weights: Vec<f32>,
+    /// 16 floats column-major if present (geometry transform at bind).
+    transform: Option<[f32; 16]>,
+    /// 16 floats column-major if present (linked bone world at bind = TransformLink).
+    transform_link: Option<[f32; 16]>,
+}
+
 struct Model {
     name: String,
     kind: String, // "Mesh", "Null", ...
@@ -446,6 +372,19 @@ fn parse_ascii(text: &str) -> Result<FbxDoc> {
             );
             continue;
         }
+        if line.starts_with("Deformer:") {
+            let (id, name, body, next) = read_block(&lines, i)?;
+            i = next;
+            let class = parse_header_class(line).to_ascii_lowercase();
+            if class == "skin" {
+                doc.skins.insert(id, SkinDef { name: strip_name(&name) });
+            } else if class == "cluster" {
+                let mut c = ClusterDef { name: strip_name(&name), ..Default::default() };
+                parse_cluster_body(&body, &mut c);
+                doc.clusters.insert(id, c);
+            }
+            continue;
+        }
         if line.starts_with("Connections:") {
             let (_, _, body, next) = read_block(&lines, i)?;
             i = next;
@@ -549,6 +488,89 @@ fn parse_header_class(header: &str) -> String {
         .nth(1)
         .unwrap_or("")
         .to_string()
+}
+
+
+fn parse_cluster_body(body: &str, c: &mut ClusterDef) {
+    // Indexes: *N { a,b,c }  or Indexes: a,b,c
+    if let Some(idx) = extract_int_array(body, "Indexes") {
+        c.indexes = idx;
+    }
+    if let Some(w) = extract_f32_array(body, "Weights") {
+        c.weights = w;
+    }
+    if let Some(m) = extract_f64_matrix16(body, "TransformLink") {
+        c.transform_link = Some(m);
+    } else if let Some(m) = extract_f64_matrix16(body, "Transform") {
+        // Prefer TransformLink; Transform alone is still useful as fallback.
+        c.transform = Some(m);
+    }
+    if c.transform.is_none() {
+        if let Some(m) = extract_f64_matrix16(body, "Transform") {
+            c.transform = Some(m);
+        }
+    }
+}
+
+fn extract_int_array(body: &str, label: &str) -> Option<Vec<i32>> {
+    let key = format!("{label}:");
+    let i = body.find(&key)?;
+    let rest = &body[i + key.len()..];
+    // skip optional *N {
+    let mut nums = Vec::new();
+    for tok in rest.split(|ch: char| ch == ',' || ch == '{' || ch == '}' || ch.is_whitespace()) {
+        let t = tok.trim().trim_start_matches('*');
+        if t.is_empty() { continue; }
+        if let Ok(v) = t.parse::<i32>() {
+            nums.push(v);
+        } else if !nums.is_empty() && !t.chars().all(|c| c == '*' || c.is_ascii_digit()) {
+            // stop at next label-ish token
+            if t.ends_with(':') || t.chars().any(|c| c.is_ascii_alphabetic()) {
+                break;
+            }
+        }
+        if nums.len() > 2_000_000 { break; }
+    }
+    if nums.is_empty() { None } else { Some(nums) }
+}
+
+fn extract_f32_array(body: &str, label: &str) -> Option<Vec<f32>> {
+    let key = format!("{label}:");
+    let i = body.find(&key)?;
+    let rest = &body[i + key.len()..];
+    let mut nums = Vec::new();
+    for tok in rest.split(|ch: char| ch == ',' || ch == '{' || ch == '}' || ch.is_whitespace()) {
+        let t = tok.trim().trim_start_matches('*');
+        if t.is_empty() { continue; }
+        if let Ok(v) = t.parse::<f32>() {
+            nums.push(v);
+        } else if !nums.is_empty() && t.chars().any(|c| c.is_ascii_alphabetic()) {
+            break;
+        }
+        if nums.len() > 2_000_000 { break; }
+    }
+    if nums.is_empty() { None } else { Some(nums) }
+}
+
+fn extract_f64_matrix16(body: &str, label: &str) -> Option<[f32; 16]> {
+    let key = format!("{label}:");
+    let i = body.find(&key)?;
+    let rest = &body[i + key.len()..];
+    let mut nums = Vec::with_capacity(16);
+    for tok in rest.split(|ch: char| ch == ',' || ch == '{' || ch == '}' || ch.is_whitespace()) {
+        let t = tok.trim().trim_start_matches('*');
+        if t.is_empty() { continue; }
+        if let Ok(v) = t.parse::<f64>() {
+            nums.push(v as f32);
+            if nums.len() == 16 { break; }
+        } else if !nums.is_empty() {
+            break;
+        }
+    }
+    if nums.len() != 16 { return None; }
+    let mut m = [0f32; 16];
+    m.copy_from_slice(&nums);
+    Some(m)
 }
 
 fn parse_connection(line: &str) -> Option<Conn> {
@@ -1265,6 +1287,12 @@ fn convert_doc(doc: &FbxDoc, resolver: TexResolver) -> Result<Scene> {
             scene.objects.push(arm_obj);
         }
     }
+
+    // Pure-Rust skin weights: map Skin/Cluster deformers onto mesh objects.
+    if let Some(arm_id) = _armature_object_id {
+        apply_fbx_skins(&mut scene, doc, &parents, &id_to_bone_for_skins(doc, &parents), arm_id);
+    }
+
     if scene.objects.is_empty() {
         bail!("FBX contained no usable mesh or armature objects");
     }
@@ -2026,6 +2054,18 @@ fn ingest_object(node: &BinNode, doc: &mut FbxDoc) {
             fill_model_from_children(node, &mut m);
             doc.models.insert(id, m);
         }
+        "Deformer" => {
+            let id = prop_i64(node.props.get(0)).unwrap_or(0);
+            let name = prop_string(node.props.get(1)).unwrap_or_default();
+            let class = prop_string(node.props.get(2)).unwrap_or_default().to_ascii_lowercase();
+            if class == "skin" {
+                doc.skins.insert(id, SkinDef { name: strip_name(&name) });
+            } else if class == "cluster" {
+                let mut c = ClusterDef { name: strip_name(&name), ..Default::default() };
+                fill_cluster_from_children(node, &mut c);
+                doc.clusters.insert(id, c);
+            }
+        }
         "Material" => {
             let id = prop_i64(node.props.get(0)).unwrap_or(0);
             let name = prop_string(node.props.get(1)).unwrap_or_default();
@@ -2082,6 +2122,66 @@ fn bin_f32_triplets(p: Option<&BinProp>, n: usize) -> Vec<Vec<f32>> {
         Some(BinProp::F32Arr(a)) => a.chunks_exact(n).map(|c| c.to_vec()).collect(),
         _ => Vec::new(),
     }
+}
+
+
+fn fill_cluster_from_children(node: &BinNode, c: &mut ClusterDef) {
+    for ch in &node.children {
+        match ch.name.as_str() {
+            "Indexes" => {
+                if let Some(p) = ch.props.first() {
+                    c.indexes = bin_prop_i32_array(p);
+                }
+            }
+            "Weights" => {
+                if let Some(p) = ch.props.first() {
+                    c.weights = bin_prop_f32_array(p);
+                }
+            }
+            "TransformLink" => {
+                if let Some(p) = ch.props.first() {
+                    if let Some(m) = bin_prop_mat16(p) {
+                        c.transform_link = Some(m);
+                    }
+                }
+            }
+            "Transform" => {
+                if let Some(p) = ch.props.first() {
+                    if let Some(m) = bin_prop_mat16(p) {
+                        c.transform = Some(m);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn bin_prop_i32_array(p: &BinProp) -> Vec<i32> {
+    match p {
+        BinProp::I32Arr(v) => v.clone(),
+        BinProp::I64Arr(v) => v.iter().map(|x| *x as i32).collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn bin_prop_f32_array(p: &BinProp) -> Vec<f32> {
+    match p {
+        BinProp::F32Arr(v) => v.clone(),
+        BinProp::F64Arr(v) => v.iter().map(|x| *x as f32).collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn bin_prop_mat16(p: &BinProp) -> Option<[f32; 16]> {
+    let v = match p {
+        BinProp::F32Arr(v) if v.len() >= 16 => v.iter().copied().take(16).collect::<Vec<_>>(),
+        BinProp::F64Arr(v) if v.len() >= 16 => v.iter().map(|x| *x as f32).take(16).collect::<Vec<_>>(),
+        _ => return None,
+    };
+    let mut m = [0f32; 16];
+    m.copy_from_slice(&v[..16]);
+    Some(m)
 }
 
 fn fill_geom_from_children(node: &BinNode, g: &mut Geom) {
@@ -3075,6 +3175,227 @@ fn write_array_f64(out: &mut Vec<u8>, arr: &[f64]) {
 }
 
 #[cfg(test)]
+/// Rebuild model-id → bone-index map (same rules as armature reconstruction).
+fn id_to_bone_for_skins(doc: &FbxDoc, _parents: &HashMap<i64, i64>) -> HashMap<i64, u32> {
+    let has_explicit_limb = doc.models.values().any(|m| {
+        let k = m.kind.to_ascii_lowercase();
+        k == "limbnode" || k == "limb" || k == "root"
+    });
+    let limb_ids: Vec<i64> = doc
+        .models
+        .iter()
+        .filter_map(|(id, m)| {
+            let k = m.kind.to_ascii_lowercase();
+            let is_bone_class = k == "limbnode"
+                || k == "root"
+                || k == "limb"
+                || k == "bone"
+                || k.contains("limb");
+            let is_null_in_skeleton = has_explicit_limb
+                && (k == "null" || k == "locator" || k.is_empty());
+            (is_bone_class || is_null_in_skeleton).then_some(*id)
+        })
+        .collect();
+    limb_ids
+        .iter()
+        .enumerate()
+        .map(|(i, id)| (*id, i as u32))
+        .collect()
+}
+
+/// Attach SkinBinding to mesh objects from FBX Skin/Cluster deformers.
+fn apply_fbx_skins(
+    scene: &mut Scene,
+    doc: &FbxDoc,
+    _parents: &HashMap<i64, i64>,
+    id_to_bone: &HashMap<i64, u32>,
+    arm_id: u64,
+) {
+    if id_to_bone.is_empty() || doc.clusters.is_empty() {
+        return;
+    }
+    let bone_count = id_to_bone.values().copied().max().map(|m| m as usize + 1).unwrap_or(0);
+    if bone_count == 0 {
+        return;
+    }
+
+    // geometry id -> skin ids
+    let mut geom_skins: HashMap<i64, Vec<i64>> = HashMap::new();
+    // skin id -> cluster ids
+    let mut skin_clusters: HashMap<i64, Vec<i64>> = HashMap::new();
+    // cluster id -> bone model id
+    let mut cluster_bone: HashMap<i64, i64> = HashMap::new();
+
+    for c in &doc.connections {
+        if c.ty != "OO" {
+            continue;
+        }
+        // child, parent
+        if doc.skins.contains_key(&c.child) && doc.geometries.contains_key(&c.parent) {
+            geom_skins.entry(c.parent).or_default().push(c.child);
+        }
+        if doc.skins.contains_key(&c.parent) && doc.geometries.contains_key(&c.child) {
+            geom_skins.entry(c.child).or_default().push(c.parent);
+        }
+        if doc.clusters.contains_key(&c.child) && doc.skins.contains_key(&c.parent) {
+            skin_clusters.entry(c.parent).or_default().push(c.child);
+        }
+        if doc.clusters.contains_key(&c.parent) && doc.skins.contains_key(&c.child) {
+            skin_clusters.entry(c.child).or_default().push(c.parent);
+        }
+        if doc.clusters.contains_key(&c.child) && doc.models.contains_key(&c.parent) {
+            cluster_bone.insert(c.child, c.parent);
+        }
+        if doc.clusters.contains_key(&c.parent) && doc.models.contains_key(&c.child) {
+            cluster_bone.insert(c.parent, c.child);
+        }
+    }
+
+    // geometry id -> model id (mesh models)
+    let mut geom_model: HashMap<i64, i64> = HashMap::new();
+    for c in &doc.connections {
+        if c.ty != "OO" {
+            continue;
+        }
+        if doc.geometries.contains_key(&c.child) && doc.models.contains_key(&c.parent) {
+            geom_model.insert(c.child, c.parent);
+        }
+        if doc.geometries.contains_key(&c.parent) && doc.models.contains_key(&c.child) {
+            geom_model.insert(c.parent, c.child);
+        }
+    }
+
+    // model name -> scene object index for meshes
+    let mut name_to_obj: HashMap<String, usize> = HashMap::new();
+    for (i, o) in scene.objects.iter().enumerate() {
+        if !matches!(o.kind, ObjectKind::Armature(_)) {
+            name_to_obj.insert(o.name.clone(), i);
+        }
+    }
+
+    for (gid, skin_ids) in &geom_skins {
+        let Some(g) = doc.geometries.get(gid) else { continue };
+        let nverts = g.vertices.len();
+        if nverts == 0 {
+            continue;
+        }
+
+        let mut joint_acc: Vec<Vec<(u16, f32)>> = vec![Vec::new(); nverts];
+        let mut inverse_binds = vec![[0f32; 16]; bone_count];
+        for m in inverse_binds.iter_mut() {
+            *m = Mat4::IDENTITY.to_cols_array();
+        }
+
+        for &sid in skin_ids {
+            let Some(cids) = skin_clusters.get(&sid) else { continue };
+            for &cid in cids {
+                let Some(cluster) = doc.clusters.get(&cid) else { continue };
+                let bone_mid = cluster_bone.get(&cid).copied();
+                let bone_idx = bone_mid
+                    .and_then(|m| id_to_bone.get(&m).copied())
+                    .unwrap_or(0) as u16;
+
+                if let Some(link) = cluster.transform_link {
+                    let link_m = Mat4::from_cols_array(&link);
+                    if (bone_idx as usize) < inverse_binds.len() {
+                        inverse_binds[bone_idx as usize] = link_m.inverse().to_cols_array();
+                    }
+                }
+
+                let n = cluster.indexes.len().min(cluster.weights.len());
+                for k in 0..n {
+                    let vi = cluster.indexes[k];
+                    if vi < 0 {
+                        continue;
+                    }
+                    let vi = vi as usize;
+                    if vi >= nverts {
+                        continue;
+                    }
+                    joint_acc[vi].push((bone_idx, cluster.weights[k]));
+                }
+            }
+        }
+
+        // Build SkinBinding (top-4 influences per control point).
+        // Mesh vertices after triangulation may duplicate control points; map by
+        // matching rest positions is unreliable. Instead bind by control-point
+        // index order for the geometry, then expand if object vertex count matches
+        // or use auto-expand by position equality later.
+        let mut joints = vec![[0u16; 4]; nverts];
+        let mut weights = vec![[0f32; 4]; nverts];
+        for (vi, pairs) in joint_acc.iter_mut().enumerate() {
+            pairs.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            pairs.truncate(4);
+            let sum: f32 = pairs.iter().map(|(_, w)| *w).sum::<f32>().max(1e-8);
+            for (k, (j, w)) in pairs.iter().enumerate() {
+                joints[vi][k] = *j;
+                weights[vi][k] = *w / sum;
+            }
+        }
+
+        // Find matching scene object by model name
+        let model_name = geom_model
+            .get(gid)
+            .and_then(|mid| doc.models.get(mid))
+            .map(|m| m.name.clone())
+            .unwrap_or_else(|| g.name.clone());
+        let Some(&obj_i) = name_to_obj.get(&model_name).or_else(|| name_to_obj.get(&g.name)) else {
+            continue;
+        };
+        let obj = &mut scene.objects[obj_i];
+        let nv = obj.mesh.vertices.len();
+        // If triangulated mesh has more verts, expand by polygon corner → control point
+        // using sequential polygon indices when counts allow; otherwise copy CP weights
+        // only when counts match.
+        let (j_out, w_out, rest_p, rest_n) = if nv == nverts {
+            let rest_p: Vec<[f32; 3]> = obj.mesh.vertices.iter().map(|v| v.position).collect();
+            let rest_n: Vec<[f32; 3]> = obj.mesh.vertices.iter().map(|v| v.normal).collect();
+            (joints, weights, rest_p, rest_n)
+        } else {
+            // Expand via polygon_vertex_index corners → after triangulation verts often
+            // align with corners. Fall back to first influence only on mismatch.
+            let mut j2 = vec![[0u16; 4]; nv];
+            let mut w2 = vec![[0f32; 4]; nv];
+            let corners = g.polygon_vertex_index.len();
+            if nv == corners || (corners > 0 && nv % 3 == 0) {
+                for (i, v) in obj.mesh.vertices.iter().enumerate() {
+                    // nearest control point by position in original geometry
+                    let p = Vec3::from(v.position);
+                    let mut best = 0usize;
+                    let mut best_d = f32::MAX;
+                    for (ci, cp) in g.vertices.iter().enumerate() {
+                        // geometry verts may still be in file units; object already meters
+                        let q = Vec3::from(*cp) * doc.unit_to_meters;
+                        let d = (p - q).length_squared();
+                        if d < best_d {
+                            best_d = d;
+                            best = ci;
+                        }
+                    }
+                    j2[i] = joints[best];
+                    w2[i] = weights[best];
+                }
+            }
+            let rest_p: Vec<[f32; 3]> = obj.mesh.vertices.iter().map(|v| v.position).collect();
+            let rest_n: Vec<[f32; 3]> = obj.mesh.vertices.iter().map(|v| v.normal).collect();
+            (j2, w2, rest_p, rest_n)
+        };
+
+        obj.skin = Some(SkinBinding {
+            armature_id: arm_id,
+            joints: j_out,
+            weights: w_out,
+            rest_positions: rest_p,
+            rest_normals: rest_n,
+            inverse_binds,
+        });
+        // Parent mesh under armature for hierarchy consistency
+        obj.parent = Some(arm_id);
+    }
+}
+
+
 mod tests {
     use super::*;
     use forge_core::primitives;

@@ -15,4 +15,3 @@ image.workspace = true
 serde_json.workspace = true
 tobj.workspace = true
 flate2.workspace = true
-ufbx = { version = "0.11", default-features = true }

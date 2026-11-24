@@ -3,8 +3,10 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no" />
-  <meta name="description" content="BlendCraft — open-source 3D creation suite running in the browser" />
+  <meta name="description" content="BlendCraft — open-source 3D creation suite. Same app as desktop, running in your browser." />
+  <meta name="theme-color" content="#1a1a1e" />
   <title>BlendCraft</title>
+  <link rel="icon" type="image/png" href="logo.png" />
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     html, body {
@@ -15,34 +17,54 @@
       color: #e8e8ec;
       font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
     }
-    #loading {
+    #boot {
       position: fixed;
       inset: 0;
       display: flex;
       flex-direction: column;
       align-items: center;
       justify-content: center;
-      gap: 1rem;
+      gap: 0.85rem;
       z-index: 1000;
-      background: #1a1a1e;
-      transition: opacity 0.4s ease;
+      background: radial-gradient(ellipse at 50% 30%, #242430 0%, #1a1a1e 70%);
+      transition: opacity 0.45s ease;
     }
-    #loading.hidden { opacity: 0; pointer-events: none; }
-    #loading h1 {
-      font-size: 1.75rem;
-      font-weight: 600;
-      letter-spacing: 0.02em;
+    #boot.hidden { opacity: 0; pointer-events: none; }
+    #boot .logo {
+      width: 72px;
+      height: 72px;
+      border-radius: 16px;
+      object-fit: cover;
+      box-shadow: 0 8px 32px rgba(0,0,0,0.4);
+      background: #2a2a36;
     }
-    #loading p { color: #9a9aa8; font-size: 0.95rem; max-width: 28rem; text-align: center; }
-    #loading .spinner {
-      width: 40px;
-      height: 40px;
+    #boot h1 {
+      font-size: 1.85rem;
+      font-weight: 650;
+      letter-spacing: 0.03em;
+    }
+    #boot .tag {
+      color: #9a9aa8;
+      font-size: 0.95rem;
+      max-width: 26rem;
+      text-align: center;
+      line-height: 1.45;
+    }
+    #boot .spinner {
+      width: 36px;
+      height: 36px;
+      margin-top: 0.5rem;
       border: 3px solid #3a3a48;
       border-top-color: #6c8cff;
       border-radius: 50%;
-      animation: spin 0.8s linear infinite;
+      animation: spin 0.75s linear infinite;
     }
     @keyframes spin { to { transform: rotate(360deg); } }
+    #status {
+      font-size: 0.8rem;
+      color: #6a6a78;
+      min-height: 1.2em;
+    }
     #error {
       display: none;
       position: fixed;
@@ -58,44 +80,60 @@
     }
     #error.visible { display: flex; }
     #error h2 { color: #ff6b6b; font-size: 1.25rem; }
+    #error p { color: #b0b0bc; max-width: 32rem; line-height: 1.5; }
     #error pre {
       background: #121216;
       border: 1px solid #2a2a32;
-      border-radius: 6px;
-      padding: 1rem;
-      max-width: 90vw;
+      border-radius: 8px;
+      padding: 1rem 1.25rem;
+      max-width: min(90vw, 40rem);
       overflow: auto;
-      font-size: 0.8rem;
+      font-size: 0.78rem;
       color: #ccc;
       text-align: left;
+      white-space: pre-wrap;
     }
-    canvas {
+    #error .hint {
+      font-size: 0.85rem;
+      color: #7a7a88;
+      margin-top: 0.5rem;
+    }
+    canvas#blendcraft-canvas {
       display: block;
       width: 100%;
       height: 100%;
       outline: none;
       touch-action: none;
+      background: #1a1a1e;
     }
   </style>
 </head>
 <body>
-  <div id="loading">
-    <div class="spinner" aria-hidden="true"></div>
+  <div id="boot" role="status" aria-live="polite">
+    <img class="logo" src="logo.png" alt="" width="72" height="72"
+         onerror="this.style.display='none'" />
     <h1>BlendCraft</h1>
-    <p>Loading WebAssembly application…</p>
-    <p id="status" style="font-size:0.8rem;color:#6a6a78"></p>
+    <p class="tag">3D creation suite — same application as desktop, running here in your browser.</p>
+    <div class="spinner" aria-hidden="true"></div>
+    <p id="status">Starting…</p>
   </div>
-  <div id="error">
-    <h2>Failed to start BlendCraft</h2>
-    <p>Your browser may lack WebGPU / WebGL2 support, or the WASM module could not be loaded.</p>
+
+  <div id="error" role="alert">
+    <h2>Could not start BlendCraft</h2>
+    <p>
+      This site needs a browser with <strong>WebGPU</strong> or <strong>WebGL2</strong>
+      (current Chrome, Edge, Firefox, or Safari). Open this page over
+      <strong>http://</strong> or <strong>https://</strong> — not as a local file.
+    </p>
     <pre id="error-detail"></pre>
+    <p class="hint">Desktop builds are unchanged and do not require a browser.</p>
   </div>
-  <!-- winit / wgpu look for a canvas with this id by convention when no canvas is
-       explicitly attached via WindowAttributes on the web backend. -->
-  <canvas id="blendcraft-canvas" tabindex="0"></canvas>
+
+  <!-- Full-window canvas used by winit + wgpu (same engine as desktop). -->
+  <canvas id="blendcraft-canvas" tabindex="0" aria-label="BlendCraft viewport"></canvas>
 
   <script type="module">
-    const loading = document.getElementById("loading");
+    const boot = document.getElementById("boot");
     const statusEl = document.getElementById("status");
     const errorBox = document.getElementById("error");
     const errorDetail = document.getElementById("error-detail");
@@ -105,31 +143,30 @@
     }
 
     function showError(err) {
-      loading.classList.add("hidden");
+      boot.classList.add("hidden");
       errorBox.classList.add("visible");
-      errorDetail.textContent = (err && err.stack) ? err.stack : String(err);
+      const text = (err && err.stack) ? err.stack : String(err);
+      errorDetail.textContent = text;
       console.error(err);
     }
 
     async function start() {
       try {
-        setStatus("Fetching WASM module…");
-        // The packaged build places the wasm-bindgen JS glue next to this HTML.
+        // Same BlendCraft binary as desktop, compiled to WebAssembly and
+        // loaded as a normal ES module. No separate web UI or backend.
+        setStatus("Loading engine…");
         const init = await import("./forge_app.js");
-        setStatus("Compiling / instantiating WASM…");
-        // wasm-bindgen default export is an async init function.
+        setStatus("Starting application…");
         await init.default();
-        setStatus("Application started");
-        // Give the first frame a moment to paint before hiding the splash.
+        setStatus("Ready");
         requestAnimationFrame(() => {
-          setTimeout(() => loading.classList.add("hidden"), 150);
+          setTimeout(() => boot.classList.add("hidden"), 120);
         });
       } catch (e) {
         showError(e);
       }
     }
 
-    // Catch unhandled rejections from the WASM runtime.
     window.addEventListener("unhandledrejection", (ev) => {
       showError(ev.reason || "Unhandled promise rejection");
     });

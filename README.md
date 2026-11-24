@@ -84,6 +84,36 @@ cargo test -p forge-core
 
 The desktop application binary is named `forge3d`. The workspace includes separate crates for the application, core scene/editing logic, rendering, file I/O, and video output.
 
+
+## Website (browser)
+
+BlendCraft is **one application**. The browser build is the same Rust engine, UI, and scene system as desktop — not a separate web rewrite.
+
+CI produces a static **website** artifact (`blendcraft-website.zip`):
+
+| File | Role |
+|------|------|
+| `index.html` | Site entry — loading screen, canvas, error UI |
+| `forge_app.js` | JS glue that loads the engine |
+| `forge_app_bg.wasm` (or `.wasm`) | The application itself |
+| `logo.png` | Icon / splash |
+| `serve.sh` | Optional local static server |
+
+### Use it
+
+1. **GitHub Pages** — after a successful main/tag build, enable *Settings → Pages → Source: GitHub Actions*. The site URL is published by the **Website (GitHub Pages)** job.
+2. **Any static host** — unzip `blendcraft-website` and upload the folder (Netlify, Cloudflare Pages, nginx, S3, …).
+3. **Locally** — unzip, then:
+   ```sh
+   cd path/to/unzipped-site
+   python3 -m http.server 8080
+   # open http://127.0.0.1:8080/
+   ```
+   Opening `index.html` as a `file://` URL will **not** work (browsers block WASM that way).
+
+Desktop installers and binaries are unchanged. Python scripting and video export stay desktop-only; everything else aims to share one codebase.
+
+
 ## Main workflows currently implemented
 
 ### Scene and object editing

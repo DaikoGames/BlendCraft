@@ -12,7 +12,6 @@ use std::sync::Arc;
 mod alembic;
 mod export;
 mod fbx;
-mod fbx_ufbx;
 mod obj;
 mod usd;
 #[cfg(not(target_arch = "wasm32"))]
