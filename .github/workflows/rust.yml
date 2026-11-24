@@ -70,7 +70,7 @@ jobs:
           rm -rf "$OUT"
           mkdir -p "$OUT"
 
-          WASM_IN="target/wasm32-unknown-unknown/release/forge_app.wasm"
+          WASM_IN="target/wasm32-unknown-unknown/release/forge3d.wasm"
           test -f "$WASM_IN"
 
           wasm-bindgen --target web --out-dir "$OUT" --out-name forge_app "$WASM_IN"
