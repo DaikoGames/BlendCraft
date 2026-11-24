@@ -174,6 +174,8 @@ jobs:
           - { name: macos-arm64,   os: macos-latest,     target: aarch64-apple-darwin,          zig: false, scripting: true,  ext: "",     experimental: false }
           - { name: linux-x86,     os: ubuntu-24.04,     target: i686-unknown-linux-gnu,        zig: true,  scripting: true,  ext: "",     experimental: true  }
           - { name: linux-armv7,   os: ubuntu-24.04,     target: armv7-unknown-linux-gnueabihf, zig: true,  scripting: true,  ext: "",     experimental: true  }
+          - { name: linux-riscv64, os: ubuntu-24.04,     target: riscv64gc-unknown-linux-gnu,   zig: true,  scripting: false, ext: "",     experimental: true  }
+          - { name: linux-riscv64-musl, os: ubuntu-24.04, target: riscv64gc-unknown-linux-musl, zig: true,  scripting: false, ext: "",     experimental: true  }
           - { name: windows-x86,   os: windows-latest,   target: i686-pc-windows-msvc,          zig: false, scripting: true,  ext: ".exe", experimental: true  }
           - { name: windows-arm64, os: windows-latest,   target: aarch64-pc-windows-msvc,       zig: false, scripting: true,  ext: ".exe", experimental: true  }
 
@@ -243,6 +245,14 @@ jobs:
               ZIG_TARGET="arm-linux-gnueabihf"
               LINKER_ENV=CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_LINKER
               ;;
+            riscv64gc-unknown-linux-gnu)
+              ZIG_TARGET="riscv64-linux-gnu"
+              LINKER_ENV=CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_GNU_LINKER
+              ;;
+            riscv64gc-unknown-linux-musl)
+              ZIG_TARGET="riscv64-linux-musl"
+              LINKER_ENV=CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_MUSL_LINKER
+              ;;
             *)
               echo "No zig mapping for $TARGET"
               exit 1
@@ -291,6 +301,17 @@ jobs:
           export "$LINKER_ENV"="$PWD/zig-cc"
 
           echo "Zig target: $ZIG_TARGET  Rust target: $TARGET  scripting=${{ matrix.scripting }}"
+          # RISC-V musl often lacks libgcc_s unwind; prefer abort + strip gcc_s.
+          EXTRA_FLAGS=()
+          case "$TARGET" in
+            *riscv64*musl*)
+              export RUSTFLAGS="${RUSTFLAGS:-} -C panic=abort -C link-arg=-unwindlib=none"
+              ;;
+            *riscv64*)
+              # gnu start files still flaky under zig; panic=abort reduces unwind needs
+              export RUSTFLAGS="${RUSTFLAGS:-} -C panic=abort"
+              ;;
+          esac
           if [ "${{ matrix.scripting }}" = "true" ]; then
             cargo build --release -p "$APP_PACKAGE" --target "$TARGET"
           else
@@ -436,17 +457,77 @@ jobs:
   # (libexecinfo, libkvm, …). Native FreeBSD/arm64 or a full sysroot is required.
   # The job records the limitation and succeeds so CI stays green; freebsd-x64
   # still builds a real binary in the FreeBSD VM job.
+  # FreeBSD aarch64 — best effort on Ubuntu (needs sysroot; may fail).
+  # continue-on-error so the rest of CI stays green.
   freebsd-arm64:
     name: freebsd-arm64
     runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    continue-on-error: true
     steps:
-      - name: Document limitation
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
+      - uses: mlugg/setup-zig@v1
+        with:
+          version: 0.13.0
+      - name: Detect binary name
+        shell: bash
         run: |
-          echo "::warning::aarch64-unknown-freebsd is not buildable on Ubuntu runners without a FreeBSD sysroot (missing libexecinfo/kvm/procstat, etc.)."
-          echo "Build on a FreeBSD/arm64 machine or with a proper sysroot:"
-          echo "  rustup target add aarch64-unknown-freebsd"
-          echo "  cargo build --release -p forge-app --target aarch64-unknown-freebsd --no-default-features"
-          echo "Tracked as experimental; freebsd-x64 continues to produce artifacts."
+          BIN=$(cargo metadata --no-deps --format-version 1 \
+            | jq -r --arg pkg "$APP_PACKAGE" '.packages[] | select(.name==$pkg) | .targets[] | select(.kind | index("bin")) | .name' \
+            | head -n1 | tr -d '\r')
+          test -n "$BIN" || { echo "No binary target found"; exit 1; }
+          echo "BIN=$BIN" >> "$GITHUB_ENV"
+
+      - name: Build aarch64-unknown-freebsd (no scripting)
+        run: |
+          set -euo pipefail
+          rustup target add aarch64-unknown-freebsd || true
+          cat > zig-cc << 'EOF'
+          #!/bin/bash
+          set -euo pipefail
+          args=()
+          while [[ $# -gt 0 ]]; do
+            case "$1" in
+              --target=*|-target)
+                if [[ "$1" == -target ]]; then shift; fi
+                shift || true
+                ;;
+              -m32|-m64|-march=*|-mtune=*|-mcpu=*|-mfix-*)
+                shift || true
+                ;;
+              -lexecinfo|-lkvm|-lmemstat|-lprocstat|-ldevstat|-lgcc_s|-lgcc)
+                # No FreeBSD sysroot on this runner — drop host libs zig cannot find.
+                shift || true
+                ;;
+              *)
+                args+=("$1"); shift
+                ;;
+            esac
+          done
+          exec zig cc -target aarch64-freebsd "${args[@]}"
+          EOF
+          sed -i 's/^          //' zig-cc
+          chmod +x zig-cc
+          export CC="$PWD/zig-cc"
+          export CARGO_TARGET_AARCH64_UNKNOWN_FREEBSD_LINKER="$PWD/zig-cc"
+          cargo +nightly build -Z build-std=std,core,alloc \
+            --release -p "$APP_PACKAGE" \
+            --target aarch64-unknown-freebsd \
+            --no-default-features
+          mkdir -p dist
+          cp "target/aarch64-unknown-freebsd/release/$BIN" dist/
+          file "dist/$BIN" || true
+          ls -lh dist/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v5
+        with:
+          name: blendcraft-freebsd-arm64
+          path: dist/${{ env.BIN }}
+          if-no-files-found: warn
 
   flatpak:
     name: flatpak-${{ matrix.name }}
