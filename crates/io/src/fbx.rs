@@ -227,9 +227,8 @@ struct Video {
     content: Vec<u8>,
 }
 
-#[derive(Debug, Clone)]
 /// FBX Deformer of type Skin — groups Cluster sub-deformers for one geometry.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 struct SkinDef {
     name: String,
 }
@@ -246,6 +245,7 @@ struct ClusterDef {
     transform_link: Option<[f32; 16]>,
 }
 
+#[derive(Debug, Clone)]
 struct Model {
     name: String,
     kind: String, // "Mesh", "Null", ...
@@ -3174,7 +3174,6 @@ fn write_array_f64(out: &mut Vec<u8>, arr: &[f64]) {
     }
 }
 
-#[cfg(test)]
 /// Rebuild model-id → bone-index map (same rules as armature reconstruction).
 fn id_to_bone_for_skins(doc: &FbxDoc, _parents: &HashMap<i64, i64>) -> HashMap<i64, u32> {
     let has_explicit_limb = doc.models.values().any(|m| {
