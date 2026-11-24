@@ -8,7 +8,7 @@
 #![cfg(target_arch = "wasm32")]
 
 use wasm_bindgen::JsCast;
-use web_sys::{Blob, BlobPropertyBagDictionary, Url};
+use web_sys::{Blob, BlobPropertyBag, Url};
 
 /// Trigger a browser download of `data` under `filename`.
 ///
@@ -21,7 +21,7 @@ pub fn download_bytes(filename: &str, data: &[u8], mime: &str) {
     let array = js_sys::Uint8Array::new_with_length(data.len() as u32);
     array.copy_from(data);
 
-    let mut props = BlobPropertyBagDictionary::new();
+    let mut props = BlobPropertyBag::new();
     props.type_(mime);
     let parts = js_sys::Array::new();
     parts.push(&array);
