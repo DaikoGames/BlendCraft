@@ -271,6 +271,12 @@ jobs:
               ;;
           esac
           chmod +x zig-cc
+          # Zig is both the linker and the C compiler so RustPython's libsqlite3-sys
+          # (and any other cc-rs crates) cross-compile without a GNU cross-gcc.
+          export CC="$PWD/zig-cc"
+          export CXX="$PWD/zig-cc"
+          export HOST_CC="${HOST_CC:-cc}"
+          export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-target}"
           if [ "${{ matrix.scripting }}" = "true" ]; then
             cargo build --release -p "$APP_PACKAGE" --target "$TARGET"
           else
@@ -410,6 +416,8 @@ jobs:
 
   # FreeBSD aarch64: best-effort via cross. Marked continue-on-error so a
   # missing cross image does not fail the whole workflow.
+  # FreeBSD aarch64: no official cross Docker image and no FreeBSD aarch64 GHA runner.
+  # Best-effort: build-std + zig as linker when possible. Job is experimental.
   freebsd-arm64:
     name: freebsd-arm64
     runs-on: ubuntu-24.04
@@ -417,7 +425,12 @@ jobs:
     continue-on-error: true
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
+      - uses: mlugg/setup-zig@v1
+        with:
+          version: 0.13.0
       - name: Detect binary name
         shell: bash
         run: |
@@ -427,13 +440,20 @@ jobs:
           test -n "$BIN" || { echo "No binary target found"; exit 1; }
           echo "BIN=$BIN" >> "$GITHUB_ENV"
 
-      - name: Install cross
-        run: cargo install cross --locked
-
       - name: Build aarch64-unknown-freebsd (no scripting)
         run: |
           set -euo pipefail
-          cross build --release -p "$APP_PACKAGE" \
+          rustup target add aarch64-unknown-freebsd || true
+          cat > zig-cc <<'EOF'
+          #!/bin/sh
+          exec zig cc -target aarch64-freebsd "$@"
+          EOF
+          chmod +x zig-cc
+          export CC="$PWD/zig-cc"
+          export CARGO_TARGET_AARCH64_UNKNOWN_FREEBSD_LINKER="$PWD/zig-cc"
+          # build-std required: prebuilt std may be missing for this target
+          cargo +nightly build -Z build-std=std,core,alloc \
+            --release -p "$APP_PACKAGE" \
             --target aarch64-unknown-freebsd \
             --no-default-features
           mkdir -p dist
