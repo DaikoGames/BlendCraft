@@ -174,8 +174,8 @@ jobs:
           - { name: macos-arm64,   os: macos-latest,     target: aarch64-apple-darwin,          zig: false, scripting: true,  ext: "",     experimental: false }
           - { name: linux-x86,     os: ubuntu-24.04,     target: i686-unknown-linux-gnu,        zig: true,  scripting: true,  ext: "",     experimental: true  }
           - { name: linux-armv7,   os: ubuntu-24.04,     target: armv7-unknown-linux-gnueabihf, zig: true,  scripting: true,  ext: "",     experimental: true  }
-          - { name: linux-riscv64, os: ubuntu-24.04,     target: riscv64gc-unknown-linux-gnu,   zig: true,  scripting: false, ext: "",     experimental: true  }
-          - { name: linux-riscv64-musl, os: ubuntu-24.04, target: riscv64gc-unknown-linux-musl, zig: true,  scripting: false, ext: "",     experimental: true  }
+          - { name: linux-riscv64, os: ubuntu-24.04,     target: riscv64gc-unknown-linux-gnu,   zig: false, gcc: riscv64, scripting: true,  ext: "",     experimental: true  }
+          - { name: linux-riscv64-musl, os: ubuntu-24.04, target: riscv64gc-unknown-linux-musl, zig: false, gcc: none, scripting: false, ext: "",     experimental: true  }
           - { name: windows-x86,   os: windows-latest,   target: i686-pc-windows-msvc,          zig: false, scripting: true,  ext: ".exe", experimental: true  }
           - { name: windows-arm64, os: windows-latest,   target: aarch64-pc-windows-msvc,       zig: false, scripting: true,  ext: ".exe", experimental: true  }
 
@@ -229,7 +229,71 @@ jobs:
             cargo build --release -p "$APP_PACKAGE" --target "${{ matrix.target }}" --no-default-features
           fi
 
-      - name: Build (Zig linker + C compiler)
+      - name: Install RISC-V GNU toolchain
+        if: matrix.gcc == 'riscv64'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-riscv64-linux-gnu g++-riscv64-linux-gnu
+
+      - name: Build (RISC-V GNU cross, with scripting)
+        if: matrix.gcc == 'riscv64'
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          # Real cross-gcc — not Zig. Required for libsqlite3-sys (RustPython).
+          export CC_riscv64gc_unknown_linux_gnu=riscv64-linux-gnu-gcc
+          export CXX_riscv64gc_unknown_linux_gnu=riscv64-linux-gnu-g++
+          export CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_GNU_LINKER=riscv64-linux-gnu-gcc
+          export CC=riscv64-linux-gnu-gcc
+          export CXX=riscv64-linux-gnu-g++
+          if [ "${{ matrix.scripting }}" = "true" ]; then
+            cargo build --release -p "$APP_PACKAGE" --target "$TARGET"
+          else
+            cargo build --release -p "$APP_PACKAGE" --target "$TARGET" --no-default-features
+          fi
+
+      - name: Build (RISC-V musl — experimental linker-only)
+        if: matrix.target == 'riscv64gc-unknown-linux-musl'
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          # No packaged riscv64-musl-gcc on Ubuntu by default. Try zig as linker only;
+          # pure Rust (no scripting) still may need unwind — use panic=abort.
+          curl -fsSL https://ziglang.org/download/0.13.0/zig-linux-x86_64-0.13.0.tar.xz -o /tmp/zig.tar.xz
+          tar -xJf /tmp/zig.tar.xz -C /tmp
+          ZIG=$(echo /tmp/zig-linux-x86_64-*/zig)
+          cat > zig-cc << EOF
+          #!/bin/bash
+          exec "$ZIG" cc -target riscv64-linux-musl "\$@"
+          EOF
+          # strip bad flags
+          cat > zig-cc << 'EOF'
+          #!/bin/bash
+          set -euo pipefail
+          ZIG_BIN=ZIG_BIN_PLACEHOLDER
+          args=()
+          while [[ $# -gt 0 ]]; do
+            case "$1" in
+              --target=*|-target|-m32|-m64|-march=*|-mtune=*|-mcpu=*|-mfix-*|-fuse-ld=*|-lgcc_s|-lgcc|-B*)
+                [[ "$1" == -target ]] && shift || true
+                shift || true
+                ;;
+              *) args+=("$1"); shift ;;
+            esac
+          done
+          exec "$ZIG_BIN" cc -target riscv64-linux-musl "${args[@]}"
+          EOF
+          sed -i "s|ZIG_BIN_PLACEHOLDER|$ZIG|" zig-cc
+          chmod +x zig-cc
+          export CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_MUSL_LINKER="$PWD/zig-cc"
+          export RUSTFLAGS="-C panic=abort"
+          cargo build --release -p "$APP_PACKAGE" --target "$TARGET" --no-default-features
+
+      - name: Build (Zig cross)
         if: matrix.zig
         shell: bash
         env:
@@ -259,7 +323,7 @@ jobs:
               ;;
           esac
 
-          # Write wrapper without YAML indentation issues
+          # Minimal wrapper: force Zig triple, drop Rust/cc-rs flags Zig rejects.
           cat > zig-cc << 'WRAP'
           #!/bin/bash
           set -euo pipefail
@@ -270,19 +334,18 @@ jobs:
           while [[ $# -gt 0 ]]; do
             case "$1" in
               --target=*|-target)
-                if [[ "$1" == -target ]]; then shift; fi
+                [[ "$1" == -target ]] && shift || true
                 shift || true
                 ;;
-              -m32|-m64|-march=*|-mtune=*|-mcpu=*|-mfix-*)
+              -m32|-m64|-march=*|-mtune=*|-mcpu=*|-mfix-*|-fuse-ld=*)
                 shift || true
                 ;;
               -lgcc_s|-lgcc)
-                # musl builds must not link libgcc_s; zig provides what is needed
                 if [[ $is_musl -eq 1 ]]; then shift || true; else args+=("$1"); shift; fi
                 ;;
-              -Wl,-Bdynamic|-Wl,-Bstatic)
-                # keep these
-                args+=("$1"); shift
+              -B*)
+                # Host gcc-ld paths confuse Zig on foreign targets
+                shift || true
                 ;;
               *)
                 args+=("$1"); shift
@@ -295,23 +358,26 @@ jobs:
           sed -i "s|ZIG_TARGET_PLACEHOLDER|ZIG_TARGET=\"${ZIG_TARGET}\"|" zig-cc
           chmod +x zig-cc
 
-          export CC="$PWD/zig-cc"
-          export CXX="$PWD/zig-cc"
-          export HOST_CC="${HOST_CC:-cc}"
           export "$LINKER_ENV"="$PWD/zig-cc"
+          export HOST_CC="${HOST_CC:-cc}"
 
-          echo "Zig target: $ZIG_TARGET  Rust target: $TARGET  scripting=${{ matrix.scripting }}"
-          # RISC-V musl often lacks libgcc_s unwind; prefer abort + strip gcc_s.
-          EXTRA_FLAGS=()
+          # Only use Zig as the *C compiler* when we need to build C deps (sqlite via
+          # RustPython). For pure-Rust targets (riscv, scripting=false), linker-only
+          # avoids Zig compiling broken glibc/musl start files.
+          if [ "${{ matrix.scripting }}" = "true" ]; then
+            export CC="$PWD/zig-cc"
+            export CXX="$PWD/zig-cc"
+          else
+            unset CC CXX || true
+          fi
+
           case "$TARGET" in
-            *riscv64*musl*)
-              export RUSTFLAGS="${RUSTFLAGS:-} -C panic=abort -C link-arg=-unwindlib=none"
-              ;;
             *riscv64*)
-              # gnu start files still flaky under zig; panic=abort reduces unwind needs
-              export RUSTFLAGS="${RUSTFLAGS:-} -C panic=abort"
+              export RUSTFLAGS="${RUSTFLAGS:-} -C panic=abort -C link-arg=-fno-sanitize=undefined"
               ;;
           esac
+
+          echo "Zig=$ZIG_TARGET target=$TARGET scripting=${{ matrix.scripting }} CC=${CC:-<host>}"
           if [ "${{ matrix.scripting }}" = "true" ]; then
             cargo build --release -p "$APP_PACKAGE" --target "$TARGET"
           else
@@ -459,6 +525,7 @@ jobs:
   # still builds a real binary in the FreeBSD VM job.
   # FreeBSD aarch64 — best effort on Ubuntu (needs sysroot; may fail).
   # continue-on-error so the rest of CI stays green.
+  # FreeBSD aarch64: download official base.txz as sysroot, link with clang --target.
   freebsd-arm64:
     name: freebsd-arm64
     runs-on: ubuntu-24.04
@@ -466,12 +533,9 @@ jobs:
     continue-on-error: true
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@nightly
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          components: rust-src
-      - uses: mlugg/setup-zig@v1
-        with:
-          version: 0.13.0
+          targets: aarch64-unknown-freebsd
       - name: Detect binary name
         shell: bash
         run: |
@@ -481,42 +545,41 @@ jobs:
           test -n "$BIN" || { echo "No binary target found"; exit 1; }
           echo "BIN=$BIN" >> "$GITHUB_ENV"
 
-      - name: Build aarch64-unknown-freebsd (no scripting)
+      - name: Fetch FreeBSD aarch64 sysroot
         run: |
           set -euo pipefail
-          rustup target add aarch64-unknown-freebsd || true
-          cat > zig-cc << 'EOF'
+          REL=14.2-RELEASE
+          mkdir -p sysroot
+          curl -fsSL -o base.txz \
+            "https://download.freebsd.org/releases/arm64/aarch64/${REL}/base.txz"
+          # Extract libraries + headers only (faster, enough to link)
+          tar -xJf base.txz -C sysroot ./lib ./usr/lib ./usr/include ./libexec
+          ls sysroot/usr/lib | head
+          test -f sysroot/usr/lib/libc.so || test -f sysroot/lib/libc.so.7
+
+      - name: Build aarch64-unknown-freebsd (with scripting)
+        run: |
+          set -euo pipefail
+          SYSROOT="$PWD/sysroot"
+          # clang drives the FreeBSD target using the downloaded sysroot
+          cat > freebsd-cc << EOF
           #!/bin/bash
           set -euo pipefail
           args=()
-          while [[ $# -gt 0 ]]; do
-            case "$1" in
-              --target=*|-target)
-                if [[ "$1" == -target ]]; then shift; fi
-                shift || true
-                ;;
-              -m32|-m64|-march=*|-mtune=*|-mcpu=*|-mfix-*)
-                shift || true
-                ;;
-              -lexecinfo|-lkvm|-lmemstat|-lprocstat|-ldevstat|-lgcc_s|-lgcc)
-                # No FreeBSD sysroot on this runner — drop host libs zig cannot find.
-                shift || true
-                ;;
-              *)
-                args+=("$1"); shift
-                ;;
+          while [[ \$# -gt 0 ]]; do
+            case "\$1" in
+              -mfix-*) shift || true ;;
+              *) args+=("\$1"); shift ;;
             esac
           done
-          exec zig cc -target aarch64-freebsd "${args[@]}"
+          exec clang --target=aarch64-unknown-freebsd14.2 --sysroot="$SYSROOT" "\${args[@]}"
           EOF
-          sed -i 's/^          //' zig-cc
-          chmod +x zig-cc
-          export CC="$PWD/zig-cc"
-          export CARGO_TARGET_AARCH64_UNKNOWN_FREEBSD_LINKER="$PWD/zig-cc"
-          cargo +nightly build -Z build-std=std,core,alloc \
-            --release -p "$APP_PACKAGE" \
-            --target aarch64-unknown-freebsd \
-            --no-default-features
+          chmod +x freebsd-cc
+          export CC="$PWD/freebsd-cc"
+          export CXX="$PWD/freebsd-cc"
+          export CARGO_TARGET_AARCH64_UNKNOWN_FREEBSD_LINKER="$PWD/freebsd-cc"
+          export BINDGEN_EXTRA_CLANG_ARGS="--sysroot=$SYSROOT"
+          cargo build --release -p "$APP_PACKAGE" --target aarch64-unknown-freebsd
           mkdir -p dist
           cp "target/aarch64-unknown-freebsd/release/$BIN" dist/
           file "dist/$BIN" || true
