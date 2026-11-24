@@ -8,6 +8,8 @@ mod scripting;
 mod tools;
 mod transform;
 mod ui;
+#[cfg(target_arch = "wasm32")]
+mod web_file;
 
 use egui_wgpu::wgpu;
 use forge_core::{
@@ -2723,11 +2725,57 @@ impl App {
     }
 
     fn save(&mut self, save_as: bool) {
+        // Shared serialization path for both desktop and browser.
+        // Edit Mode owns a working mesh copy. Commit it before serializing so
+        // UV edits and geometry changes cannot be omitted from the project.
+        self.doc.sync_edit_mesh();
+        // Weight Paint temporarily overwrites vertex colors with the heat map.
+        // Restore real colors (and keep groups/skin) so paintings save correctly.
+        let was_weight = self.doc.weight_paint_mode;
+        if was_weight {
+            self.doc.exit_weight_paint_mode();
+        }
+        // Sync any painted vertex groups into skin before writing the file.
+        let skinned: Vec<u64> = self
+            .doc
+            .scene
+            .objects
+            .iter()
+            .filter(|o| o.skin.is_some())
+            .map(|o| o.id)
+            .collect();
+        for id in skinned {
+            self.doc.sync_skin_from_vertex_groups(id);
+        }
+        let bytes = match project::to_bytes(&self.doc.scene) {
+            Ok(b) => b,
+            Err(e) => {
+                if was_weight {
+                    let _ = self.doc.enter_weight_paint_mode();
+                }
+                self.status(format!("Save failed: {e:#}"));
+                return;
+            }
+        };
+        if was_weight {
+            let _ = self.doc.enter_weight_paint_mode();
+        }
+
         #[cfg(target_arch = "wasm32")]
         {
             let _ = save_as;
-            self.status("Save is not available on WebAssembly yet".to_string());
-            return;
+            let name = self
+                .doc
+                .path
+                .as_ref()
+                .and_then(|p| p.file_name())
+                .and_then(|n| n.to_str())
+                .unwrap_or("untitled.forge");
+            web_file::download_bytes(name, &bytes, "application/octet-stream");
+            self.doc.dirty = false;
+            self.status(format!(
+                "Downloaded {name} (vertex colors, weight groups & skin bindings included)"
+            ));
         }
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -2747,33 +2795,7 @@ impl App {
                     p
                 }
             };
-            // Edit Mode owns a working mesh copy. Commit it before serializing so
-            // UV edits and geometry changes cannot be omitted from the project.
-            self.doc.sync_edit_mesh();
-            // Weight Paint temporarily overwrites vertex colors with the heat map.
-            // Restore real colors (and keep groups/skin) so paintings save correctly.
-            let was_weight = self.doc.weight_paint_mode;
-            if was_weight {
-                self.doc.exit_weight_paint_mode();
-            }
-            // Sync any painted vertex groups into skin before writing the file.
-            let skinned: Vec<u64> = self
-                .doc
-                .scene
-                .objects
-                .iter()
-                .filter(|o| o.skin.is_some())
-                .map(|o| o.id)
-                .collect();
-            for id in skinned {
-                self.doc.sync_skin_from_vertex_groups(id);
-            }
-            let result = project::to_bytes(&self.doc.scene)
-                .and_then(|b| std::fs::write(&path, b).map_err(Into::into));
-            if was_weight {
-                let _ = self.doc.enter_weight_paint_mode();
-            }
-            match result {
+            match std::fs::write(&path, &bytes) {
                 Ok(()) => {
                     self.doc.path = Some(path.clone());
                     self.doc.dirty = false;
@@ -5749,6 +5771,8 @@ impl ApplicationHandler for App {
             .with_inner_size(LogicalSize::new(1400, 850));
         // Window / taskbar icon from the project logo (hand-eye OK mark).
         // Resize to 256² so every platform accepts it (raw 1254² can fail silently).
+        // On wasm the icon is ignored by the browser; skip the image work there.
+        #[cfg(not(target_arch = "wasm32"))]
         if let Ok(img) = image::load_from_memory(include_bytes!("../logo.png")) {
             let img = img.resize_exact(256, 256, image::imageops::FilterType::Lanczos3);
             let rgba = img.to_rgba8();
@@ -5757,8 +5781,23 @@ impl ApplicationHandler for App {
                 attrs = attrs.with_window_icon(Some(icon));
             }
         }
+        // Attach the pre-existing HTML canvas so wgpu / winit share one surface.
+        #[cfg(target_arch = "wasm32")]
+        {
+            use wasm_bindgen::JsCast;
+            use winit::platform::web::WindowAttributesExtWebSys;
+            let canvas = web_sys::window()
+                .and_then(|w| w.document())
+                .and_then(|d| d.get_element_by_id("blendcraft-canvas"))
+                .and_then(|e| e.dyn_into::<web_sys::HtmlCanvasElement>().ok());
+            if let Some(canvas) = canvas {
+                attrs = attrs.with_canvas(Some(canvas));
+            }
+        }
         let window = Arc::new(el.create_window(attrs).expect("create window"));
         let size = window.inner_size();
+        // On wasm, pollster::block_on runs the future on the current thread;
+        // the browser event loop still drives async later.
         let renderer = pollster::block_on(Renderer::new(window.clone(), size.width, size.height))
             .expect("init GPU");
         let egui_state = egui_winit::State::new(

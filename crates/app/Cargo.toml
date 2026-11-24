@@ -13,11 +13,17 @@ python-scripting = ["dep:rustpython-vm", "dep:rustpython-stdlib", "dep:rustpytho
 name = "forge3d"
 path = "src/main.rs"
 
+# On wasm the same sources are also built as a cdylib so wasm-bindgen can
+# produce a browser-loadable module without duplicating application logic.
+[lib]
+name = "forge_app"
+path = "src/main.rs"
+crate-type = ["cdylib", "rlib"]
+
 [build-dependencies]
 winresource = "0.1"
 
 [dependencies]
-
 forge-core.workspace = true
 forge-io.workspace = true
 forge-render.workspace = true
@@ -49,5 +55,33 @@ console_error_panic_hook.workspace = true
 console_log.workspace = true
 wasm-bindgen.workspace = true
 wasm-bindgen-futures.workspace = true
-web-sys.workspace = true
+web-sys = { workspace = true, features = [
+  "console",
+  "Document",
+  "Element",
+  "HtmlCanvasElement",
+  "HtmlElement",
+  "HtmlInputElement",
+  "Window",
+  "Blob",
+  "BlobPropertyBagDictionary",
+  "Url",
+  "File",
+  "FileList",
+  "FileReader",
+  "DataTransfer",
+  "DragEvent",
+  "Event",
+  "EventTarget",
+  "MouseEvent",
+  "KeyboardEvent",
+  "CssStyleDeclaration",
+  "Response",
+  "Request",
+  "RequestInit",
+  "RequestMode",
+  "Headers",
+] }
 getrandom = { version = "0.3", features = ["wasm_js"] }
+js-sys = "0.3"
+egui-winit = { version = "0.29", default-features = false }

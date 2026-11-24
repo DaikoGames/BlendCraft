@@ -1,3 +1,17 @@
+## Unified cross-platform + FreeBSD ARM64 + real WebApp (2026-11-24)
+
+- **One application**: shared Rust codebase continues to power desktop and browser.
+  No separate web UI or duplicated scene/modeling/render logic.
+- **WebApp**: `web/index.html` + wasm-bindgen packaging produces a static site
+  (ZIP artifact `blendcraft-webapp`) that runs the same application in the browser
+  via WebGPU/WebGL2. Project save uses browser download of the identical `.forge`
+  format. Python scripting and video export remain desktop-only (isolated by
+  `cfg(not(target_arch = "wasm32"))`).
+- **FreeBSD ARM64**: CI job now attempts a real `aarch64-unknown-freebsd` binary
+  via cross-rs (scripting disabled for this target only). FreeBSD x86_64 is unchanged.
+- Canvas attachment, expanded `web-sys` features, and a small `web_file` helper
+  keep platform differences behind thin adapters.
+
 ## UV Editing restored to header + .gltf import (2026-11-23b)
 
 - **UV Editing** button is back in the main header mode bar (after Sculpt Mode); it toggles UV mode and cleanly exits other modes/workspaces first. `U` shortcut and the Mode / Tools menu entries are unchanged.
