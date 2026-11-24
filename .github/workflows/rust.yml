@@ -57,11 +57,11 @@ jobs:
       - name: Install wasm-bindgen-cli
         run: cargo install wasm-bindgen-cli --locked
 
-      - name: Build application for wasm32
+      - name: Build application for wasm32 (with RustPython scripting)
         run: |
+          # Keep default features so python-scripting / RustPython is linked into the website build.
           cargo build --release -p forge-app \
-            --target wasm32-unknown-unknown \
-            --no-default-features
+            --target wasm32-unknown-unknown
 
       - name: Package static website
         run: |
@@ -174,7 +174,7 @@ jobs:
           - { name: macos-arm64,   os: macos-latest,     target: aarch64-apple-darwin,          zig: false, scripting: true,  ext: "",     experimental: false }
           - { name: linux-x86,     os: ubuntu-24.04,     target: i686-unknown-linux-gnu,        zig: true,  scripting: true,  ext: "",     experimental: true  }
           - { name: linux-armv7,   os: ubuntu-24.04,     target: armv7-unknown-linux-gnueabihf, zig: true,  scripting: true,  ext: "",     experimental: true  }
-          - { name: linux-riscv64, os: ubuntu-24.04,     target: riscv64gc-unknown-linux-gnu,   zig: true,  scripting: true,  ext: "",     experimental: true  }
+          - { name: linux-riscv64, os: ubuntu-24.04,     target: riscv64gc-unknown-linux-gnu,   zig: true,  scripting: false, ext: "",     experimental: true  }
           - { name: linux-riscv64-musl, os: ubuntu-24.04, target: riscv64gc-unknown-linux-musl, zig: true,  scripting: true,  ext: "",     experimental: true  }
           - { name: windows-x86,   os: windows-latest,   target: i686-pc-windows-msvc,          zig: false, scripting: true,  ext: ".exe", experimental: true  }
           - { name: windows-arm64, os: windows-latest,   target: aarch64-pc-windows-msvc,       zig: false, scripting: true,  ext: ".exe", experimental: true  }
@@ -236,8 +236,6 @@ jobs:
           TARGET: ${{ matrix.target }}
         run: |
           set -euo pipefail
-          # Zig target triples (NOT Rust triples). cc-rs passes --target=<rust-triple>
-          # which Zig rejects; the wrapper strips those and forces the Zig triple.
           case "$TARGET" in
             i686-unknown-linux-gnu)
               ZIG_TARGET="x86-linux-gnu.2.17"
@@ -261,33 +259,40 @@ jobs:
               ;;
           esac
 
-          cat > zig-cc << EOF
+          # Write wrapper without YAML indentation issues
+          cat > zig-cc << 'WRAP'
           #!/bin/bash
-          # Cross C compiler/linker via Zig. Strip flags that cargo/cc-rs inject
-          # which Zig does not understand (Rust-style --target=, redundant -m32, …).
           set -euo pipefail
-          ZIG_TARGET="${ZIG_TARGET}"
+          ZIG_TARGET_PLACEHOLDER
+          is_musl=0
+          case "$ZIG_TARGET" in *musl*) is_musl=1 ;; esac
           args=()
-          while [[ \$# -gt 0 ]]; do
-            case "\$1" in
+          while [[ $# -gt 0 ]]; do
+            case "$1" in
               --target=*|-target)
-                if [[ "\$1" == -target ]]; then shift; fi
+                if [[ "$1" == -target ]]; then shift; fi
                 shift || true
                 ;;
-              -m32|-m64|-march=*|-mtune=*)
+              -m32|-m64|-march=*|-mtune=*|-mcpu=*|-mfix-*)
                 shift || true
+                ;;
+              -lgcc_s|-lgcc)
+                # musl builds must not link libgcc_s; zig provides what is needed
+                if [[ $is_musl -eq 1 ]]; then shift || true; else args+=("$1"); shift; fi
+                ;;
+              -Wl,-Bdynamic|-Wl,-Bstatic)
+                # keep these
+                args+=("$1"); shift
                 ;;
               *)
-                args+=("\$1")
-                shift
+                args+=("$1"); shift
                 ;;
             esac
           done
-          exec zig cc -target "\$ZIG_TARGET" "\${args[@]}"
-          EOF
-          # Unindent heredoc body (YAML indented the script)
+          exec zig cc -target "$ZIG_TARGET" "${args[@]}"
+          WRAP
           sed -i 's/^          //' zig-cc
-          # Fix the embedded ZIG_TARGET line (sed may have broken nothing)
+          sed -i "s|ZIG_TARGET_PLACEHOLDER|ZIG_TARGET=\"${ZIG_TARGET}\"|" zig-cc
           chmod +x zig-cc
 
           export CC="$PWD/zig-cc"
@@ -295,7 +300,7 @@ jobs:
           export HOST_CC="${HOST_CC:-cc}"
           export "$LINKER_ENV"="$PWD/zig-cc"
 
-          echo "Zig target: $ZIG_TARGET  Rust target: $TARGET"
+          echo "Zig target: $ZIG_TARGET  Rust target: $TARGET  scripting=${{ matrix.scripting }}"
           if [ "${{ matrix.scripting }}" = "true" ]; then
             cargo build --release -p "$APP_PACKAGE" --target "$TARGET"
           else
@@ -463,10 +468,27 @@ jobs:
         run: |
           set -euo pipefail
           rustup target add aarch64-unknown-freebsd || true
-          cat > zig-cc <<'EOF'
-          #!/bin/sh
-          exec zig cc -target aarch64-freebsd "$@"
+          cat > zig-cc << 'EOF'
+          #!/bin/bash
+          set -euo pipefail
+          args=()
+          while [[ $# -gt 0 ]]; do
+            case "$1" in
+              --target=*|-target)
+                if [[ "$1" == -target ]]; then shift; fi
+                shift || true
+                ;;
+              -m32|-m64|-march=*|-mtune=*|-mcpu=*|-mfix-*)
+                shift || true
+                ;;
+              *)
+                args+=("$1"); shift
+                ;;
+            esac
+          done
+          exec zig cc -target aarch64-freebsd "${args[@]}"
           EOF
+          sed -i 's/^          //' zig-cc
           chmod +x zig-cc
           export CC="$PWD/zig-cc"
           export CARGO_TARGET_AARCH64_UNKNOWN_FREEBSD_LINKER="$PWD/zig-cc"
