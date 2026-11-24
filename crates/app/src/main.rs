@@ -18,6 +18,7 @@ use forge_core::{
 };
 use forge_render::{Highlight, RenderEngine, Renderer, ViewSettings};
 use glam::{Mat4, Vec2};
+use web_time::Instant;
 use keymap::{Action, Binding};
 use std::{
     path::{Path, PathBuf},
@@ -185,7 +186,7 @@ struct App {
     /// (out_w, out_h, pixel size, camera view) the Cycles buffer was last sized for.
     cycles_res_key: (u32, u32, u32, bool),
     uploaded: u64,
-    last_anim_tick: std::time::Instant,
+    last_anim_tick: Instant,
     /// Fractional part (0..1) of the current frame while playing, for smooth motion.
     anim_subframe: f32,
     /// Object transforms changed by playback only; GPU matrices need a refresh.
@@ -225,7 +226,7 @@ fn highlights(doc: &Document) -> Vec<Highlight> {
 struct ViewAnim {
     from: (f32, f32),
     to: (f32, f32),
-    start: std::time::Instant,
+    start: Instant,
 }
 
 fn ext_of(p: &Path) -> String {
@@ -409,7 +410,7 @@ impl App {
             last_3d_viewport: [0.0, 0.0, 1280.0, 720.0],
             cycles_res_key: (0, 0, 0, false),
             uploaded: u64::MAX,
-            last_anim_tick: std::time::Instant::now(),
+            last_anim_tick: Instant::now(),
             anim_subframe: 0.0,
             anim_gpu_dirty: false,
             physics_runtime: None,
@@ -1134,7 +1135,7 @@ impl App {
                 self.view_anim = Some(ViewAnim {
                     from: (self.camera.yaw, self.camera.pitch),
                     to: (yaw, pitch),
-                    start: std::time::Instant::now(),
+                    start: Instant::now(),
                 });
             }
             N::Orbit(dx, dy) => {
@@ -3520,7 +3521,7 @@ impl App {
             A::ToggleAnimationPlay => {
                 self.doc.scene.animation.playing = !self.doc.scene.animation.playing;
                 if self.doc.scene.animation.playing {
-                    self.last_anim_tick = std::time::Instant::now();
+                    self.last_anim_tick = Instant::now();
                     self.status("Animation playing");
                 } else {
                     self.status("Animation paused");
@@ -4631,7 +4632,7 @@ impl App {
             let mut ok = 0u32;
             let mut err_msg: Option<String> = None;
             let total = (end - start + 1) as u32;
-            let t0 = std::time::Instant::now();
+            let t0 = Instant::now();
 
             {
                 let highlight = highlights(&self.doc);
@@ -5411,7 +5412,7 @@ impl App {
             }
             if !advanced_frames.is_empty() {
                 // Keep residual time so we do not drift slow.
-                self.last_anim_tick = std::time::Instant::now()
+                self.last_anim_tick = Instant::now()
                     - std::time::Duration::from_secs_f32(elapsed.max(0.0));
             }
             let steps = advanced_frames.len();

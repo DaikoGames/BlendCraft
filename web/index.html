@@ -38,11 +38,7 @@
       box-shadow: 0 8px 32px rgba(0,0,0,0.4);
       background: #2a2a36;
     }
-    #boot h1 {
-      font-size: 1.85rem;
-      font-weight: 650;
-      letter-spacing: 0.03em;
-    }
+    #boot h1 { font-size: 1.85rem; font-weight: 650; letter-spacing: 0.03em; }
     #boot .tag {
       color: #9a9aa8;
       font-size: 0.95rem;
@@ -60,11 +56,7 @@
       animation: spin 0.75s linear infinite;
     }
     @keyframes spin { to { transform: rotate(360deg); } }
-    #status {
-      font-size: 0.8rem;
-      color: #6a6a78;
-      min-height: 1.2em;
-    }
+    #status { font-size: 0.8rem; color: #6a6a78; min-height: 1.2em; }
     #error {
       display: none;
       position: fixed;
@@ -87,17 +79,15 @@
       border-radius: 8px;
       padding: 1rem 1.25rem;
       max-width: min(90vw, 40rem);
+      max-height: 40vh;
       overflow: auto;
-      font-size: 0.78rem;
-      color: #ccc;
       text-align: left;
+      font-size: 0.75rem;
+      color: #e0a0a0;
       white-space: pre-wrap;
+      word-break: break-word;
     }
-    #error .hint {
-      font-size: 0.85rem;
-      color: #7a7a88;
-      margin-top: 0.5rem;
-    }
+    #error .hint { color: #6a6a78; font-size: 0.85rem; }
     canvas#blendcraft-canvas {
       display: block;
       width: 100%;
@@ -121,15 +111,13 @@
   <div id="error" role="alert">
     <h2>Could not start BlendCraft</h2>
     <p>
-      This site needs a browser with <strong>WebGPU</strong> or <strong>WebGL2</strong>
-      (current Chrome, Edge, Firefox, or Safari). Open this page over
-      <strong>http://</strong> or <strong>https://</strong> — not as a local file.
+      Needs <strong>WebGPU</strong> or <strong>WebGL2</strong> and must be opened via
+      <strong>http://127.0.0.1</strong> (use <code>./serve.sh</code>), not as a local file.
     </p>
     <pre id="error-detail"></pre>
-    <p class="hint">Desktop builds are unchanged and do not require a browser.</p>
+    <p class="hint">If forge_app.js is missing, build the wasm target and package into this folder first.</p>
   </div>
 
-  <!-- Full-window canvas used by winit + wgpu (same engine as desktop). -->
   <canvas id="blendcraft-canvas" tabindex="0" aria-label="BlendCraft viewport"></canvas>
 
   <script type="module">
@@ -147,20 +135,67 @@
       errorBox.classList.add("visible");
       const text = (err && err.stack) ? err.stack : String(err);
       errorDetail.textContent = text;
-      console.error(err);
+      console.error("[BlendCraft]", err);
+    }
+
+    /** Resolve wasm-bindgen's init for --target web across versions. */
+    async function runInit(mod) {
+      // Prefer explicit wasm path so relative loads work under any subpath.
+      const wasmUrl = new URL("./forge_app_bg.wasm", import.meta.url);
+      const candidates = [
+        mod.default,
+        mod.init,
+        mod.initSync && (() => { throw new Error("initSync is not supported here; need async init"); }),
+      ].filter(Boolean);
+
+      let lastErr;
+      for (const fn of candidates) {
+        if (typeof fn !== "function") continue;
+        try {
+          // wasm-bindgen accepts undefined, a RequestInfo, or { module_or_path }
+          const r = fn(wasmUrl);
+          if (r && typeof r.then === "function") await r;
+          return;
+        } catch (e) {
+          lastErr = e;
+          try {
+            const r2 = fn();
+            if (r2 && typeof r2.then === "function") await r2;
+            return;
+          } catch (e2) {
+            lastErr = e2;
+          }
+        }
+      }
+      throw lastErr || new Error("No usable wasm-bindgen init() export in forge_app.js");
     }
 
     async function start() {
       try {
-        // Same BlendCraft binary as desktop, compiled to WebAssembly and
-        // loaded as a normal ES module. No separate web UI or backend.
+        if (location.protocol === "file:") {
+          throw new Error(
+            "Opened as file:// — browsers block WASM modules. Run ./serve.sh and open http://127.0.0.1:8080/"
+          );
+        }
+
         setStatus("Loading engine…");
-        const init = await import("./forge_app.js");
-        setStatus("Starting application…");
-        await init.default();
+        let mod;
+        try {
+          mod = await import("./forge_app.js");
+        } catch (e) {
+          throw new Error(
+            "Could not load ./forge_app.js — build wasm and copy forge_app.js + forge_app_bg.wasm next to index.html.\n" +
+            String(e)
+          );
+        }
+
+        setStatus("Initializing WebAssembly…");
+        await runInit(mod);
+
+        // #[wasm_bindgen(start)] usually runs inside init(); nothing else required.
         setStatus("Ready");
         requestAnimationFrame(() => {
-          setTimeout(() => boot.classList.add("hidden"), 120);
+          setTimeout(() => boot.classList.add("hidden"), 150);
         });
       } catch (e) {
         showError(e);
