@@ -229,54 +229,73 @@ jobs:
             cargo build --release -p "$APP_PACKAGE" --target "${{ matrix.target }}" --no-default-features
           fi
 
-      - name: Build (Zig linker)
+      - name: Build (Zig linker + C compiler)
         if: matrix.zig
         shell: bash
         env:
           TARGET: ${{ matrix.target }}
         run: |
-          set -e
+          set -euo pipefail
+          # Zig target triples (NOT Rust triples). cc-rs passes --target=<rust-triple>
+          # which Zig rejects; the wrapper strips those and forces the Zig triple.
           case "$TARGET" in
             i686-unknown-linux-gnu)
-              export CARGO_TARGET_I686_UNKNOWN_LINUX_GNU_LINKER="$PWD/zig-cc"
-              cat > zig-cc <<'EOF'
-          #!/bin/sh
-          exec zig cc -target x86-linux-gnu.2.17 "$@"
-          EOF
+              ZIG_TARGET="x86-linux-gnu.2.17"
+              LINKER_ENV=CARGO_TARGET_I686_UNKNOWN_LINUX_GNU_LINKER
               ;;
             armv7-unknown-linux-gnueabihf)
-              export CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_LINKER="$PWD/zig-cc"
-              cat > zig-cc <<'EOF'
-          #!/bin/sh
-          exec zig cc -target arm-linux-gnueabihf "$@"
-          EOF
+              ZIG_TARGET="arm-linux-gnueabihf"
+              LINKER_ENV=CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_LINKER
               ;;
             riscv64gc-unknown-linux-gnu)
-              export CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_GNU_LINKER="$PWD/zig-cc"
-              cat > zig-cc <<'EOF'
-          #!/bin/sh
-          exec zig cc -target riscv64-linux-gnu "$@"
-          EOF
+              ZIG_TARGET="riscv64-linux-gnu"
+              LINKER_ENV=CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_GNU_LINKER
               ;;
             riscv64gc-unknown-linux-musl)
-              export CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_MUSL_LINKER="$PWD/zig-cc"
-              cat > zig-cc <<'EOF'
-          #!/bin/sh
-          exec zig cc -target riscv64-linux-musl "$@"
-          EOF
+              ZIG_TARGET="riscv64-linux-musl"
+              LINKER_ENV=CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_MUSL_LINKER
               ;;
             *)
-              echo "No zig linker mapping for $TARGET"
+              echo "No zig mapping for $TARGET"
               exit 1
               ;;
           esac
+
+          cat > zig-cc << EOF
+          #!/bin/bash
+          # Cross C compiler/linker via Zig. Strip flags that cargo/cc-rs inject
+          # which Zig does not understand (Rust-style --target=, redundant -m32, …).
+          set -euo pipefail
+          ZIG_TARGET="${ZIG_TARGET}"
+          args=()
+          while [[ \$# -gt 0 ]]; do
+            case "\$1" in
+              --target=*|-target)
+                if [[ "\$1" == -target ]]; then shift; fi
+                shift || true
+                ;;
+              -m32|-m64|-march=*|-mtune=*)
+                shift || true
+                ;;
+              *)
+                args+=("\$1")
+                shift
+                ;;
+            esac
+          done
+          exec zig cc -target "\$ZIG_TARGET" "\${args[@]}"
+          EOF
+          # Unindent heredoc body (YAML indented the script)
+          sed -i 's/^          //' zig-cc
+          # Fix the embedded ZIG_TARGET line (sed may have broken nothing)
           chmod +x zig-cc
-          # Zig is both the linker and the C compiler so RustPython's libsqlite3-sys
-          # (and any other cc-rs crates) cross-compile without a GNU cross-gcc.
+
           export CC="$PWD/zig-cc"
           export CXX="$PWD/zig-cc"
           export HOST_CC="${HOST_CC:-cc}"
-          export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-target}"
+          export "$LINKER_ENV"="$PWD/zig-cc"
+
+          echo "Zig target: $ZIG_TARGET  Rust target: $TARGET"
           if [ "${{ matrix.scripting }}" = "true" ]; then
             cargo build --release -p "$APP_PACKAGE" --target "$TARGET"
           else
