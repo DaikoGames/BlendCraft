@@ -39,16 +39,58 @@ jobs:
       - run: cargo test -p forge-core -p forge-video -p forge-app
 
   wasm:
-    name: WebAssembly (check)
+    name: WebAssembly (WebApp)
     runs-on: ubuntu-24.04
-    continue-on-error: true
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
-      - run: cargo check -p forge-core -p forge-io --target wasm32-unknown-unknown --no-default-features
+        with:
+          key: wasm
+
+      - name: Install wasm-bindgen-cli
+        run: cargo install wasm-bindgen-cli --version 0.2.100 --locked || cargo install wasm-bindgen-cli --locked
+
+      - name: Build forge-core / forge-io for wasm
+        run: cargo check -p forge-core -p forge-io --target wasm32-unknown-unknown --no-default-features
+
+      - name: Build application as WASM (no Python scripting)
+        run: |
+          # Scripting is desktop-only; disable default features for the browser build.
+          cargo build --release -p forge-app --target wasm32-unknown-unknown --no-default-features
+
+      - name: Package static WebApp
+        run: |
+          set -e
+          OUT=web-dist
+          rm -rf "$OUT"
+          mkdir -p "$OUT"
+          # wasm-bindgen produces the JS glue + .wasm that the HTML loads.
+          wasm-bindgen --target web --out-dir "$OUT" --out-name forge_app \
+            target/wasm32-unknown-unknown/release/forge_app.wasm
+          # Entry point and any static assets.
+          cp web/index.html "$OUT/"
+          # Optional: copy logo for favicon-like use if present.
+          if [ -f crates/app/logo.png ]; then
+            cp crates/app/logo.png "$OUT/" || true
+          fi
+          # Sanity: required files must exist.
+          test -f "$OUT/index.html"
+          test -f "$OUT/forge_app.js"
+          test -f "$OUT/forge_app_bg.wasm" -o -f "$OUT/forge_app.wasm"
+          ls -lh "$OUT"
+          (cd "$OUT" && zip -r ../blendcraft-webapp.zip .)
+          ls -lh blendcraft-webapp.zip
+
+      - name: Upload WebApp ZIP
+        uses: actions/upload-artifact@v5
+        with:
+          name: blendcraft-webapp
+          path: blendcraft-webapp.zip
+          if-no-files-found: error
 
   build:
     name: ${{ matrix.name }}
@@ -265,20 +307,58 @@ jobs:
           path: dist/${{ env.BIN }}
           if-no-files-found: error
 
-  # FreeBSD aarch64 cannot be reliably linked from a Linux runner without a
-  # FreeBSD sysroot/toolchain (host `cc` rejects FreeBSD-specific flags).
-  # Native FreeBSD VMs on GHA are amd64-only. Job is a soft no-op so the
-  # matrix still lists the platform without failing the workflow.
+  # FreeBSD aarch64: cross-compile via the cross-rs Docker image.
+  # Native FreeBSD VMs on GHA are amd64-only, so we use cross with the
+  # aarch64-unknown-freebsd target. Scripting (RustPython) is disabled for
+  # this target because several of its native deps are not available in the
+  # FreeBSD aarch64 cross image; desktop FreeBSD x64 keeps full scripting.
   freebsd-arm64:
     name: freebsd-arm64
     runs-on: ubuntu-24.04
+    timeout-minutes: 120
     continue-on-error: true
     steps:
-      - name: Unsupported host cross-link
+      - uses: actions/checkout@v5
+
+      - name: Detect binary name
+        shell: bash
         run: |
-          echo "Skipping FreeBSD aarch64 binary: no FreeBSD aarch64 sysroot on this runner."
-          echo "Use a native FreeBSD/arm64 machine for that target."
-          echo "FreeBSD x64 is built in the freebsd-x64 job with full RustPython scripting."
+          BIN=$(cargo metadata --no-deps --format-version 1 \
+            | jq -r --arg pkg "$APP_PACKAGE" '.packages[] | select(.name==$pkg) | .targets[] | select(.kind | index("bin")) | .name' \
+            | head -n1 | tr -d '\r')
+          test -n "$BIN" || { echo "No binary target found"; exit 1; }
+          echo "BIN=$BIN" >> "$GITHUB_ENV"
+
+      - name: Install cross
+        run: cargo install cross --git https://github.com/cross-rs/cross --locked || cargo install cross --locked
+
+      - name: Build FreeBSD ARM64 binary (no scripting)
+        env:
+          CROSS_CONTAINER_IN_CONTAINER: "true"
+        run: |
+          set -e
+          # Prefer the cross image; fall back to cargo + build-std if the image is missing.
+          if cross build --release -p "$APP_PACKAGE" --target aarch64-unknown-freebsd --no-default-features 2>/tmp/cross-err.txt; then
+            echo "cross build succeeded"
+          else
+            cat /tmp/cross-err.txt || true
+            echo "cross failed; attempting cargo + build-std"
+            rustup component add rust-src
+            cargo build -Z build-std=std,core,alloc --release -p "$APP_PACKAGE" \
+              --target aarch64-unknown-freebsd --no-default-features
+          fi
+          mkdir -p dist
+          cp "target/aarch64-unknown-freebsd/release/$BIN" dist/ || \
+            cp "target/aarch64-unknown-freebsd/release/$BIN" dist/
+          file "dist/$BIN" || true
+          ls -lh dist/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v5
+        with:
+          name: blendcraft-freebsd-arm64
+          path: dist/${{ env.BIN }}
+          if-no-files-found: error
 
   flatpak:
     name: flatpak-${{ matrix.name }}
@@ -401,7 +481,7 @@ jobs:
   release:
     name: Publish release
     if: ${{ !cancelled() && github.event_name != 'pull_request' }}
-    needs: [test, build, freebsd, freebsd-arm64, flatpak]
+    needs: [test, build, freebsd, freebsd-arm64, wasm, flatpak]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
