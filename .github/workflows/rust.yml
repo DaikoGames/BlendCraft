@@ -167,17 +167,16 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { name: linux-x64,     os: ubuntu-24.04,     target: x86_64-unknown-linux-gnu,      zig: false, scripting: true,  ext: "",     experimental: false }
-          - { name: linux-arm64,   os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu,     zig: false, scripting: true,  ext: "",     experimental: true  }
-          - { name: windows-x64,   os: windows-latest,   target: x86_64-pc-windows-msvc,        zig: false, scripting: true,  ext: ".exe", experimental: false }
-          - { name: macos-x64,     os: macos-15-intel,   target: x86_64-apple-darwin,           zig: false, scripting: true,  ext: "",     experimental: false }
-          - { name: macos-arm64,   os: macos-latest,     target: aarch64-apple-darwin,          zig: false, scripting: true,  ext: "",     experimental: false }
-          - { name: linux-x86,     os: ubuntu-24.04,     target: i686-unknown-linux-gnu,        zig: true,  scripting: true,  ext: "",     experimental: true  }
-          - { name: linux-armv7,   os: ubuntu-24.04,     target: armv7-unknown-linux-gnueabihf, zig: true,  scripting: true,  ext: "",     experimental: true  }
-          - { name: linux-riscv64, os: ubuntu-24.04,     target: riscv64gc-unknown-linux-gnu,   zig: false, gcc: riscv64, scripting: true,  ext: "",     experimental: true  }
-          - { name: linux-riscv64-musl, os: ubuntu-24.04, target: riscv64gc-unknown-linux-musl, zig: false, gcc: none, scripting: false, ext: "",     experimental: true  }
-          - { name: windows-x86,   os: windows-latest,   target: i686-pc-windows-msvc,          zig: false, scripting: true,  ext: ".exe", experimental: true  }
-          - { name: windows-arm64, os: windows-latest,   target: aarch64-pc-windows-msvc,       zig: false, scripting: true,  ext: ".exe", experimental: true  }
+          - { name: linux-x64,   os: ubuntu-24.04,     target: x86_64-unknown-linux-gnu,      cross: "",                    scripting: true,  ext: "",     experimental: false }
+          - { name: linux-arm64, os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu,     cross: "",                    scripting: true,  ext: "",     experimental: true  }
+          - { name: windows-x64, os: windows-latest,   target: x86_64-pc-windows-msvc,        cross: "",                    scripting: true,  ext: ".exe", experimental: false }
+          - { name: macos-x64,   os: macos-15-intel,   target: x86_64-apple-darwin,           cross: "",                    scripting: true,  ext: "",     experimental: false }
+          - { name: macos-arm64, os: macos-latest,     target: aarch64-apple-darwin,          cross: "",                    scripting: true,  ext: "",     experimental: false }
+          - { name: linux-x86,     os: ubuntu-24.04, target: i686-unknown-linux-gnu,        cross: "i686-linux-gnu",      scripting: true,  ext: "", experimental: true }
+          - { name: linux-armv7,   os: ubuntu-24.04, target: armv7-unknown-linux-gnueabihf, cross: "arm-linux-gnueabihf", scripting: true,  ext: "", experimental: true }
+          - { name: linux-riscv64, os: ubuntu-24.04, target: riscv64gc-unknown-linux-gnu,   cross: "riscv64-linux-gnu",   scripting: true,  ext: "", experimental: true }
+          - { name: windows-x86,   os: windows-latest, target: i686-pc-windows-msvc,        cross: "",                    scripting: true,  ext: ".exe", experimental: true }
+          - { name: windows-arm64, os: windows-latest, target: aarch64-pc-windows-msvc,     cross: "",                    scripting: true,  ext: ".exe", experimental: true }
 
     steps:
       - uses: actions/checkout@v5
@@ -212,14 +211,30 @@ jobs:
             libxi-dev libxkbcommon-dev libwayland-dev libgl1-mesa-dev libasound2-dev \
             libudev-dev
 
-      - name: Install Zig (cross targets)
-        if: matrix.zig
-        uses: mlugg/setup-zig@v1
-        with:
-          version: 0.13.0
+
+      - name: Install GNU cross-compiler
+        if: runner.os == 'Linux' && matrix.cross != ''
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          case "${{ matrix.cross }}" in
+            i686-linux-gnu)
+              sudo apt-get install -y gcc-i686-linux-gnu g++-i686-linux-gnu
+              ;;
+            arm-linux-gnueabihf)
+              sudo apt-get install -y gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf
+              ;;
+            riscv64-linux-gnu)
+              sudo apt-get install -y gcc-riscv64-linux-gnu g++-riscv64-linux-gnu
+              ;;
+            *)
+              echo "Unknown cross: ${{ matrix.cross }}"
+              exit 1
+              ;;
+          esac
 
       - name: Build (native / MSVC)
-        if: ${{ !matrix.zig }}
+        if: matrix.cross == ''
         shell: bash
         run: |
           set -e
@@ -229,155 +244,22 @@ jobs:
             cargo build --release -p "$APP_PACKAGE" --target "${{ matrix.target }}" --no-default-features
           fi
 
-      - name: Install RISC-V GNU toolchain
-        if: matrix.gcc == 'riscv64'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-riscv64-linux-gnu g++-riscv64-linux-gnu
-
-      - name: Build (RISC-V GNU cross, with scripting)
-        if: matrix.gcc == 'riscv64'
+      - name: Build (GNU cross-gcc)
+        if: matrix.cross != ''
         shell: bash
         env:
           TARGET: ${{ matrix.target }}
+          CROSS: ${{ matrix.cross }}
         run: |
           set -euo pipefail
-          # Real cross-gcc — not Zig. Required for libsqlite3-sys (RustPython).
-          export CC_riscv64gc_unknown_linux_gnu=riscv64-linux-gnu-gcc
-          export CXX_riscv64gc_unknown_linux_gnu=riscv64-linux-gnu-g++
-          export CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_GNU_LINKER=riscv64-linux-gnu-gcc
-          export CC=riscv64-linux-gnu-gcc
-          export CXX=riscv64-linux-gnu-g++
-          if [ "${{ matrix.scripting }}" = "true" ]; then
-            cargo build --release -p "$APP_PACKAGE" --target "$TARGET"
-          else
-            cargo build --release -p "$APP_PACKAGE" --target "$TARGET" --no-default-features
-          fi
-
-      - name: Build (RISC-V musl — experimental linker-only)
-        if: matrix.target == 'riscv64gc-unknown-linux-musl'
-        shell: bash
-        env:
-          TARGET: ${{ matrix.target }}
-        run: |
-          set -euo pipefail
-          # No packaged riscv64-musl-gcc on Ubuntu by default. Try zig as linker only;
-          # pure Rust (no scripting) still may need unwind — use panic=abort.
-          curl -fsSL https://ziglang.org/download/0.13.0/zig-linux-x86_64-0.13.0.tar.xz -o /tmp/zig.tar.xz
-          tar -xJf /tmp/zig.tar.xz -C /tmp
-          ZIG=$(echo /tmp/zig-linux-x86_64-*/zig)
-          cat > zig-cc << EOF
-          #!/bin/bash
-          exec "$ZIG" cc -target riscv64-linux-musl "\$@"
-          EOF
-          # strip bad flags
-          cat > zig-cc << 'EOF'
-          #!/bin/bash
-          set -euo pipefail
-          ZIG_BIN=ZIG_BIN_PLACEHOLDER
-          args=()
-          while [[ $# -gt 0 ]]; do
-            case "$1" in
-              --target=*|-target|-m32|-m64|-march=*|-mtune=*|-mcpu=*|-mfix-*|-fuse-ld=*|-lgcc_s|-lgcc|-B*)
-                [[ "$1" == -target ]] && shift || true
-                shift || true
-                ;;
-              *) args+=("$1"); shift ;;
-            esac
-          done
-          exec "$ZIG_BIN" cc -target riscv64-linux-musl "${args[@]}"
-          EOF
-          sed -i "s|ZIG_BIN_PLACEHOLDER|$ZIG|" zig-cc
-          chmod +x zig-cc
-          export CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_MUSL_LINKER="$PWD/zig-cc"
-          export RUSTFLAGS="-C panic=abort"
-          cargo build --release -p "$APP_PACKAGE" --target "$TARGET" --no-default-features
-
-      - name: Build (Zig cross)
-        if: matrix.zig
-        shell: bash
-        env:
-          TARGET: ${{ matrix.target }}
-        run: |
-          set -euo pipefail
-          case "$TARGET" in
-            i686-unknown-linux-gnu)
-              ZIG_TARGET="x86-linux-gnu.2.17"
-              LINKER_ENV=CARGO_TARGET_I686_UNKNOWN_LINUX_GNU_LINKER
-              ;;
-            armv7-unknown-linux-gnueabihf)
-              ZIG_TARGET="arm-linux-gnueabihf"
-              LINKER_ENV=CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_LINKER
-              ;;
-            riscv64gc-unknown-linux-gnu)
-              ZIG_TARGET="riscv64-linux-gnu"
-              LINKER_ENV=CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_GNU_LINKER
-              ;;
-            riscv64gc-unknown-linux-musl)
-              ZIG_TARGET="riscv64-linux-musl"
-              LINKER_ENV=CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_MUSL_LINKER
-              ;;
-            *)
-              echo "No zig mapping for $TARGET"
-              exit 1
-              ;;
-          esac
-
-          # Minimal wrapper: force Zig triple, drop Rust/cc-rs flags Zig rejects.
-          cat > zig-cc << 'WRAP'
-          #!/bin/bash
-          set -euo pipefail
-          ZIG_TARGET_PLACEHOLDER
-          is_musl=0
-          case "$ZIG_TARGET" in *musl*) is_musl=1 ;; esac
-          args=()
-          while [[ $# -gt 0 ]]; do
-            case "$1" in
-              --target=*|-target)
-                [[ "$1" == -target ]] && shift || true
-                shift || true
-                ;;
-              -m32|-m64|-march=*|-mtune=*|-mcpu=*|-mfix-*|-fuse-ld=*)
-                shift || true
-                ;;
-              -lgcc_s|-lgcc)
-                if [[ $is_musl -eq 1 ]]; then shift || true; else args+=("$1"); shift; fi
-                ;;
-              -B*)
-                # Host gcc-ld paths confuse Zig on foreign targets
-                shift || true
-                ;;
-              *)
-                args+=("$1"); shift
-                ;;
-            esac
-          done
-          exec zig cc -target "$ZIG_TARGET" "${args[@]}"
-          WRAP
-          sed -i 's/^          //' zig-cc
-          sed -i "s|ZIG_TARGET_PLACEHOLDER|ZIG_TARGET=\"${ZIG_TARGET}\"|" zig-cc
-          chmod +x zig-cc
-
-          export "$LINKER_ENV"="$PWD/zig-cc"
-          export HOST_CC="${HOST_CC:-cc}"
-
-          # Only use Zig as the *C compiler* when we need to build C deps (sqlite via
-          # RustPython). For pure-Rust targets (riscv, scripting=false), linker-only
-          # avoids Zig compiling broken glibc/musl start files.
-          if [ "${{ matrix.scripting }}" = "true" ]; then
-            export CC="$PWD/zig-cc"
-            export CXX="$PWD/zig-cc"
-          else
-            unset CC CXX || true
-          fi
-
-          case "$TARGET" in
-            *riscv64*)
-              export RUSTFLAGS="${RUSTFLAGS:-} -C panic=abort -C link-arg=-fno-sanitize=undefined"
-              ;;
-          esac
-
-          echo "Zig=$ZIG_TARGET target=$TARGET scripting=${{ matrix.scripting }} CC=${CC:-<host>}"
+          export CC="${CROSS}-gcc"
+          export CXX="${CROSS}-g++"
+          trip=$(echo "$TARGET" | tr '[:lower:]-' '[:upper:]_')
+          export "CC_${TARGET//-/_}=$CC"
+          export "CXX_${TARGET//-/_}=$CXX"
+          export "CARGO_TARGET_${trip}_LINKER=$CC"
+          echo "Using $CC for $TARGET"
+          command -v "$CC"
           if [ "${{ matrix.scripting }}" = "true" ]; then
             cargo build --release -p "$APP_PACKAGE" --target "$TARGET"
           else
@@ -515,17 +397,7 @@ jobs:
           path: dist/${{ env.BIN }}
           if-no-files-found: error
 
-  # FreeBSD aarch64: best-effort via cross. Marked continue-on-error so a
-  # missing cross image does not fail the whole workflow.
-  # FreeBSD aarch64: no official cross Docker image and no FreeBSD aarch64 GHA runner.
-  # Best-effort: build-std + zig as linker when possible. Job is experimental.
-  # FreeBSD aarch64 cannot be linked on Ubuntu GHA without a FreeBSD sysroot
-  # (libexecinfo, libkvm, …). Native FreeBSD/arm64 or a full sysroot is required.
-  # The job records the limitation and succeeds so CI stays green; freebsd-x64
-  # still builds a real binary in the FreeBSD VM job.
-  # FreeBSD aarch64 — best effort on Ubuntu (needs sysroot; may fail).
-  # continue-on-error so the rest of CI stays green.
-  # FreeBSD aarch64: download official base.txz as sysroot, link with clang --target.
+  # FreeBSD aarch64: FreeBSD base.txz sysroot + clang (no Zig).
   freebsd-arm64:
     name: freebsd-arm64
     runs-on: ubuntu-24.04
