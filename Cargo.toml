@@ -1,6 +1,9 @@
 [workspace]
 resolver = "2"
 members = ["crates/core", "crates/io", "crates/render", "crates/video", "crates/app", "crates/desktop", "crates/web-app"]
+# Plain `cargo build` / `cargo check` only touches the native crates; the browser
+# launcher (forge-web) is built explicitly with `--target wasm32-unknown-unknown`.
+default-members = ["crates/core", "crates/io", "crates/render", "crates/video", "crates/app", "crates/desktop"]
 
 [workspace.package]
 version = "0.1.0"

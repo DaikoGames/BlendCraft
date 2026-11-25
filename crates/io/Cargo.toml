@@ -5,7 +5,6 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-getrandom = { version = "0.3.4", features = ["wasm_js"] }
 forge-core.workspace = true
 glam.workspace = true
 bytemuck.workspace = true
@@ -19,3 +18,8 @@ flate2.workspace = true
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 # Native FBX importer: ufbx uses a C toolchain and is intentionally excluded from WASM.
 ufbx = { version = "0.11", default-features = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# Required so crates using getrandom 0.3 (ahash, rand_core 0.9) work in the browser.
+# Also needs --cfg getrandom_backend="wasm_js" (set in .cargo/config.toml).
+getrandom = { version = "0.3.4", features = ["wasm_js"] }

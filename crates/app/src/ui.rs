@@ -7457,7 +7457,7 @@ fn poll_compositor_evaluation(ctx: &egui::Context, doc: &mut Document, st: &mut 
     let (tx, rx) = mpsc::channel();
     st.compositor_eval_rx = Some(rx);
     st.compositor_eval_busy = true;
-    std::thread::spawn(move || {
+    let run_eval = move || {
         let rgba = graph.evaluate(width, height, &source);
         let _ = tx.send(CompositorEvalCompletion {
             graph,
@@ -7466,7 +7466,16 @@ fn poll_compositor_evaluation(ctx: &egui::Context, doc: &mut Document, st: &mut 
             height,
             rgba,
         });
-    });
+    };
+    // Browsers have no std threads: evaluate inline on WebAssembly.
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        std::thread::spawn(run_eval);
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        run_eval();
+    }
     ctx.request_repaint_after(Duration::from_millis(50));
 }
 
@@ -10897,21 +10906,25 @@ fn font_library_window(ctx: &egui::Context, st: &mut UiState) {
             });
             ui.horizontal(|ui| {
                 #[cfg(not(target_arch = "wasm32"))]
-                if ui.button("Import .ttf / .otf…").clicked() {
-                    if let Some(path) = rfd::FileDialog::new()
-                        .add_filter("Fonts", &["ttf", "otf"])
-                        .pick_file()
-                    {
-                        match crate::fonts_io::import_font_file(&path) {
-                            Ok(name) => st.font_status = format!("Imported {name}"),
-                            Err(e) => st.font_status = format!("Import failed: {e}"),
+                {
+                    if ui.button("Import .ttf / .otf…").clicked() {
+                        if let Some(path) = rfd::FileDialog::new()
+                            .add_filter("Fonts", &["ttf", "otf"])
+                            .pick_file()
+                        {
+                            match crate::fonts_io::import_font_file(&path) {
+                                Ok(name) => st.font_status = format!("Imported {name}"),
+                                Err(e) => st.font_status = format!("Import failed: {e}"),
+                            }
                         }
                     }
                 }
                 #[cfg(not(target_arch = "wasm32"))]
-                if ui.button("Rescan system fonts").clicked() {
-                    crate::fonts_io::load_cached_fonts();
-                    st.font_status = "System fonts rescanned".into();
+                {
+                    if ui.button("Rescan system fonts").clicked() {
+                        crate::fonts_io::load_cached_fonts();
+                        st.font_status = "System fonts rescanned".into();
+                    }
                 }
             });
             if !st.font_status.is_empty() {
@@ -12999,16 +13012,18 @@ fn properties(ui: &mut egui::Ui, doc: &mut Document, st: &mut UiState, actions: 
                     }
                     ui.horizontal(|ui| {
                         #[cfg(not(target_arch = "wasm32"))]
-                        if ui.button("Import font…").clicked() {
-                            if let Some(path) = rfd::FileDialog::new()
-                                .add_filter("Fonts", &["ttf", "otf"])
-                                .pick_file()
-                            {
-                                match crate::fonts_io::import_font_file(&path) {
-                                    Ok(name) => {
-                                        *font_name = name;
+                        {
+                            if ui.button("Import font…").clicked() {
+                                if let Some(path) = rfd::FileDialog::new()
+                                    .add_filter("Fonts", &["ttf", "otf"])
+                                    .pick_file()
+                                {
+                                    match crate::fonts_io::import_font_file(&path) {
+                                        Ok(name) => {
+                                            *font_name = name;
+                                        }
+                                        Err(e) => log::warn!("font import: {e}"),
                                     }
-                                    Err(e) => log::warn!("font import: {e}"),
                                 }
                             }
                         }

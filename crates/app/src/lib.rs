@@ -131,6 +131,14 @@ struct ToolDrag {
 
 pub struct App {
     gfx: Option<Gfx>,
+    /// WebAssembly only: GPU init is asynchronous in the browser, so the renderer
+    /// is delivered through this slot and picked up on the next window event.
+    #[cfg(target_arch = "wasm32")]
+    pending_gpu: std::rc::Rc<std::cell::RefCell<Option<anyhow::Result<Renderer>>>>,
+    #[cfg(target_arch = "wasm32")]
+    web_window: Option<Arc<Window>>,
+    #[cfg(target_arch = "wasm32")]
+    gpu_init_started: bool,
     egui_ctx: egui::Context,
     doc: Document,
     camera: OrbitCamera,
@@ -354,6 +362,12 @@ impl App {
     pub fn new(initial: Option<PathBuf>) -> Self {
         Self {
             gfx: None,
+            #[cfg(target_arch = "wasm32")]
+            pending_gpu: Default::default(),
+            #[cfg(target_arch = "wasm32")]
+            web_window: None,
+            #[cfg(target_arch = "wasm32")]
+            gpu_init_started: false,
             egui_ctx: egui::Context::default(),
             doc: Document::new(),
             camera: OrbitCamera::default(),
@@ -4534,18 +4548,20 @@ impl App {
                 "Opening Python scripts is not available on WebAssembly".to_owned();
         }
         #[cfg(not(target_arch = "wasm32"))]
-        if let Some(path) = rfd::FileDialog::new()
-            .add_filter("Python script", &["py"])
-            .pick_file()
         {
-            match std::fs::read_to_string(&path) {
-                Ok(source) => {
-                    self.ui.python_script = source;
-                    self.ui.python_script_path = Some(path);
-                    self.ui.python_script_output.clear();
-                }
-                Err(error) => {
-                    self.ui.python_script_output = format!("Could not open Python script: {error}");
+            if let Some(path) = rfd::FileDialog::new()
+                .add_filter("Python script", &["py"])
+                .pick_file()
+            {
+                match std::fs::read_to_string(&path) {
+                    Ok(source) => {
+                        self.ui.python_script = source;
+                        self.ui.python_script_path = Some(path);
+                        self.ui.python_script_output.clear();
+                    }
+                    Err(error) => {
+                        self.ui.python_script_output = format!("Could not open Python script: {error}");
+                    }
                 }
             }
         }
@@ -5745,28 +5761,9 @@ impl App {
     }
 }
 
-impl ApplicationHandler for App {
-    fn resumed(&mut self, el: &ActiveEventLoop) {
-        if self.gfx.is_some() {
-            return;
-        }
-        let mut attrs = Window::default_attributes()
-            .with_title("BlendCraft")
-            .with_inner_size(LogicalSize::new(1400, 850));
-        // Window / taskbar icon from the project logo (hand-eye OK mark).
-        // Resize to 256² so every platform accepts it (raw 1254² can fail silently).
-        if let Ok(img) = image::load_from_memory(include_bytes!("../logo.png")) {
-            let img = img.resize_exact(256, 256, image::imageops::FilterType::Lanczos3);
-            let rgba = img.to_rgba8();
-            let (w, h) = rgba.dimensions();
-            if let Ok(icon) = winit::window::Icon::from_rgba(rgba.into_raw(), w, h) {
-                attrs = attrs.with_window_icon(Some(icon));
-            }
-        }
-        let window = Arc::new(el.create_window(attrs).expect("create window"));
-        let size = window.inner_size();
-        let renderer = pollster::block_on(Renderer::new(window.clone(), size.width, size.height))
-            .expect("init GPU");
+impl App {
+    /// Build the egui integration around a ready renderer and load the initial file.
+    fn finish_gfx_init(&mut self, window: Arc<Window>, renderer: Renderer) {
         let egui_state = egui_winit::State::new(
             self.egui_ctx.clone(),
             egui::ViewportId::ROOT,
@@ -5799,7 +5796,92 @@ impl ApplicationHandler for App {
         }
     }
 
+    /// WebAssembly: pick up the renderer once the async WebGPU/WebGL init finished.
+    #[cfg(target_arch = "wasm32")]
+    fn poll_pending_gpu(&mut self) {
+        if self.gfx.is_some() {
+            return;
+        }
+        let result = self.pending_gpu.borrow_mut().take();
+        match result {
+            Some(Ok(renderer)) => {
+                if let Some(window) = self.web_window.take() {
+                    self.finish_gfx_init(window, renderer);
+                    if let Some(g) = self.gfx.as_ref() {
+                        g.window.request_redraw();
+                    }
+                }
+            }
+            Some(Err(e)) => {
+                log::error!("GPU init failed: {e:#}");
+                self.web_window = None;
+            }
+            None => {}
+        }
+    }
+}
+
+impl ApplicationHandler for App {
+    fn resumed(&mut self, el: &ActiveEventLoop) {
+        if self.gfx.is_some() {
+            return;
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            if self.gpu_init_started {
+                return;
+            }
+        }
+        let mut attrs = Window::default_attributes()
+            .with_title("BlendCraft")
+            .with_inner_size(LogicalSize::new(1400, 850));
+        // Browser: create a <canvas> and attach it to the page body.
+        #[cfg(target_arch = "wasm32")]
+        {
+            use winit::platform::web::WindowAttributesExtWebSys;
+            attrs = attrs.with_append(true);
+        }
+        // Window / taskbar icon from the project logo (hand-eye OK mark).
+        // Resize to 256² so every platform accepts it (raw 1254² can fail silently).
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            if let Ok(img) = image::load_from_memory(include_bytes!("../logo.png")) {
+                let img = img.resize_exact(256, 256, image::imageops::FilterType::Lanczos3);
+                let rgba = img.to_rgba8();
+                let (w, h) = rgba.dimensions();
+                if let Ok(icon) = winit::window::Icon::from_rgba(rgba.into_raw(), w, h) {
+                    attrs = attrs.with_window_icon(Some(icon));
+                }
+            }
+        }
+        let window = Arc::new(el.create_window(attrs).expect("create window"));
+        let size = window.inner_size();
+
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let renderer = pollster::block_on(Renderer::new(window.clone(), size.width, size.height))
+                .expect("init GPU");
+            self.finish_gfx_init(window, renderer);
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            self.gpu_init_started = true;
+            self.web_window = Some(window.clone());
+            let slot = self.pending_gpu.clone();
+            wasm_bindgen_futures::spawn_local(async move {
+                let result =
+                    Renderer::new(window.clone(), size.width.max(1), size.height.max(1)).await;
+                *slot.borrow_mut() = Some(result);
+                window.request_redraw();
+            });
+        }
+    }
+
     fn window_event(&mut self, el: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+        #[cfg(target_arch = "wasm32")]
+        {
+            self.poll_pending_gpu();
+        }
         let mut consumed = false;
         if let Some(g) = self.gfx.as_mut() {
             consumed = g.egui_state.on_window_event(&g.window, &event).consumed;

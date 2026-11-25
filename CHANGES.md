@@ -1,3 +1,20 @@
+## Desktop / Web separation + build repair (2026-11-25)
+
+- Fixed hard compile error: `#[cfg(...)]` was placed directly on `if` expressions
+  (`ui.rs` font buttons, `lib.rs` `open_python_script`). These are now wrapped in blocks.
+- Web launcher (`forge-web`) now uses winit's `spawn_app` instead of `run_app`, and is
+  compiled only for `wasm32` (`#![cfg(target_arch = "wasm32")]`).
+- GPU init is asynchronous on the web (`pollster::block_on` cannot work in a browser).
+  `App::resumed` was split into `finish_gfx_init` + a pending-renderer slot polled in `window_event`.
+- Canvas is appended to the page (`with_append(true)`); window icon is native only.
+- `pollster`, `rfd`, `ufbx`, `forge-video`, RustPython are native-only dependencies;
+  `wasm-bindgen-futures` is wasm-only; `getrandom` (`wasm_js`) is wasm-only.
+- Added `.cargo/config.toml` with the `getrandom_backend="wasm_js"` cfg needed by getrandom 0.3 on wasm.
+- Workspace `default-members` excludes `forge-web`, so plain `cargo build/check` is desktop-only.
+- Compositor preview evaluates inline on wasm (no std threads in browsers).
+- `web/build.sh`: fixed repo-root detection.
+- Added `.github/workflows/build.yml` building desktop and web separately.
+
 ## FBX: animation stacks via ufbx (2026-11-23)
 
 - ufbx remains the FBX backend (best practical option for skins + bind poses + curves).

@@ -16,7 +16,7 @@ forge-io.workspace = true
 forge-render.workspace = true
 glam.workspace = true
 winit.workspace = true
-pollster.workspace = true
+anyhow.workspace = true
 log.workspace = true
 egui.workspace = true
 egui-wgpu.workspace = true
@@ -26,7 +26,11 @@ serde.workspace = true
 serde_json.workspace = true
 web-time = "1"
 
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen-futures.workspace = true
+
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+pollster.workspace = true
 rfd.workspace = true
 egui-winit = { version = "0.29", default-features = false, features = ["clipboard", "links", "wayland", "x11"] }
 forge-video.workspace = true
