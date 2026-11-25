@@ -5,7 +5,6 @@ use crate::tools::{Tool, ToolState};
 use egui::RichText;
 use forge_core::shader_graph::{evaluate_graph_ex_cancellable, GraphEvalResult};
 use forge_core::{
-use web_time::Instant;
     apply_eval_to_material, bake_graph_texture, font_registry, free_font_catalog, AlignMode,
     AlignTo, AlphaMode, AnimationData, ArmatureData, CameraData, Constraint, ConstraintKind,
     Document, EmptyShape, ForceFieldData, ForceFieldType, GreasePencilData, LightData,
