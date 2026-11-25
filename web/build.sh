@@ -14,8 +14,11 @@ if ! command -v wasm-bindgen >/dev/null 2>&1; then
 fi
 
 rustup target add "$TARGET"
-cargo build --release -p forge-app --target "$TARGET" --no-default-features
-WASM="$ROOT/target/$TARGET/release/forge3d.wasm"
+# Avoid serving an old WASM binary or stale wasm-bindgen glue after source changes.
+rm -rf "$OUT"
+cargo clean --target "$TARGET"
+cargo build --release -p forge-web --target "$TARGET"
+WASM="$ROOT/target/$TARGET/release/forge_web.wasm"
 mkdir -p "$OUT"
 wasm-bindgen --target web --out-dir "$OUT" "$WASM"
 cp "$ROOT/web/index.html" "$ROOT/web/style.css" "$ROOT/web/bootstrap.js" "$OUT/"

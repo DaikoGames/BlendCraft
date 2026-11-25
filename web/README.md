@@ -14,7 +14,7 @@ cargo install wasm-bindgen-cli --version 0.2.130 --locked
 ./web/build.sh
 ```
 
-The script builds the app for `wasm32-unknown-unknown` without default features (so the native Python-scripting feature is not enabled), generates the wasm-bindgen JavaScript, and copies the browser shell into `web/dist/`.
+The script builds the dedicated `forge-web` launcher for `wasm32-unknown-unknown`. It depends on the shared editor library with default features disabled, generates the wasm-bindgen JavaScript, and copies the browser shell into `web/dist/`.
 
 
 ## Run locally
@@ -35,10 +35,9 @@ Then open `http://localhost:8080`. Do not open `index.html` directly with `file:
 
 ## Native and Web dependencies
 
-The native desktop build uses `ufbx` for advanced FBX import (including armatures and animation).
+The native desktop launcher (`forge-desktop`) uses the shared editor library with native features enabled. It uses `ufbx` for advanced FBX import (including armatures and animation).
 `ufbx` is declared only for non-WASM targets and its Rust module is compiled only on native targets.
-The WebAssembly build therefore uses BlendCraft's built-in FBX byte parser instead. Desktop FBX
-import behavior remains unchanged.
+The separate WebAssembly launcher (`forge-web`) excludes `ufbx` and uses BlendCraft's built-in FBX byte parser instead. Desktop FBX import behavior remains unchanged.
 
 The Web build disables default features (including embedded Python scripting) and uses
 `web-time` for browser-compatible timing. Cycles defaults to one worker on WebAssembly.

@@ -1,4 +1,4 @@
-import init from './forge3d.js';
+import init from './forge_web.js';
 
 const loading = document.getElementById('loading');
 try {

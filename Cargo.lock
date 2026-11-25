@@ -1371,17 +1371,13 @@ checksum = "aa9a19cbb55df58761df49b23516a86d432839add4af60fc256da840f66ed35b"
 name = "forge-app"
 version = "0.1.0"
 dependencies = [
- "console_error_panic_hook",
- "console_log",
  "egui",
  "egui-wgpu",
  "egui-winit",
- "env_logger",
  "forge-core",
  "forge-io",
  "forge-render",
  "forge-video",
- "getrandom 0.3.4",
  "glam",
  "image",
  "log",
@@ -1392,11 +1388,31 @@ dependencies = [
  "rustpython-vm",
  "serde",
  "serde_json",
- "wasm-bindgen",
- "wasm-bindgen-futures",
- "web-sys",
+ "web-time",
+ "winit",
+]
+
+[[package]]
+name = "forge-desktop"
+version = "0.1.0"
+dependencies = [
+ "env_logger",
+ "forge-app",
+ "log",
  "winit",
  "winresource",
+]
+
+[[package]]
+name = "forge-web"
+version = "0.1.0"
+dependencies = [
+ "console_error_panic_hook",
+ "console_log",
+ "forge-app",
+ "log",
+ "wasm-bindgen",
+ "winit",
 ]
 
 [[package]]

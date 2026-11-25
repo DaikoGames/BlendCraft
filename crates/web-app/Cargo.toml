@@ -1,0 +1,16 @@
+[package]
+name = "forge-web"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+forge-app = { path = "../app", default-features = false }
+winit.workspace = true
+log.workspace = true
+console_error_panic_hook.workspace = true
+console_log.workspace = true
+wasm-bindgen.workspace = true

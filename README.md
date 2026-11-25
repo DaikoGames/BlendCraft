@@ -77,12 +77,12 @@ This README is the project progress record. A feature is marked **Finished** onl
 A Rust toolchain compatible with the workspace's declared Rust version is required.
 
 ```sh
-cargo run --release -p forge-app
-cargo run --release -p forge-app -- model.glb
+cargo run --release -p forge-desktop
+cargo run --release -p forge-desktop -- model.glb
 cargo test -p forge-core
 ```
 
-The desktop application binary is named `forge3d`. The workspace includes separate crates for the application, core scene/editing logic, rendering, file I/O, and video output.
+The desktop application binary is named `forge3d` (`forge-desktop`). The browser build is a separate `forge-web` crate. Both launchers reuse the `forge-app` editor library and shared core/rendering/file-I/O crates; native-only services remain on the desktop dependency path.
 
 ## Main workflows currently implemented
 
