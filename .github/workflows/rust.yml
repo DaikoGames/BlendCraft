@@ -1,5 +1,9 @@
 name: Build
 
+# Everything that can plausibly run on a PC is built here.
+# "Tier 1" jobs must pass. "Experimental" jobs are allowed to fail (continue-on-error)
+# so one exotic OS never blocks the rest; their artifacts are uploaded when they succeed.
+
 on:
   push:
     branches: [main]
@@ -12,7 +16,7 @@ env:
   BIN: forge3d   # binary produced by crates/desktop (package: forge-desktop)
 
 jobs:
-  # ---------------------------------------------------------------- native runners
+  # =============================================================== TIER 1: native runners
   native:
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
@@ -53,17 +57,44 @@ jobs:
           name: blendcraft-${{ matrix.target }}
           path: dist/*
 
-  # ---------------------------------------------------------------- cross (via `cross`)
+  # macOS universal binary (Intel + Apple Silicon in one file)
+  macos-universal:
+    name: macOS Universal
+    runs-on: macos-latest
+    needs: native
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: blendcraft-*-apple-darwin
+          path: in
+      - name: lipo
+        run: |
+          mkdir -p dist
+          lipo -create -output dist/${BIN}-universal-apple-darwin \
+            in/blendcraft-aarch64-apple-darwin/${BIN}-aarch64-apple-darwin \
+            in/blendcraft-x86_64-apple-darwin/${BIN}-x86_64-apple-darwin
+      - uses: actions/upload-artifact@v4
+        with:
+          name: blendcraft-universal-apple-darwin
+          path: dist/*
+
+  # =============================================================== EXPERIMENTAL: Linux/Windows via `cross`
   cross:
-    name: ${{ matrix.name }} (cross)
+    name: ${{ matrix.name }} (cross, experimental)
     runs-on: ubuntu-latest
-    continue-on-error: true   # exotic targets must not block the others
+    continue-on-error: true
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { name: "Linux x86",   target: i686-unknown-linux-gnu }
-          - { name: "Linux ARMv7", target: armv7-unknown-linux-gnueabihf }
+          - { name: "Linux x86 (i686)",        target: i686-unknown-linux-gnu,           ext: "" }
+          - { name: "Linux ARMv7",             target: armv7-unknown-linux-gnueabihf,     ext: "" }
+          - { name: "Linux x64 musl",          target: x86_64-unknown-linux-musl,         ext: "" }
+          - { name: "Linux ARM64 musl",        target: aarch64-unknown-linux-musl,        ext: "" }
+          - { name: "Linux RISC-V 64",         target: riscv64gc-unknown-linux-gnu,       ext: "" }
+          - { name: "Linux PowerPC64 LE",      target: powerpc64le-unknown-linux-gnu,     ext: "" }
+          - { name: "Windows x64 (MinGW)",     target: x86_64-pc-windows-gnu,             ext: ".exe" }
+          - { name: "Windows x86 (MinGW)",     target: i686-pc-windows-gnu,               ext: ".exe" }
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -77,20 +108,31 @@ jobs:
       - name: Stage artifact
         run: |
           mkdir -p dist
-          cp "target/${{ matrix.target }}/release/${BIN}" "dist/${BIN}-${{ matrix.target }}"
+          cp "target/${{ matrix.target }}/release/${BIN}${{ matrix.ext }}" "dist/${BIN}-${{ matrix.target }}${{ matrix.ext }}"
       - uses: actions/upload-artifact@v4
         with:
           name: blendcraft-${{ matrix.target }}
           path: dist/*
 
-  # ---------------------------------------------------------------- FreeBSD
-  freebsd:
-    name: FreeBSD x64
+  # =============================================================== EXPERIMENTAL: BSD / illumos (VMs)
+  bsd:
+    name: ${{ matrix.name }} (VM, experimental)
     runs-on: ubuntu-latest
     continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: "FreeBSD x64",          id: freebsd,   target: x86_64-unknown-freebsd }
+          - { name: "OpenBSD x64",          id: openbsd,   target: x86_64-unknown-openbsd }
+          - { name: "NetBSD x64",           id: netbsd,    target: x86_64-unknown-netbsd }
+          - { name: "DragonFlyBSD x64",     id: dragonfly, target: x86_64-unknown-dragonfly }
+          - { name: "illumos (OmniOS) x64", id: omnios,    target: x86_64-unknown-illumos }
     steps:
       - uses: actions/checkout@v4
-      - name: Build in FreeBSD VM
+
+      - name: Build (FreeBSD)
+        if: matrix.id == 'freebsd'
         uses: vmactions/freebsd-vm@v1
         with:
           usesh: true
@@ -98,13 +140,58 @@ jobs:
           run: |
             cargo build --release -p forge-desktop
             mkdir -p dist
-            cp target/release/${BIN} dist/${BIN}-x86_64-unknown-freebsd
+            cp target/release/forge3d dist/forge3d-x86_64-unknown-freebsd
+
+      - name: Build (OpenBSD)
+        if: matrix.id == 'openbsd'
+        uses: vmactions/openbsd-vm@v1
+        with:
+          usesh: true
+          prepare: pkg_add rust gtk+3 libxkbcommon
+          run: |
+            cargo build --release -p forge-desktop
+            mkdir -p dist
+            cp target/release/forge3d dist/forge3d-x86_64-unknown-openbsd
+
+      - name: Build (NetBSD)
+        if: matrix.id == 'netbsd'
+        uses: vmactions/netbsd-vm@v1
+        with:
+          usesh: true
+          prepare: pkgin -y install rust gtk3+ libxkbcommon
+          run: |
+            cargo build --release -p forge-desktop
+            mkdir -p dist
+            cp target/release/forge3d dist/forge3d-x86_64-unknown-netbsd
+
+      - name: Build (DragonFlyBSD)
+        if: matrix.id == 'dragonfly'
+        uses: vmactions/dragonflybsd-vm@v1
+        with:
+          usesh: true
+          prepare: pkg install -y rust pkgconf gtk3 libxkbcommon
+          run: |
+            cargo build --release -p forge-desktop
+            mkdir -p dist
+            cp target/release/forge3d dist/forge3d-x86_64-unknown-dragonfly
+
+      - name: Build (illumos / OmniOS)
+        if: matrix.id == 'omnios'
+        uses: vmactions/omnios-vm@v1
+        with:
+          usesh: true
+          prepare: pkg install -q developer/gcc13 ooce/developer/rust
+          run: |
+            cargo build --release -p forge-desktop
+            mkdir -p dist
+            cp target/release/forge3d dist/forge3d-x86_64-unknown-illumos
+
       - uses: actions/upload-artifact@v4
         with:
-          name: blendcraft-x86_64-unknown-freebsd
+          name: blendcraft-${{ matrix.target }}
           path: dist/*
 
-  # ---------------------------------------------------------------- Web (WebAssembly)
+  # =============================================================== WEB (WebAssembly)
   web:
     name: Web (wasm32)
     runs-on: ubuntu-latest
@@ -119,16 +206,16 @@ jobs:
       - name: Install wasm-bindgen CLI (must match Cargo.lock)
         run: cargo install wasm-bindgen-cli --version 0.2.130 --locked
       - name: Build web app
-        run: ./web/build.sh
+        run: bash web/build.sh
       - uses: actions/upload-artifact@v4
         with:
           name: blendcraft-web
           path: web/dist
 
-  # ---------------------------------------------------------------- Release on tag
+  # =============================================================== RELEASE (on tag v*)
   release:
-    if: startsWith(github.ref, 'refs/tags/v')
-    needs: [native, cross, freebsd, web]
+    if: always() && startsWith(github.ref, 'refs/tags/v') && needs.native.result == 'success' && needs.web.result == 'success'
+    needs: [native, macos-universal, cross, bsd, web]
     runs-on: ubuntu-latest
     permissions:
       contents: write
