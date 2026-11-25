@@ -23,7 +23,7 @@ use std::collections::HashMap;
 use std::f32::consts::PI;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
+use web_time::Instant;
 
 /// Path depth for viewport and offline (same look when samples converge).
 const MAX_BOUNCES: u32 = 5;
@@ -845,10 +845,17 @@ impl Default for CyclesState {
             fingerprint: 0,
             preview: Vec::new(),
             exposure: 1.0,
-            threads: std::thread::available_parallelism()
-                .map(|n| n.get())
-                .unwrap_or(1)
-                .clamp(1, 32),
+            threads: {
+                #[cfg(target_arch = "wasm32")]
+                { 1 }
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    std::thread::available_parallelism()
+                        .map(|n| n.get())
+                        .unwrap_or(1)
+                        .clamp(1, 32)
+                }
+            },
             interactive: true,
             preview_mode: false,
             res_div: 1,

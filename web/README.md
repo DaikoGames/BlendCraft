@@ -31,3 +31,14 @@ Then open `http://localhost:8080`. Do not open `index.html` directly with `file:
 - `web/dist` is generated output and is not committed as source.
 - Browser APIs and WASM limitations may mean some desktop-only features are unavailable in Web.
 - The Web build has no server/backend dependency; it runs locally in the browser.
+
+
+## Native and Web dependencies
+
+The native desktop build uses `ufbx` for advanced FBX import (including armatures and animation).
+`ufbx` is declared only for non-WASM targets and its Rust module is compiled only on native targets.
+The WebAssembly build therefore uses BlendCraft's built-in FBX byte parser instead. Desktop FBX
+import behavior remains unchanged.
+
+The Web build disables default features (including embedded Python scripting) and uses
+`web-time` for browser-compatible timing. Cycles defaults to one worker on WebAssembly.

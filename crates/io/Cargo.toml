@@ -15,4 +15,7 @@ image.workspace = true
 serde_json.workspace = true
 tobj.workspace = true
 flate2.workspace = true
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# Native FBX importer: ufbx uses a C toolchain and is intentionally excluded from WASM.
 ufbx = { version = "0.11", default-features = true }
