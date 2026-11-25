@@ -3395,6 +3395,7 @@ fn apply_fbx_skins(
 }
 
 
+#[cfg(test)]
 mod tests {
     use super::*;
     use forge_core::primitives;
