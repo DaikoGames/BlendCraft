@@ -187,6 +187,29 @@ struct CaptureCache {
     padded_bpr: u32,
 }
 
+/// Native: every backend wgpu supports. Browser: WebGPU when the page verified that a
+/// WebGPU adapter exists (`globalThis.__bc_webgpu === true`, set by web/bootstrap.js),
+/// otherwise the WebGL2 backend, so Firefox and Chrome without WebGPU still work.
+#[cfg(not(target_arch = "wasm32"))]
+fn preferred_backends() -> wgpu::Backends {
+    wgpu::Backends::all()
+}
+
+#[cfg(target_arch = "wasm32")]
+fn preferred_backends() -> wgpu::Backends {
+    let has_webgpu = js_sys::Reflect::get(&js_sys::global(), &"__bc_webgpu".into())
+        .ok()
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    if has_webgpu {
+        log::info!("renderer backend: WebGPU");
+        wgpu::Backends::BROWSER_WEBGPU
+    } else {
+        log::info!("renderer backend: WebGL2");
+        wgpu::Backends::GL
+    }
+}
+
 impl Renderer {
     /// `target` is anything winit's `Arc<Window>` converts into (or a canvas on wasm).
     pub async fn new(
@@ -194,7 +217,10 @@ impl Renderer {
         width: u32,
         height: u32,
     ) -> Result<Self> {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::default());
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+            backends: preferred_backends(),
+            ..Default::default()
+        });
         let surface = instance.create_surface(target)?;
         // Prefer hardware rendering, but do not require a discrete GPU.
         // Retry with a lower-power adapter and finally a software/fallback adapter.

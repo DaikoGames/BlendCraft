@@ -5815,7 +5815,7 @@ impl App {
             }
             Some(Err(e)) => {
                 log::error!("GPU init failed: {e:#}");
-                log::error!("BlendCraft Web needs WebGPU (recent Chrome/Edge, served from localhost or https).");
+                log::error!("No usable WebGPU or WebGL2 context. Enable hardware acceleration / update your GPU driver.");
                 self.web_window = None;
             }
             None => {}
@@ -5869,7 +5869,7 @@ impl ApplicationHandler for App {
         #[cfg(target_arch = "wasm32")]
         {
             self.gpu_init_started = true;
-            log::info!("BlendCraft: requesting GPU adapter (WebGPU)...");
+            log::info!("BlendCraft: requesting GPU adapter...");
             self.web_window = Some(window.clone());
             let slot = self.pending_gpu.clone();
             wasm_bindgen_futures::spawn_local(async move {

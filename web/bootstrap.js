@@ -28,8 +28,24 @@ const fail = (msg) => {
   add('error', [msg]);
 };
 
-if (!('gpu' in navigator)) {
-  fail('WebGPU is not available. Use a recent Chrome/Edge and open http://localhost:8080 (not 0.0.0.0 or a LAN IP; WebGPU needs a secure context).');
+// Decide the graphics backend before the wasm module starts:
+// WebGPU if a real adapter is available, otherwise WebGL2 (Firefox, older/blocked GPUs).
+let webgpu = false;
+try {
+  if ('gpu' in navigator) {
+    const adapter = await navigator.gpu.requestAdapter();
+    webgpu = !!adapter;
+  }
+} catch (e) {
+  add('warn', ['WebGPU probe failed:', e]);
+}
+globalThis.__bc_webgpu = webgpu;
+let webgl2 = false;
+try { webgl2 = !!document.createElement('canvas').getContext('webgl2'); } catch (_) {}
+add('info', ['WebGPU adapter:', webgpu, '| WebGL2:', webgl2]);
+
+if (!webgpu && !webgl2) {
+  fail('Neither WebGPU nor WebGL2 is available. Enable hardware acceleration in your browser settings and update your graphics driver.');
 } else {
   try {
     const { default: init } = await import('./forge_web.js');
