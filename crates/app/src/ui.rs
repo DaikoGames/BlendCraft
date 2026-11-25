@@ -3,6 +3,7 @@ use crate::keymap::{self, Action, Binding};
 use crate::scripting::{ScriptCompletion, ScriptResult, ScriptSnapshot};
 use crate::tools::{Tool, ToolState};
 use egui::RichText;
+use web_time::Instant;
 use forge_core::shader_graph::{evaluate_graph_ex_cancellable, GraphEvalResult};
 use forge_core::{
     apply_eval_to_material, bake_graph_texture, font_registry, free_font_catalog, AlignMode,
