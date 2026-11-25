@@ -7,601 +7,139 @@ on:
   pull_request:
   workflow_dispatch:
 
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
-
 env:
   CARGO_TERM_COLOR: always
-  APP_PACKAGE: forge-app
+  BIN: forge3d   # binary produced by crates/desktop (package: forge-desktop)
 
 jobs:
-  test:
-    name: Test
-    runs-on: ubuntu-24.04
+  # ---------------------------------------------------------------- native runners
+  native:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: "Linux x64",     os: ubuntu-latest,    target: x86_64-unknown-linux-gnu,  ext: "" }
+          - { name: "Linux ARM64",   os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu, ext: "" }
+          - { name: "Windows x64",   os: windows-latest,   target: x86_64-pc-windows-msvc,    ext: ".exe" }
+          - { name: "Windows x86",   os: windows-latest,   target: i686-pc-windows-msvc,      ext: ".exe" }
+          - { name: "Windows ARM64", os: windows-latest,   target: aarch64-pc-windows-msvc,   ext: ".exe" }
+          - { name: "macOS ARM64",   os: macos-latest,     target: aarch64-apple-darwin,      ext: "" }
+          - { name: "macOS x64",     os: macos-latest,     target: x86_64-apple-darwin,       ext: "" }
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - name: Linux system libraries
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libx11-dev libxkbcommon-dev libwayland-dev libgtk-3-dev
+      - name: Build
+        run: cargo build --release -p forge-desktop --target ${{ matrix.target }}
+      - name: Test core
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: cargo test -p forge-core
+      - name: Stage artifact
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp "target/${{ matrix.target }}/release/${BIN}${{ matrix.ext }}" "dist/${BIN}-${{ matrix.target }}${{ matrix.ext }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: blendcraft-${{ matrix.target }}
+          path: dist/*
+
+  # ---------------------------------------------------------------- cross (via `cross`)
+  cross:
+    name: ${{ matrix.name }} (cross)
+    runs-on: ubuntu-latest
+    continue-on-error: true   # exotic targets must not block the others
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: "Linux x86",   target: i686-unknown-linux-gnu }
+          - { name: "Linux ARMv7", target: armv7-unknown-linux-gnueabihf }
+    steps:
+      - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-
-      - name: Install Linux build dependencies
+        with:
+          key: ${{ matrix.target }}
+      - name: Install cross
+        run: cargo install cross --git https://github.com/cross-rs/cross --locked
+      - name: Build
+        run: cross build --release -p forge-desktop --target ${{ matrix.target }}
+      - name: Stage artifact
         run: |
-          echo "nameserver 8.8.8.8" | sudo tee /etc/resolv.conf > /dev/null
-          echo "nameserver 1.1.1.1" | sudo tee -a /etc/resolv.conf > /dev/null
-          echo 'Acquire::ForceIPv4 "true";' | sudo tee /etc/apt/apt.conf.d/99force-ipv4
-          for i in 1 2 3; do
-            sudo apt-get update && break || sleep 3
-          done
-          sudo apt-get install -y pkg-config libx11-dev libxcursor-dev libxrandr-dev \
-            libxi-dev libxkbcommon-dev libwayland-dev libgl1-mesa-dev libasound2-dev \
-            libudev-dev
+          mkdir -p dist
+          cp "target/${{ matrix.target }}/release/${BIN}" "dist/${BIN}-${{ matrix.target }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: blendcraft-${{ matrix.target }}
+          path: dist/*
 
-      - run: cargo test -p forge-core -p forge-video -p forge-app
-
-  # ---------------------------------------------------------------------------
-  # Browser website: same application as desktop, packaged as static files.
-  # ---------------------------------------------------------------------------
-  wasm:
-    name: Website (WASM)
-    runs-on: ubuntu-24.04
-    timeout-minutes: 90
+  # ---------------------------------------------------------------- FreeBSD
+  freebsd:
+    name: FreeBSD x64
+    runs-on: ubuntu-latest
+    continue-on-error: true
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v4
+      - name: Build in FreeBSD VM
+        uses: vmactions/freebsd-vm@v1
+        with:
+          usesh: true
+          prepare: pkg install -y rust pkgconf gtk3 libX11 libxkbcommon wayland
+          run: |
+            cargo build --release -p forge-desktop
+            mkdir -p dist
+            cp target/release/${BIN} dist/${BIN}-x86_64-unknown-freebsd
+      - uses: actions/upload-artifact@v4
+        with:
+          name: blendcraft-x86_64-unknown-freebsd
+          path: dist/*
+
+  # ---------------------------------------------------------------- Web (WebAssembly)
+  web:
+    name: Web (wasm32)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
         with:
-          prefix-key: wasm
-
-      - name: Install wasm-bindgen-cli
-        run: cargo install wasm-bindgen-cli --locked
-
-      - name: Build application for wasm32 (with RustPython scripting)
-        run: |
-          # Keep default features so python-scripting / RustPython is linked into the website build.
-          cargo build --release -p forge-app \
-            --target wasm32-unknown-unknown
-
-      - name: Package static website
-        run: |
-          set -euo pipefail
-          OUT=web-dist
-          rm -rf "$OUT"
-          mkdir -p "$OUT"
-
-          WASM_IN="target/wasm32-unknown-unknown/release/forge3d.wasm"
-          test -f "$WASM_IN"
-
-          wasm-bindgen --target web --out-dir "$OUT" --out-name forge_app "$WASM_IN"
-
-          cp web/index.html "$OUT/"
-          if [ -f crates/app/logo.png ]; then
-            cp crates/app/logo.png "$OUT/"
-          fi
-          if [ -f web/serve.sh ]; then
-            cp web/serve.sh "$OUT/"
-            chmod +x "$OUT/serve.sh"
-          fi
-
-          cat > "$OUT/README.txt" << 'EOF'
-          BlendCraft browser website
-          ==========================
-          Upload this entire folder to any static host, or run:
-            python3 -m http.server 8080
-          Then open http://127.0.0.1:8080/
-          EOF
-          sed -i 's/^          //' "$OUT/README.txt"
-
-          test -f "$OUT/index.html"
-          test -f "$OUT/forge_app.js"
-          test -f "$OUT/forge_app_bg.wasm" -o -f "$OUT/forge_app.wasm"
-
-          (cd "$OUT" && zip -r ../blendcraft-website.zip .)
-          ls -lh blendcraft-website.zip
-
-      - name: Upload website ZIP
-        uses: actions/upload-artifact@v5
+          key: wasm
+      - name: Install wasm-bindgen CLI (must match Cargo.lock)
+        run: cargo install wasm-bindgen-cli --version 0.2.130 --locked
+      - name: Build web app
+        run: ./web/build.sh
+      - uses: actions/upload-artifact@v4
         with:
-          name: blendcraft-website
-          path: blendcraft-website.zip
-          if-no-files-found: error
+          name: blendcraft-web
+          path: web/dist
 
-  # Optional: deploy the website ZIP to GitHub Pages.
-  # Repo Settings → Pages → Source: GitHub Actions
-  website:
-    name: Deploy GitHub Pages
-    needs: [wasm]
-    runs-on: ubuntu-24.04
-    if: github.event_name != 'pull_request'
-    continue-on-error: true
-    permissions:
-      contents: read
-      pages: write
-      id-token: write
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    steps:
-      - name: Download website artifact
-        uses: actions/download-artifact@v5
-        with:
-          name: blendcraft-website
-          path: webapp
-
-      - name: Unpack site root
-        run: |
-          set -euo pipefail
-          mkdir -p site
-          if [ -f webapp/blendcraft-website.zip ]; then
-            unzip -o webapp/blendcraft-website.zip -d site
-          else
-            cp -a webapp/. site/
-          fi
-          if [ ! -f site/index.html ]; then
-            found=$(find site -name index.html | head -n1 || true)
-            if [ -n "$found" ]; then
-              dir=$(dirname "$found")
-              cp -a "$dir"/. site/
-            fi
-          fi
-          test -f site/index.html
-          ls -la site
-
-      - uses: actions/configure-pages@v5
-      - uses: actions/upload-pages-artifact@v3
-        with:
-          path: site
-      - id: deployment
-        uses: actions/deploy-pages@v4
-
-  # ---------------------------------------------------------------------------
-  # Desktop / native binaries
-  # ---------------------------------------------------------------------------
-  build:
-    name: ${{ matrix.name }}
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 120
-    continue-on-error: ${{ matrix.experimental }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - { name: linux-x64,   os: ubuntu-24.04,     target: x86_64-unknown-linux-gnu,      cross: "",                    scripting: true,  ext: "",     experimental: false }
-          - { name: linux-arm64, os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu,     cross: "",                    scripting: true,  ext: "",     experimental: true  }
-          - { name: windows-x64, os: windows-latest,   target: x86_64-pc-windows-msvc,        cross: "",                    scripting: true,  ext: ".exe", experimental: false }
-          - { name: macos-x64,   os: macos-15-intel,   target: x86_64-apple-darwin,           cross: "",                    scripting: true,  ext: "",     experimental: false }
-          - { name: macos-arm64, os: macos-latest,     target: aarch64-apple-darwin,          cross: "",                    scripting: true,  ext: "",     experimental: false }
-          - { name: linux-x86,     os: ubuntu-24.04, target: i686-unknown-linux-gnu,        cross: "i686-linux-gnu",      scripting: true,  ext: "", experimental: true }
-          - { name: linux-armv7,   os: ubuntu-24.04, target: armv7-unknown-linux-gnueabihf, cross: "arm-linux-gnueabihf", scripting: true,  ext: "", experimental: true }
-          - { name: linux-riscv64, os: ubuntu-24.04, target: riscv64gc-unknown-linux-gnu,   cross: "riscv64-linux-gnu",   scripting: true,  ext: "", experimental: true }
-          - { name: windows-x86,   os: windows-latest, target: i686-pc-windows-msvc,        cross: "",                    scripting: true,  ext: ".exe", experimental: true }
-          - { name: windows-arm64, os: windows-latest, target: aarch64-pc-windows-msvc,     cross: "",                    scripting: true,  ext: ".exe", experimental: true }
-
-    steps:
-      - uses: actions/checkout@v5
-
-      - name: Detect binary name
-        shell: bash
-        run: |
-          BIN=$(cargo metadata --no-deps --format-version 1 \
-            | jq -r --arg pkg "$APP_PACKAGE" '.packages[] | select(.name==$pkg) | .targets[] | select(.kind | index("bin")) | .name' \
-            | head -n1 | tr -d '\r')
-          test -n "$BIN" || { echo "No binary target found"; exit 1; }
-          echo "BIN=$BIN" >> "$GITHUB_ENV"
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: ${{ matrix.target }}
-
-      - name: Install Linux build dependencies
-        if: runner.os == 'Linux'
-        run: |
-          echo "nameserver 8.8.8.8" | sudo tee /etc/resolv.conf > /dev/null
-          echo "nameserver 1.1.1.1" | sudo tee -a /etc/resolv.conf > /dev/null
-          echo 'Acquire::ForceIPv4 "true";' | sudo tee /etc/apt/apt.conf.d/99force-ipv4
-          for i in 1 2 3; do
-            sudo apt-get update && break || sleep 3
-          done
-          sudo apt-get install -y pkg-config libx11-dev libxcursor-dev libxrandr-dev \
-            libxi-dev libxkbcommon-dev libwayland-dev libgl1-mesa-dev libasound2-dev \
-            libudev-dev
-
-
-      - name: Install GNU cross-compiler
-        if: runner.os == 'Linux' && matrix.cross != ''
-        run: |
-          set -euo pipefail
-          sudo apt-get update
-          case "${{ matrix.cross }}" in
-            i686-linux-gnu)
-              sudo apt-get install -y gcc-i686-linux-gnu g++-i686-linux-gnu
-              ;;
-            arm-linux-gnueabihf)
-              sudo apt-get install -y gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf
-              ;;
-            riscv64-linux-gnu)
-              sudo apt-get install -y gcc-riscv64-linux-gnu g++-riscv64-linux-gnu
-              ;;
-            *)
-              echo "Unknown cross: ${{ matrix.cross }}"
-              exit 1
-              ;;
-          esac
-
-      - name: Build (native / MSVC)
-        if: matrix.cross == ''
-        shell: bash
-        run: |
-          set -e
-          if [ "${{ matrix.scripting }}" = "true" ]; then
-            cargo build --release -p "$APP_PACKAGE" --target "${{ matrix.target }}"
-          else
-            cargo build --release -p "$APP_PACKAGE" --target "${{ matrix.target }}" --no-default-features
-          fi
-
-      - name: Build (GNU cross-gcc)
-        if: matrix.cross != ''
-        shell: bash
-        env:
-          TARGET: ${{ matrix.target }}
-          CROSS: ${{ matrix.cross }}
-        run: |
-          set -euo pipefail
-          export CC="${CROSS}-gcc"
-          export CXX="${CROSS}-g++"
-          trip=$(echo "$TARGET" | tr '[:lower:]-' '[:upper:]_')
-          export "CC_${TARGET//-/_}=$CC"
-          export "CXX_${TARGET//-/_}=$CXX"
-          export "CARGO_TARGET_${trip}_LINKER=$CC"
-          echo "Using $CC for $TARGET"
-          command -v "$CC"
-          if [ "${{ matrix.scripting }}" = "true" ]; then
-            cargo build --release -p "$APP_PACKAGE" --target "$TARGET"
-          else
-            cargo build --release -p "$APP_PACKAGE" --target "$TARGET" --no-default-features
-          fi
-
-      - name: Package AppImage (Linux glibc)
-        if: >
-          runner.os == 'Linux' && (
-            matrix.target == 'x86_64-unknown-linux-gnu' ||
-            matrix.target == 'aarch64-unknown-linux-gnu' ||
-            matrix.target == 'i686-unknown-linux-gnu'
-          )
-        shell: bash
-        env:
-          TARGET: ${{ matrix.target }}
-          BIN: ${{ env.BIN }}
-        run: |
-          set -e
-          APPDIR=AppDir
-          rm -rf "$APPDIR"
-          mkdir -p "$APPDIR/usr/bin" "$APPDIR/usr/share/icons/hicolor/256x256/apps"
-          cp "target/$TARGET/release/$BIN" "$APPDIR/usr/bin/$BIN"
-          chmod +x "$APPDIR/usr/bin/$BIN"
-          if ! command -v convert >/dev/null 2>&1; then
-            sudo apt-get install -y -qq --no-install-recommends imagemagick
-          fi
-          convert crates/app/logo.png -resize 256x256 "$APPDIR/usr/share/icons/hicolor/256x256/apps/blendcraft.png"
-          convert crates/app/logo.png -resize 256x256 "$APPDIR/blendcraft.png"
-          cat > "$APPDIR/blendcraft.desktop" <<EOF
-          [Desktop Entry]
-          Type=Application
-          Name=BlendCraft
-          Comment=Open-source 3D suite for game assets
-          Exec=${BIN}
-          Icon=blendcraft
-          Categories=Graphics;3DGraphics;
-          Terminal=false
-          EOF
-          sed -i 's/^[[:space:]]*//' "$APPDIR/blendcraft.desktop"
-          printf '%s\n' '#!/bin/sh' 'SELF=$(readlink -f "$0")' 'HERE=${SELF%/*}' "exec \"\${HERE}/usr/bin/${BIN}\" \"\$@\"" > "$APPDIR/AppRun"
-          chmod +x "$APPDIR/AppRun"
-          case "$TARGET" in
-            x86_64-*)  ARCH_NAME=x86_64 ;;
-            aarch64-*) ARCH_NAME=aarch64 ;;
-            i686-*)    ARCH_NAME=i686 ;;
-            *) echo "unsupported target $TARGET"; exit 1 ;;
-          esac
-          case "$(uname -m)" in
-            aarch64|arm64) TOOL_ARCH=aarch64 ;;
-            *)             TOOL_ARCH=x86_64 ;;
-          esac
-          curl -fsSL -o appimagetool \
-            "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-${TOOL_ARCH}.AppImage"
-          chmod +x appimagetool
-          ./appimagetool --appimage-extract >/dev/null 2>&1 || true
-          if [ -x squashfs-root/AppRun ]; then TOOL=./squashfs-root/AppRun; else TOOL=./appimagetool; fi
-          export ARCH="$ARCH_NAME"
-          "$TOOL" "$APPDIR" "BlendCraft-${{ matrix.name }}.AppImage"
-          chmod +x "BlendCraft-${{ matrix.name }}.AppImage"
-
-      - name: Upload artifact (binary)
-        uses: actions/upload-artifact@v5
-        with:
-          name: blendcraft-${{ matrix.name }}
-          path: target/${{ matrix.target }}/release/${{ env.BIN }}${{ matrix.ext }}
-          if-no-files-found: error
-
-      - name: Upload artifact (AppImage)
-        if: >
-          runner.os == 'Linux' && (
-            matrix.target == 'x86_64-unknown-linux-gnu' ||
-            matrix.target == 'aarch64-unknown-linux-gnu' ||
-            matrix.target == 'i686-unknown-linux-gnu'
-          )
-        uses: actions/upload-artifact@v5
-        with:
-          name: blendcraft-${{ matrix.name }}-appimage
-          path: BlendCraft-${{ matrix.name }}.AppImage
-          if-no-files-found: warn
-
-  freebsd:
-    name: ${{ matrix.name }}
-    runs-on: ubuntu-24.04
-    timeout-minutes: 120
-    continue-on-error: ${{ matrix.experimental }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - { name: freebsd-x64, target: x86_64-unknown-freebsd, scripting: true,  experimental: false }
-          - { name: freebsd-x86, target: i686-unknown-freebsd,   scripting: true,  experimental: true  }
-    steps:
-      - uses: actions/checkout@v5
-      - name: Detect binary name
-        shell: bash
-        run: |
-          BIN=$(cargo metadata --no-deps --format-version 1 \
-            | jq -r --arg pkg "$APP_PACKAGE" '.packages[] | select(.name==$pkg) | .targets[] | select(.kind | index("bin")) | .name' \
-            | head -n1 | tr -d '\r')
-          test -n "$BIN" || { echo "No binary target found"; exit 1; }
-          echo "BIN=$BIN" >> "$GITHUB_ENV"
-
-      - name: Build in FreeBSD VM
-        uses: vmactions/freebsd-vm@v1
-        env:
-          TARGET: ${{ matrix.target }}
-          BIN: ${{ env.BIN }}
-          APP_PACKAGE: ${{ env.APP_PACKAGE }}
-          SCRIPTING: ${{ matrix.scripting }}
-        with:
-          envs: "TARGET BIN APP_PACKAGE SCRIPTING"
-          usesh: true
-          prepare: |
-            pkg install -y curl pkgconf
-          run: |
-            set -e
-            curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal
-            . "$HOME/.cargo/env"
-            if [ "$TARGET" != "x86_64-unknown-freebsd" ]; then
-              rustup target add "$TARGET"
-            fi
-            if [ "$SCRIPTING" = "true" ]; then
-              cargo build --release -p "$APP_PACKAGE" --target "$TARGET"
-            else
-              cargo build --release -p "$APP_PACKAGE" --no-default-features --target "$TARGET"
-            fi
-            mkdir -p dist
-            cp "target/$TARGET/release/$BIN" dist/
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v5
-        with:
-          name: blendcraft-${{ matrix.name }}
-          path: dist/${{ env.BIN }}
-          if-no-files-found: error
-
-  # FreeBSD aarch64: FreeBSD base.txz sysroot + clang (no Zig).
-  freebsd-arm64:
-    name: freebsd-arm64
-    runs-on: ubuntu-24.04
-    timeout-minutes: 120
-    continue-on-error: true
-    steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-unknown-freebsd
-      - name: Detect binary name
-        shell: bash
-        run: |
-          BIN=$(cargo metadata --no-deps --format-version 1 \
-            | jq -r --arg pkg "$APP_PACKAGE" '.packages[] | select(.name==$pkg) | .targets[] | select(.kind | index("bin")) | .name' \
-            | head -n1 | tr -d '\r')
-          test -n "$BIN" || { echo "No binary target found"; exit 1; }
-          echo "BIN=$BIN" >> "$GITHUB_ENV"
-
-      - name: Fetch FreeBSD aarch64 sysroot
-        run: |
-          set -euo pipefail
-          REL=14.2-RELEASE
-          mkdir -p sysroot
-          curl -fsSL -o base.txz \
-            "https://download.freebsd.org/releases/arm64/aarch64/${REL}/base.txz"
-          # Extract libraries + headers only (faster, enough to link)
-          tar -xJf base.txz -C sysroot ./lib ./usr/lib ./usr/include ./libexec
-          ls sysroot/usr/lib | head
-          test -f sysroot/usr/lib/libc.so || test -f sysroot/lib/libc.so.7
-
-      - name: Build aarch64-unknown-freebsd (with scripting)
-        run: |
-          set -euo pipefail
-          SYSROOT="$PWD/sysroot"
-          # clang drives the FreeBSD target using the downloaded sysroot
-          cat > freebsd-cc << EOF
-          #!/bin/bash
-          set -euo pipefail
-          args=()
-          while [[ \$# -gt 0 ]]; do
-            case "\$1" in
-              -mfix-*) shift || true ;;
-              *) args+=("\$1"); shift ;;
-            esac
-          done
-          exec clang --target=aarch64-unknown-freebsd14.2 --sysroot="$SYSROOT" "\${args[@]}"
-          EOF
-          chmod +x freebsd-cc
-          export CC="$PWD/freebsd-cc"
-          export CXX="$PWD/freebsd-cc"
-          export CARGO_TARGET_AARCH64_UNKNOWN_FREEBSD_LINKER="$PWD/freebsd-cc"
-          export BINDGEN_EXTRA_CLANG_ARGS="--sysroot=$SYSROOT"
-          cargo build --release -p "$APP_PACKAGE" --target aarch64-unknown-freebsd
-          mkdir -p dist
-          cp "target/aarch64-unknown-freebsd/release/$BIN" dist/
-          file "dist/$BIN" || true
-          ls -lh dist/
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v5
-        with:
-          name: blendcraft-freebsd-arm64
-          path: dist/${{ env.BIN }}
-          if-no-files-found: warn
-
-  flatpak:
-    name: flatpak-${{ matrix.name }}
-    needs: [build]
-    runs-on: ${{ matrix.os }}
-    continue-on-error: true
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - { name: x64,   os: ubuntu-24.04,     arch: x86_64,  artifact: blendcraft-linux-x64 }
-          - { name: arm64, os: ubuntu-24.04-arm, arch: aarch64, artifact: blendcraft-linux-arm64 }
-    steps:
-      - uses: actions/checkout@v5
-      - name: Download binary artifact
-        uses: actions/download-artifact@v5
-        with:
-          name: ${{ matrix.artifact }}
-          path: flatpak-bin
-      - name: Install flatpak-builder
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y flatpak flatpak-builder imagemagick
-          flatpak remote-add --user --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
-      - name: Detect binary name
-        shell: bash
-        run: |
-          BIN=$(ls flatpak-bin | head -n1)
-          test -n "$BIN" || exit 1
-          echo "BIN=$BIN" >> "$GITHUB_ENV"
-          echo "APP_ID=com.daikogames.BlendCraft" >> "$GITHUB_ENV"
-          echo "VERSION=0.1.0" >> "$GITHUB_ENV"
-      - name: Prepare Flatpak sources
-        shell: bash
-        run: |
-          set -e
-          mkdir -p fp
-          cp "flatpak-bin/$BIN" "fp/$BIN"
-          chmod +x "fp/$BIN"
-          convert crates/app/logo.png -resize 128x128 fp/icon.png
-          cat > "fp/$APP_ID.desktop" <<EOF
-          [Desktop Entry]
-          Name=BlendCraft
-          Exec=$BIN
-          Icon=$APP_ID
-          Type=Application
-          Categories=Graphics;3DGraphics;
-          EOF
-          sed -i 's/^[[:space:]]*//' "fp/$APP_ID.desktop"
-          cat > "fp/$APP_ID.yml" <<EOF
-          app-id: $APP_ID
-          runtime: org.freedesktop.Platform
-          runtime-version: '24.08'
-          sdk: org.freedesktop.Sdk
-          command: $BIN
-          finish-args:
-            - --share=ipc
-            - --socket=x11
-            - --socket=wayland
-            - --socket=pulseaudio
-            - --device=dri
-            - --filesystem=home
-          modules:
-            - name: blendcraft
-              buildsystem: simple
-              build-commands:
-                - install -D $BIN /app/bin/$BIN
-                - install -D icon.png /app/share/icons/hicolor/128x128/apps/$APP_ID.png
-                - install -D $APP_ID.desktop /app/share/applications/$APP_ID.desktop
-              sources:
-                - type: file
-                  path: $BIN
-                - type: file
-                  path: icon.png
-                - type: file
-                  path: $APP_ID.desktop
-          EOF
-      - name: Build Flatpak bundle
-        working-directory: fp
-        run: |
-          flatpak-builder --user --force-clean --install-deps-from=flathub \
-            --repo=repo builddir "$APP_ID.yml"
-          flatpak build-bundle repo "BlendCraft-${{ matrix.arch }}.flatpak" "$APP_ID"
-      - name: Upload Flatpak
-        uses: actions/upload-artifact@v5
-        with:
-          name: blendcraft-flatpak-${{ matrix.name }}
-          path: fp/BlendCraft-${{ matrix.arch }}.flatpak
-          if-no-files-found: error
-
+  # ---------------------------------------------------------------- Release on tag
   release:
-    name: Publish release
-    if: ${{ !cancelled() && github.event_name != 'pull_request' }}
-    needs: [test, build, freebsd, freebsd-arm64, wasm, flatpak]
-    runs-on: ubuntu-24.04
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [native, cross, freebsd, web]
+    runs-on: ubuntu-latest
     permissions:
       contents: write
-    env:
-      IS_TAG: ${{ startsWith(github.ref, 'refs/tags/v') }}
     steps:
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v4
         with:
-          pattern: blendcraft-*
-          path: dist
-      - name: Collect binaries
-        run: |
-          shopt -s nullglob
-          mkdir -p out
-          for d in dist/*/; do
-            n=$(basename "$d")
-            for f in "$d"*; do
-              case "$f" in
-                *.flatpak)  mv "$f" out/ ;;
-                *.AppImage) mv "$f" "out/$n.AppImage" ;;
-                *.exe)      mv "$f" "out/$n.exe" ;;
-                *.zip)      mv "$f" "out/$n.zip" ;;
-                *)          mv "$f" "out/$n" ;;
-              esac
-            done
-          done
-          ls -lh out || true
-          test -n "$(ls -A out 2>/dev/null)" || { echo "No build artifacts"; exit 1; }
-      - name: Remove the old rolling release
-        if: env.IS_TAG != 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh release delete latest --cleanup-tag --yes --repo "${{ github.repository }}" || true
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+          path: artifacts
+      - name: Zip web build
+        run: cd artifacts/blendcraft-web && zip -r ../blendcraft-web.zip .
+      - uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ env.IS_TAG == 'true' && github.ref_name || 'latest' }}
-          target_commitish: ${{ github.sha }}
-          name: ${{ env.IS_TAG == 'true' && github.ref_name || 'Latest build (automatic)' }}
-          prerelease: ${{ env.IS_TAG != 'true' }}
-          make_latest: ${{ env.IS_TAG == 'true' }}
-          generate_release_notes: ${{ env.IS_TAG == 'true' }}
-          body: |
-            ${{ env.IS_TAG != 'true' && format('Automatic build of commit {0}. Not a stable release.', github.sha) || '' }}
-            Scripting uses embedded RustPython (no separate CPython runtime).
-            Website build is the blendcraft-website.zip artifact (static site).
-            On Unix run chmod +x on downloaded binaries first.
-          files: out/*
+          files: |
+            artifacts/**/forge3d*
+            artifacts/blendcraft-web.zip
