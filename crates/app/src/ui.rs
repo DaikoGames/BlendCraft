@@ -5,7 +5,6 @@ use crate::tools::{Tool, ToolState};
 use egui::RichText;
 use forge_core::shader_graph::{evaluate_graph_ex_cancellable, GraphEvalResult};
 use forge_core::{
-use web_time::Instant;
     apply_eval_to_material, bake_graph_texture, font_registry, free_font_catalog, AlignMode,
     AlignTo, AlphaMode, AnimationData, ArmatureData, CameraData, Constraint, ConstraintKind,
     Document, EmptyShape, ForceFieldData, ForceFieldType, GreasePencilData, LightData,
@@ -181,7 +180,7 @@ pub struct UiState {
     pub compositor_eval_busy: bool,
     pub compositor_eval_requested_graph: Option<CompositorGraph>,
     pub compositor_eval_requested_serial: u64,
-    pub compositor_eval_requested_at: Option<Instant>,
+    pub compositor_eval_requested_at: Option<web_time::Instant>,
     pub compositor_link_from: Option<u64>,
     pub compositor_last_node_rects: Vec<(u64, egui::Rect)>,
 
@@ -541,28 +540,6 @@ pub fn draw(
                     if doc.vertex_paint_mode { actions.push(Action::ToggleVertexPaintMode); }
                     if doc.weight_paint_mode { actions.push(Action::ToggleWeightPaintMode); }
                     if !in_sculpt { actions.push(Action::ToggleSculptMode); }
-                }
-                if ui
-                    .add_enabled(
-                        mesh_ok || doc.uv_mode,
-                        egui::SelectableLabel::new(doc.uv_mode, "UV Editing"),
-                    )
-                    .clicked()
-                {
-                    st.shading_mode = false;
-                    st.animation_mode = false;
-                    st.rendering_mode = false;
-                    st.compositing_mode = false;
-                    st.geometry_nodes_mode = false;
-                    st.scripting_mode = false;
-                    if in_edit { actions.push(Action::ToggleEditMode); }
-                    if in_pose { actions.push(Action::TogglePoseMode); }
-                    if in_sculpt { actions.push(Action::ToggleSculptMode); }
-                    if doc.paint_mode { actions.push(Action::TogglePaintMode); }
-                    if doc.vertex_paint_mode { actions.push(Action::ToggleVertexPaintMode); }
-                    if doc.weight_paint_mode { actions.push(Action::ToggleWeightPaintMode); }
-                    // Toggles: enters UV mode if off, exits to Object Mode if on.
-                    actions.push(Action::ToggleUvMode);
                 }
 
                 ui.separator();
@@ -7460,7 +7437,7 @@ fn poll_compositor_evaluation(ctx: &egui::Context, doc: &mut Document, st: &mut 
         st.compositor_eval_error = false;
         st.compositor_eval_requested_graph = Some(graph.clone());
         st.compositor_eval_requested_serial = st.compositor_render_serial;
-        st.compositor_eval_requested_at = Some(Instant::now());
+        st.compositor_eval_requested_at = Some(web_time::Instant::now());
     }
     if st
         .compositor_eval_requested_at
@@ -9594,7 +9571,7 @@ fn menu_bar(
                 ui,
                 actions,
                 b,
-                "Import… (glTF .gltf/.glb, OBJ, FBX, Alembic, Unity package)",
+                "Import… (glTF, GLB, OBJ, FBX, Alembic, Unity package)",
                 Action::Import,
                 true,
             );

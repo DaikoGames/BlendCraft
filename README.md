@@ -84,36 +84,6 @@ cargo test -p forge-core
 
 The desktop application binary is named `forge3d`. The workspace includes separate crates for the application, core scene/editing logic, rendering, file I/O, and video output.
 
-
-## Website (browser)
-
-BlendCraft is **one application**. The browser build is the same Rust engine, UI, and scene system as desktop — not a separate web rewrite.
-
-CI produces a static **website** artifact (`blendcraft-website.zip`):
-
-| File | Role |
-|------|------|
-| `index.html` | Site entry — loading screen, canvas, error UI |
-| `forge_app.js` | JS glue that loads the engine |
-| `forge_app_bg.wasm` (or `.wasm`) | The application itself |
-| `logo.png` | Icon / splash |
-| `serve.sh` | Optional local static server |
-
-### Use it
-
-1. **GitHub Pages** — after a successful main/tag build, enable *Settings → Pages → Source: GitHub Actions*. The site URL is published by the **Website (GitHub Pages)** job.
-2. **Any static host** — unzip `blendcraft-website` and upload the folder (Netlify, Cloudflare Pages, nginx, S3, …).
-3. **Locally** — unzip, then:
-   ```sh
-   cd path/to/unzipped-site
-   python3 -m http.server 8080
-   # open http://127.0.0.1:8080/
-   ```
-   Opening `index.html` as a `file://` URL will **not** work (browsers block WASM that way).
-
-Desktop installers and binaries are unchanged. Python scripting and video export stay desktop-only; everything else aims to share one codebase.
-
-
 ## Main workflows currently implemented
 
 ### Scene and object editing
@@ -206,3 +176,29 @@ The project supports its native `.forge` format and has import/export paths for 
 ## Development notes
 
 When a feature is completed, update the relevant row in **Project status** to **Finished** and remove its remaining-work description. Keep this README synchronized with the actual source code; do not mark a feature finished merely because a UI control or placeholder exists.
+
+
+## Separate desktop and WebAssembly builds
+
+BlendCraft keeps native-only dependencies and integrations out of the browser target.
+The desktop build uses the native FBX importer (`ufbx`) and desktop file/video/Python
+features; the WebAssembly build uses the built-in FBX parser and browser file APIs.
+
+Build desktop (default feature set):
+
+```sh
+cargo build --release -p forge-app
+```
+
+Build WebAssembly without desktop-only features:
+
+```sh
+cargo build --release -p forge-app --target wasm32-unknown-unknown --no-default-features --features web
+```
+
+Web builds intentionally do not include `ufbx`; FBX support in the browser is therefore
+limited to BlendCraft's built-in parser. Native builds retain `ufbx` unchanged.
+
+The WebAssembly target requires the Rust target `wasm32-unknown-unknown` and a WebGPU-capable
+browser. These target-specific source/dependency changes have not been compiled in this
+editing environment because the Rust toolchain is not installed here.

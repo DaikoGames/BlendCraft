@@ -457,7 +457,7 @@ fn primitive_script_data(primitive: &forge_core::Primitive) -> (String, Vec<f32>
 }
 
 
-#[cfg(feature = "python-scripting")]
+#[cfg(all(not(target_arch = "wasm32"), feature = "python-scripting"))]
 mod embedded {
     use super::{ScriptError, ScriptMaterial, ScriptObject, ScriptResult, ScriptSnapshot};
 
@@ -847,13 +847,21 @@ _RESULT = _dumps({{
 }
 
 
-#[cfg(feature = "python-scripting")]
+#[cfg(all(not(target_arch = "wasm32"), feature = "python-scripting"))]
 pub use embedded::execute;
 
-#[cfg(not(feature = "python-scripting"))]
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "python-scripting")))]
 pub fn execute(_source: String, _snapshot: ScriptSnapshot) -> Result<ScriptResult, ScriptError> {
     Err(ScriptError {
         output: String::new(),
         message: "Python scripting is unavailable in this build; enable the `python-scripting` feature.".to_owned(),
+    })
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn execute(_source: String, _snapshot: ScriptSnapshot) -> Result<ScriptResult, ScriptError> {
+    Err(ScriptError {
+        output: String::new(),
+        message: "Python scripting is not available on WebAssembly".to_owned(),
     })
 }

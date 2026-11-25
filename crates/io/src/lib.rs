@@ -1,4 +1,4 @@
-//! File import/export. glTF 2.0 (.gltf and .glb) (geometry, node transforms, PBR materials, textures)
+//! File import/export. glTF 2.0 / GLB (geometry, node transforms, PBR materials, textures)
 //! and HDR environment maps.
 use anyhow::{Context, Result};
 use forge_core::{
@@ -12,6 +12,8 @@ use std::sync::Arc;
 mod alembic;
 mod export;
 mod fbx;
+#[cfg(not(target_arch = "wasm32"))]
+mod fbx_ufbx;
 mod obj;
 mod usd;
 #[cfg(not(target_arch = "wasm32"))]
@@ -119,37 +121,10 @@ pub(crate) fn find_texture_file(dir: &Path, model_stem: &str, name: &str) -> Opt
     None
 }
 
-/// Reads a `.glb` or `.gltf` (JSON + external `.bin` / image files, or data URIs).
-///
-/// Same steps as `gltf::import`, except that an image that cannot be read or decoded does
-/// not abort the whole import: it becomes an empty placeholder that `load_gltf` then
-/// retries via `find_texture_file` (common for `.gltf` files whose textures were moved).
-#[cfg(not(target_arch = "wasm32"))]
-fn import_gltf_tolerant(
-    path: &Path,
-) -> Result<(gltf::Document, Vec<gltf::buffer::Data>, Vec<gltf::image::Data>)> {
-    let ctx = || format!("reading {}", path.display());
-    let gltf::Gltf { document, blob } = gltf::Gltf::open(path).with_context(ctx)?;
-    let base = path.parent();
-    let buffers = gltf::import_buffers(&document, base, blob).with_context(ctx)?;
-    let images = match gltf::import_images(&document, base, &buffers) {
-        Ok(images) => images,
-        Err(_) => document
-            .images()
-            .map(|_| gltf::image::Data {
-                pixels: Vec::new(),
-                format: gltf::image::Format::R8G8B8A8,
-                width: 0,
-                height: 0,
-            })
-            .collect(),
-    };
-    Ok((document, buffers, images))
-}
-
 #[cfg(not(target_arch = "wasm32"))]
 pub fn load_gltf(path: &Path) -> Result<Scene> {
-    let (doc, buffers, images) = import_gltf_tolerant(path)?;
+    let (doc, buffers, images) =
+        gltf::import(path).with_context(|| format!("reading {}", path.display()))?;
     let mut scene = Scene::default();
     scene.materials = doc.materials().map(|m| convert_material(&m)).collect();
     // Decode every image. glTF embeds PNG/JPEG in the GLB binary (or as URIs).

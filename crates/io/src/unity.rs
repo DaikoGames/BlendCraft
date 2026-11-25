@@ -3,7 +3,7 @@
 //! A `.unitypackage` is a gzip-compressed tar archive. Every asset lives in its own
 //! folder named after the asset GUID and holds `pathname` (the project path),
 //! `asset` (the raw file) and `asset.meta`. We pull out every embedded model
-//! (`.fbx`, `.obj`, `.glb`, `.gltf`) and run it through the regular importers.
+//! (`.fbx`, `.obj`, `.glb`) and run it through the regular importers.
 //!
 //! Textures and `.mtl` files that sit in the package next to a model are found by file name
 //! (FBX / OBJ). Not supported: Unity-native serialized assets (`.asset`, `.prefab`, `.unity`,
@@ -109,7 +109,7 @@ fn file_stem(path: &str) -> String {
 type SideFiles = BTreeMap<String, (usize, usize)>;
 
 fn is_side_file(ext: &str) -> bool {
-    matches!(ext, "png" | "jpg" | "jpeg" | "tga" | "bmp" | "mtl" | "bin")
+    matches!(ext, "png" | "jpg" | "jpeg" | "tga" | "bmp" | "mtl")
 }
 
 fn lower_file_name(path: &str) -> String {
@@ -176,25 +176,6 @@ fn load_via_temp(
             }
         }
     }
-    if file_name.ends_with(".gltf") {
-        // External buffers / images referenced by the glTF JSON live as separate assets.
-        if let Ok(json) = serde_json::from_slice::<serde_json::Value>(bytes) {
-            for key in ["buffers", "images"] {
-                let Some(list) = json.get(key).and_then(|v| v.as_array()) else {
-                    continue;
-                };
-                for uri in list.iter().filter_map(|e| e.get("uri").and_then(|u| u.as_str())) {
-                    if uri.starts_with("data:") {
-                        continue;
-                    }
-                    let decoded = uri.replace("%20", " ");
-                    if let Some(fb) = side_file(data, side, &decoded) {
-                        let _ = std::fs::write(dir.join(bare_name(&decoded)), fb);
-                    }
-                }
-            }
-        }
-    }
     let result = load(&path);
     let _ = std::fs::remove_dir_all(&dir);
     result
@@ -240,7 +221,6 @@ pub fn load_unitypackage(path: &Path) -> Result<(Vec<(String, Scene)>, Vec<Strin
             }),
             "obj" => load_via_temp(bytes, "model.obj", &data, &side, crate::load_obj),
             "glb" => load_via_temp(bytes, "model.glb", &data, &side, crate::load_gltf),
-            "gltf" => load_via_temp(bytes, "model.gltf", &data, &side, crate::load_gltf),
             _ => continue,
         };
         match loaded {

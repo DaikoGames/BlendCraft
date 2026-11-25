@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+getrandom = { version = "0.3.4", features = ["wasm_js"] }
 forge-core.workspace = true
 glam.workspace = true
 bytemuck.workspace = true
@@ -15,5 +16,5 @@ serde_json.workspace = true
 tobj.workspace = true
 flate2.workspace = true
 
-[target.'cfg(target_arch = "wasm32")'.dependencies]
-getrandom = { version = "0.3", features = ["wasm_js"] }
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+ufbx = { version = "0.11", default-features = true }

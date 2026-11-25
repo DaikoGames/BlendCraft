@@ -845,10 +845,14 @@ impl Default for CyclesState {
             fingerprint: 0,
             preview: Vec::new(),
             exposure: 1.0,
-            threads: std::thread::available_parallelism()
-                .map(|n| n.get())
-                .unwrap_or(1)
-                .clamp(1, 32),
+            threads: if cfg!(target_arch = "wasm32") {
+                1
+            } else {
+                std::thread::available_parallelism()
+                    .map(|n| n.get())
+                    .unwrap_or(1)
+                    .clamp(1, 32)
+            },
             interactive: true,
             preview_mode: false,
             res_div: 1,
