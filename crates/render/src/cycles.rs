@@ -23,7 +23,7 @@ use std::collections::HashMap;
 use std::f32::consts::PI;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
+use web_time::Instant;
 
 /// Path depth for viewport and offline (same look when samples converge).
 const MAX_BOUNCES: u32 = 5;

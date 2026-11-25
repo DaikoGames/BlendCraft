@@ -24,7 +24,8 @@ use glam::{Mat4, Vec3};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use web_time::Instant;
 
 /// Hard cap on simulated vertices (keeps bakes responsive).
 const MAX_CLOTH_VERTICES: usize = 40_000;

@@ -1414,6 +1414,7 @@ dependencies = [
  "rapier3d",
  "serde",
  "ttf-parser",
+ "web-time",
 ]
 
 [[package]]
@@ -1444,6 +1445,7 @@ dependencies = [
  "log",
  "naga",
  "wgpu",
+ "web-time",
 ]
 
 [[package]]

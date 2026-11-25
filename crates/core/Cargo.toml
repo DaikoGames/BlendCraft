@@ -9,6 +9,7 @@ glam.workspace = true
 rapier3d.workspace = true
 bytemuck.workspace = true
 serde.workspace = true
+web-time.workspace = true
 bincode.workspace = true
 flate2.workspace = true
 anyhow.workspace = true
