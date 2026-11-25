@@ -6,10 +6,7 @@ license.workspace = true
 build = "build.rs"
 
 [features]
-# Desktop and browser builds are intentionally selected separately.
-default = ["desktop"]
-desktop = ["python-scripting"]
-web = []
+default = ["python-scripting"]
 python-scripting = ["dep:rustpython-vm", "dep:rustpython-stdlib", "dep:rustpython-pylib"]
 
 [[bin]]
@@ -35,7 +32,6 @@ egui-winit.workspace = true
 image.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-web-time.workspace = true
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 rfd.workspace = true

@@ -176,29 +176,3 @@ The project supports its native `.forge` format and has import/export paths for 
 ## Development notes
 
 When a feature is completed, update the relevant row in **Project status** to **Finished** and remove its remaining-work description. Keep this README synchronized with the actual source code; do not mark a feature finished merely because a UI control or placeholder exists.
-
-
-## Separate desktop and WebAssembly builds
-
-BlendCraft keeps native-only dependencies and integrations out of the browser target.
-The desktop build uses the native FBX importer (`ufbx`) and desktop file/video/Python
-features; the WebAssembly build uses the built-in FBX parser and browser file APIs.
-
-Build desktop (default feature set):
-
-```sh
-cargo build --release -p forge-app
-```
-
-Build WebAssembly without desktop-only features:
-
-```sh
-cargo build --release -p forge-app --target wasm32-unknown-unknown --no-default-features --features web
-```
-
-Web builds intentionally do not include `ufbx`; FBX support in the browser is therefore
-limited to BlendCraft's built-in parser. Native builds retain `ufbx` unchanged.
-
-The WebAssembly target requires the Rust target `wasm32-unknown-unknown` and a WebGPU-capable
-browser. These target-specific source/dependency changes have not been compiled in this
-editing environment because the Rust toolchain is not installed here.

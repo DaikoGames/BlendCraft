@@ -180,7 +180,7 @@ pub struct UiState {
     pub compositor_eval_busy: bool,
     pub compositor_eval_requested_graph: Option<CompositorGraph>,
     pub compositor_eval_requested_serial: u64,
-    pub compositor_eval_requested_at: Option<web_time::Instant>,
+    pub compositor_eval_requested_at: Option<std::time::Instant>,
     pub compositor_link_from: Option<u64>,
     pub compositor_last_node_rects: Vec<(u64, egui::Rect)>,
 
@@ -7437,7 +7437,7 @@ fn poll_compositor_evaluation(ctx: &egui::Context, doc: &mut Document, st: &mut 
         st.compositor_eval_error = false;
         st.compositor_eval_requested_graph = Some(graph.clone());
         st.compositor_eval_requested_serial = st.compositor_render_serial;
-        st.compositor_eval_requested_at = Some(web_time::Instant::now());
+        st.compositor_eval_requested_at = Some(std::time::Instant::now());
     }
     if st
         .compositor_eval_requested_at

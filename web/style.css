@@ -1,0 +1,8 @@
+:root { color-scheme: dark; font-family: system-ui, sans-serif; background: #17191d; color: #e7e9ee; }
+* { box-sizing: border-box; }
+html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; }
+body { background: #17191d; }
+#app { width: 100%; height: 100%; display: flex; flex-direction: column; }
+#loading { padding: 1rem; color: #b8beca; }
+canvas { display: block; width: 100%; height: 100%; outline: none; }
+noscript { padding: 1rem; }

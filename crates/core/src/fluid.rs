@@ -24,8 +24,7 @@ use glam::{Mat3, Mat4, Vec3};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::Duration;
-use web_time::Instant;
+use std::time::{Duration, Instant};
 
 // ---------------------------------------------------------------------------
 // Settings
