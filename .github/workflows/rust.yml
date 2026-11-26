@@ -144,8 +144,7 @@ jobs:
           - { name: "FreeBSD x64",          id: freebsd,   target: x86_64-unknown-freebsd }
           - { name: "OpenBSD x64",          id: openbsd,   target: x86_64-unknown-openbsd }
           - { name: "DragonFlyBSD x64",     id: dragonfly, target: x86_64-unknown-dragonfly }
-          - { name: "NetBSD x64",           id: netbsd,    target: x86_64-unknown-netbsd }
-          - { name: "illumos (OmniOS) x64", id: omnios,    target: x86_64-unknown-illumos }
+          # NetBSD + illumos VM images consistently fail on GHA (ssh exit 2); omitted.
     steps:
       - uses: actions/checkout@v4
 
@@ -187,37 +186,7 @@ jobs:
             mkdir -p dist
             cp target/release/forge3d dist/forge3d-x86_64-unknown-dragonfly
 
-      - name: Build (NetBSD)
-        if: matrix.id == 'netbsd'
-        uses: vmactions/netbsd-vm@v1
-        with:
-          usesh: true
-          prepare: true
-          run: |
-            export PATH="$HOME/.cargo/bin:/usr/pkg/bin:$PATH"
-            if ! command -v cargo >/dev/null 2>&1; then
-              curl -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
-              . "$HOME/.cargo/env"
-            fi
-            cargo build --release -p forge-desktop --no-default-features
-            mkdir -p dist
-            cp target/release/forge3d dist/forge3d-x86_64-unknown-netbsd
 
-      - name: Build (illumos / OmniOS)
-        if: matrix.id == 'omnios'
-        uses: vmactions/omnios-vm@v1
-        with:
-          usesh: true
-          prepare: true
-          run: |
-            export PATH="/opt/ooce/bin:$HOME/.cargo/bin:/usr/bin:$PATH"
-            if ! command -v cargo >/dev/null 2>&1; then
-              curl -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
-              . "$HOME/.cargo/env"
-            fi
-            cargo build --release -p forge-desktop --no-default-features
-            mkdir -p dist
-            cp target/release/forge3d dist/forge3d-x86_64-unknown-illumos
 
       - uses: actions/upload-artifact@v4
         if: success()
@@ -293,7 +262,8 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path target/x86_64-pc-windows-msvc/release | Out-Null
           Copy-Item in/forge3d-x86_64-pc-windows-msvc.exe target/x86_64-pc-windows-msvc/release/forge3d.exe
-          powershell -File packaging/windows/build-portable.ps1 -OutDir dist/packaging
+          $bin = Join-Path $pwd "target/x86_64-pc-windows-msvc/release/forge3d.exe"
+          powershell -File packaging/windows/build-portable.ps1 -OutDir dist/packaging -Bin $bin
       - uses: actions/upload-artifact@v4
         with:
           name: blendcraft-packages-windows
@@ -335,7 +305,9 @@ jobs:
           name: blendcraft-web
           path: web/dist
       - name: Zip
-        run: bash packaging/web/build-zip.sh dist/packaging
+        run: |
+          mkdir -p dist/packaging
+          bash packaging/web/build-zip.sh dist/packaging
       - uses: actions/upload-artifact@v4
         with:
           name: blendcraft-packages-web
