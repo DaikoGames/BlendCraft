@@ -102,6 +102,8 @@ jobs:
           - { name: "Linux PowerPC64 LE",      target: powerpc64le-unknown-linux-gnu,     ext: "" }
           - { name: "Windows x64 (MinGW)",     target: x86_64-pc-windows-gnu,             ext: ".exe" }
           - { name: "Windows x86 (MinGW)",     target: i686-pc-windows-gnu,               ext: ".exe" }
+          - { name: "FreeBSD ARM64",          target: aarch64-unknown-freebsd,           ext: "" }
+          - { name: "FreeBSD x86",            target: i686-unknown-freebsd,              ext: "" }
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -112,25 +114,17 @@ jobs:
         run: cargo install cross --git https://github.com/cross-rs/cross --locked
       - name: Build
         run: |
-          # RustPython 0.4 hits i686 time_t (i64 vs i32) bugs on several 32-bit targets.
+          # Skip RustPython on 32-bit (time_t bugs) and FreeBSD cross (no official cross images / lighter link).
           case "${{ matrix.target }}" in
-            i686-*|armv7-*)
-              cross build --release -p forge-desktop --target ${{ matrix.target }} --no-default-features
+            i686-*|armv7-*|*-freebsd)
+              cross build --release -p forge-desktop --target ${{ matrix.target }} --no-default-features || \
+                cargo build --release -p forge-desktop --target ${{ matrix.target }} --no-default-features
               ;;
             *)
               cross build --release -p forge-desktop --target ${{ matrix.target }}
-              ;;
-          esac
-      - name: Stage artifact
-        run: |
-          mkdir -p dist
-          cp "target/${{ matrix.target }}/release/${BIN}${{ matrix.ext }}" "dist/${BIN}-${{ matrix.target }}${{ matrix.ext }}"
-      - uses: actions/upload-artifact@v4
-        with:
-          name: blendcraft-${{ matrix.target }}
-          path: dist/*
-
-  # =============================================================== EXPERIMENTAL: BSD / illumos (VMs)
+            # =============================================================== EXPERIMENTAL: BSD / illumos (VMs)
+  # NetBSD / illumos VM images are often broken on GHA (ssh exit 2); keep them soft.
+  # FreeBSD x64 uses the official freebsd-vm. FreeBSD ARM64 + x86 are cross-built below.
   bsd:
     name: ${{ matrix.name }} (VM, experimental)
     runs-on: ubuntu-latest
@@ -141,13 +135,13 @@ jobs:
         include:
           - { name: "FreeBSD x64",          id: freebsd,   target: x86_64-unknown-freebsd }
           - { name: "OpenBSD x64",          id: openbsd,   target: x86_64-unknown-openbsd }
-          - { name: "NetBSD x64",           id: netbsd,    target: x86_64-unknown-netbsd }
           - { name: "DragonFlyBSD x64",     id: dragonfly, target: x86_64-unknown-dragonfly }
+          - { name: "NetBSD x64",           id: netbsd,    target: x86_64-unknown-netbsd }
           - { name: "illumos (OmniOS) x64", id: omnios,    target: x86_64-unknown-illumos }
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build (FreeBSD)
+      - name: Build (FreeBSD x64)
         if: matrix.id == 'freebsd'
         uses: vmactions/freebsd-vm@v1
         with:
@@ -176,76 +170,63 @@ jobs:
             mkdir -p dist
             cp target/release/forge3d dist/forge3d-x86_64-unknown-openbsd
 
-      - name: Build (NetBSD)
-        if: matrix.id == 'netbsd'
-        uses: vmactions/netbsd-vm@v1
-        with:
-          usesh: true
-          # NetBSD pkgsrc names vary by version; tolerate missing packages.
-          prepare: |
-            pkgin -y update || true
-            pkgin -y install mozilla-rootcerts-openssl ca-certificates curl || true
-            mozilla-rootcerts install || true
-            pkgin -y install pkgconf gmake || true
-            pkgin -y install libX11 libXcursor libXrandr libXi libxkbcommon || true
-            pkgin -y install gtk3 || pkgin -y install gtk3+ || true
-          run: |
-            export PATH="$HOME/.cargo/bin:/usr/pkg/bin:/usr/local/bin:$PATH"
-            # Always prefer rustup — pkgsrc rust is often too old / incomplete for wgpu.
-            if ! command -v rustup >/dev/null 2>&1; then
-              curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
-            fi
-            . "$HOME/.cargo/env"
-            rustc -vV
-            cargo -vV
-            # No scripting on experimental BSD (fewer deps, avoids RustPython).
-            cargo build --release -p forge-desktop --no-default-features
-            mkdir -p dist
-            test -f target/release/forge3d
-            cp target/release/forge3d dist/forge3d-x86_64-unknown-netbsd
-
       - name: Build (DragonFlyBSD)
         if: matrix.id == 'dragonfly'
         uses: vmactions/dragonflybsd-vm@v1
         with:
           usesh: true
-          prepare: |
-            pkg update || true
-            pkg install -y rust pkgconf gtk3 libxkbcommon libX11 || true
+          prepare: pkg install -y rust pkgconf gtk3 libxkbcommon libX11
           run: |
             set -e
             export PATH="$HOME/.cargo/bin:/usr/local/bin:$PATH"
-            if ! command -v cargo >/dev/null 2>&1; then
-              curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
-              . "$HOME/.cargo/env"
-            fi
             if ! cargo build --release -p forge-desktop; then
               cargo build --release -p forge-desktop --no-default-features
             fi
             mkdir -p dist
             cp target/release/forge3d dist/forge3d-x86_64-unknown-dragonfly
 
+      # NetBSD / illumos: keep scripts dead-simple. Prior runs died with ssh exit 2
+      # during prepare (pkgin/pkg noise). One-line prepare; rustup inside run only.
+      - name: Build (NetBSD)
+        if: matrix.id == 'netbsd'
+        uses: vmactions/netbsd-vm@v1
+        with:
+          usesh: true
+          prepare: true
+          run: |
+            export PATH="$HOME/.cargo/bin:/usr/pkg/bin:$PATH"
+            if ! command -v cargo >/dev/null 2>&1; then
+              ftp -o - https://sh.rustup.rs 2>/dev/null | sh -s -- -y --default-toolchain stable --profile minimal \
+                || curl -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
+              . "$HOME/.cargo/env"
+            fi
+            cargo build --release -p forge-desktop --no-default-features
+            mkdir -p dist
+            cp target/release/forge3d dist/forge3d-x86_64-unknown-netbsd
+
       - name: Build (illumos / OmniOS)
         if: matrix.id == 'omnios'
         uses: vmactions/omnios-vm@v1
         with:
           usesh: true
-          prepare: |
-            pkg refresh || true
-            pkg install -q system/header developer/library/lint || true
-            pkg install -q developer/gcc13 || pkg install -q developer/gcc || true
-            pkg install -q ooce/developer/rust || true
-            pkg install -q library/libx11 library/libxkbcommon || true
+          prepare: true
           run: |
-            export PATH="/opt/ooce/bin:$HOME/.cargo/bin:/usr/gcc/13/bin:/usr/gcc/10/bin:/usr/bin:$PATH"
-            # OmniOS package rust is often incomplete; use rustup.
-            if ! command -v rustup >/dev/null 2>&1; then
-              curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
+            export PATH="/opt/ooce/bin:$HOME/.cargo/bin:/usr/bin:$PATH"
+            if ! command -v cargo >/dev/null 2>&1; then
+              curl -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
+              . "$HOME/.cargo/env"
             fi
-            . "$HOME/.cargo/env"
-            rustc -vV
-            cargo -vV
-            # Illumos + full GUI stack is fragile in CI; build without scripting first.
+            cargo build --release -p forge-desktop --no-default-features
+            mkdir -p dist
+            cp target/release/forge3d dist/forge3d-x86_64-unknown-illumos
+
+      - uses: actions/upload-artifact@v4
+        if: success()
+        with:
+          name: blendcraft-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: ignore
+
             cargo build --release -p forge-desktop --no-default-features
             mkdir -p dist
             test -f target/release/forge3d
@@ -277,10 +258,107 @@ jobs:
           name: blendcraft-web
           path: web/dist
 
+
+  # =============================================================== PACKAGING (release artifacts)
+  package-linux:
+    name: Package Linux (AppImage, deb, rpm, tarball)
+    runs-on: ubuntu-latest
+    needs: native
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: blendcraft-x86_64-unknown-linux-gnu
+          path: in
+      - name: Stage binary
+        run: |
+          mkdir -p target/x86_64-unknown-linux-gnu/release
+          cp in/forge3d-x86_64-unknown-linux-gnu target/x86_64-unknown-linux-gnu/release/forge3d
+          chmod +x target/x86_64-unknown-linux-gnu/release/forge3d
+      - name: Build packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y curl fuse libfuse2 zip
+          bash packaging/linux/build-tarball.sh dist/packaging
+          bash packaging/linux/build-deb-rpm.sh dist/packaging
+          bash packaging/appimage/build.sh dist/packaging
+      - uses: actions/upload-artifact@v4
+        with:
+          name: blendcraft-packages-linux
+          path: dist/packaging/*
+          if-no-files-found: ignore
+
+  package-windows:
+    name: Package Windows (portable ZIP)
+    runs-on: windows-latest
+    needs: native
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: blendcraft-x86_64-pc-windows-msvc
+          path: in
+      - name: Portable ZIP
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path target/x86_64-pc-windows-msvc/release | Out-Null
+          Copy-Item in/forge3d-x86_64-pc-windows-msvc.exe target/x86_64-pc-windows-msvc/release/forge3d.exe
+          powershell -File packaging/windows/build-portable.ps1 -OutDir dist/packaging
+      - uses: actions/upload-artifact@v4
+        with:
+          name: blendcraft-packages-windows
+          path: dist/packaging/*
+          if-no-files-found: ignore
+
+  package-macos:
+    name: Package macOS (app + DMG)
+    runs-on: macos-latest
+    needs: macos-universal
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: blendcraft-universal-apple-darwin
+          path: in
+      - name: DMG
+        run: |
+          mkdir -p dist
+          cp in/forge3d-universal-apple-darwin dist/forge3d-universal-apple-darwin
+          chmod +x dist/forge3d-universal-apple-darwin
+          bash packaging/macos/build-app-dmg.sh dist/packaging
+      - uses: actions/upload-artifact@v4
+        with:
+          name: blendcraft-packages-macos
+          path: dist/packaging/*
+          if-no-files-found: ignore
+
+  package-web:
+    name: Package Web (ZIP)
+    runs-on: ubuntu-latest
+    needs: web
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: blendcraft-web
+          path: web/dist
+      - name: Zip
+        run: bash packaging/web/build-zip.sh dist/packaging
+      - uses: actions/upload-artifact@v4
+        with:
+          name: blendcraft-packages-web
+          path: dist/packaging/*
+          if-no-files-found: ignore
+
+
   # =============================================================== RELEASE (on tag v*)
   release:
     if: always() && startsWith(github.ref, 'refs/tags/v') && needs.native.result == 'success' && needs.web.result == 'success'
-    needs: [native, macos-universal, cross, bsd, web]
+    needs: [native, macos-universal, cross, bsd, web, package-linux, package-windows, package-macos, package-web]
     runs-on: ubuntu-latest
     permissions:
       contents: write
