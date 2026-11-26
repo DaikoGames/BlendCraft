@@ -1,0 +1,27 @@
+name: blendcraft
+base: core22
+version: '0.1.0'
+summary: Local-first 3D creation application
+description: |
+  BlendCraft is an independent, local-first 3D creation app written in Rust.
+grade: devel
+confinement: strict
+architectures: [amd64]
+
+apps:
+  blendcraft:
+    command: bin/forge3d
+    plugs: [opengl, wayland, x11, desktop, desktop-legacy, home, network, audio-playback]
+
+parts:
+  blendcraft:
+    plugin: rust
+    source: ../..
+    rust-path: [crates/desktop]
+    build-packages: [libx11-dev, libxkbcommon-dev, libwayland-dev, libgtk-3-dev, pkg-config]
+    stage-packages: [libxkbcommon0, libx11-6, libgtk-3-0]
+    override-build: |
+      craftctl default
+      cargo build --release -p forge-desktop
+      mkdir -p "$CRAFT_PART_INSTALL/bin"
+      cp target/release/forge3d "$CRAFT_PART_INSTALL/bin/"

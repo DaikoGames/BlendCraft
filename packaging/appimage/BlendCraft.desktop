@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=BlendCraft
+Comment=Local-first 3D creation application
+Exec=forge3d
+Icon=blendcraft
+Categories=Graphics;3DGraphics;
+Terminal=false
+StartupNotify=true

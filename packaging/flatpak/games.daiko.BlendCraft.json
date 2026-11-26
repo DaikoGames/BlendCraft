@@ -1,0 +1,43 @@
+{
+  "app-id": "games.daiko.BlendCraft",
+  "runtime": "org.freedesktop.Platform",
+  "runtime-version": "24.08",
+  "sdk": "org.freedesktop.Sdk",
+  "sdk-extensions": ["org.freedesktop.Sdk.Extension.rust-stable"],
+  "command": "forge3d",
+  "finish-args": [
+    "--share=ipc",
+    "--socket=fallback-x11",
+    "--socket=wayland",
+    "--device=dri",
+    "--filesystem=home",
+    "--share=network"
+  ],
+  "build-options": {
+    "append-path": "/usr/lib/sdk/rust-stable/bin",
+    "env": {
+      "CARGO_HOME": "/run/build/blendcraft/cargo",
+      "RUSTFLAGS": "-C debuginfo=0"
+    }
+  },
+  "modules": [
+    {
+      "name": "blendcraft",
+      "buildsystem": "simple",
+      "build-commands": [
+        "cargo build --release -p forge-desktop --locked",
+        "install -Dm755 target/release/forge3d /app/bin/forge3d",
+        "install -Dm644 packaging/appimage/BlendCraft.desktop /app/share/applications/games.daiko.BlendCraft.desktop",
+        "install -Dm644 web/favicon.png /app/share/icons/hicolor/256x256/apps/games.daiko.BlendCraft.png",
+        "sed -i 's/^Exec=.*/Exec=forge3d/' /app/share/applications/games.daiko.BlendCraft.desktop",
+        "sed -i 's/^Icon=.*/Icon=games.daiko.BlendCraft/' /app/share/applications/games.daiko.BlendCraft.desktop"
+      ],
+      "sources": [
+        {
+          "type": "dir",
+          "path": "../.."
+        }
+      ]
+    }
+  ]
+}

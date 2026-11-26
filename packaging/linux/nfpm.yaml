@@ -1,0 +1,28 @@
+name: blendcraft
+arch: amd64
+platform: linux
+version: 0.1.0
+section: graphics
+priority: optional
+maintainer: DaikoGames <noreply@example.com>
+description: Local-first 3D creation application written in Rust
+license: MIT
+homepage: https://github.com/DaikoGames/BlendCraft
+contents:
+  - src: ../../target/x86_64-unknown-linux-gnu/release/forge3d
+    dst: /usr/bin/forge3d
+    file_info:
+      mode: 0755
+  - src: ../appimage/BlendCraft.desktop
+    dst: /usr/share/applications/blendcraft.desktop
+  - src: ../../web/favicon.png
+    dst: /usr/share/icons/hicolor/256x256/apps/blendcraft.png
+overrides:
+  deb:
+    depends:
+      - libxkbcommon0
+      - libx11-6
+  rpm:
+    depends:
+      - libX11
+      - libxkbcommon
