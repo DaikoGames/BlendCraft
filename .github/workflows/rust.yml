@@ -8,6 +8,15 @@ on:
     tags: ["v*"]
   pull_request:
   workflow_dispatch:
+    inputs:
+      create_release:
+        description: "Create a GitHub Release with ALL build artifacts"
+        type: boolean
+        default: false
+      release_tag:
+        description: "Tag name for the release (e.g. v0.1.0). Required if create_release is true and you are not already on a tag."
+        type: string
+        default: ""
 
 env:
   CARGO_TERM_COLOR: always
@@ -306,30 +315,97 @@ jobs:
           path: web/dist
       - name: Zip
         run: |
-          mkdir -p dist/packaging
-          bash packaging/web/build-zip.sh dist/packaging
+          mkdir -p "$GITHUB_WORKSPACE/dist/packaging"
+          bash packaging/web/build-zip.sh "$GITHUB_WORKSPACE/dist/packaging"
+          ls -la "$GITHUB_WORKSPACE/dist/packaging"
       - uses: actions/upload-artifact@v4
         with:
           name: blendcraft-packages-web
           path: dist/packaging/*
           if-no-files-found: ignore
 
-  # --------------------------------------------------------------- Release on tag
+  # --------------------------------------------------------------- Release (ALL artifacts)
+  # Runs when:
+  #   - you push a tag v*  (e.g. git tag v0.1.0 && git push --tags)
+  #   - or workflow_dispatch with create_release=true
+  # Waits for every build/package job, but does NOT fail if experimental
+  # cross/BSD packaging soft-failed (continue-on-error).
   release:
-    if: always() && startsWith(github.ref, 'refs/tags/v') && needs.native.result == 'success' && needs.web.result == 'success'
-    needs: [native, macos-universal, cross, bsd, web, package-linux, package-windows, package-macos, package-web]
+    name: GitHub Release (everything)
+    if: >-
+      always()
+      && needs.native.result == 'success'
+      && needs.web.result == 'success'
+      && (
+        startsWith(github.ref, 'refs/tags/v')
+        || (github.event_name == 'workflow_dispatch' && inputs.create_release == true)
+      )
+    needs:
+      - native
+      - macos-universal
+      - cross
+      - bsd
+      - web
+      - package-linux
+      - package-windows
+      - package-macos
+      - package-web
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
         with:
           path: artifacts
-      - name: Zip web build
-        run: cd artifacts/blendcraft-web && zip -r ../blendcraft-web.zip .
-      - uses: softprops/action-gh-release@v2
+          merge-multiple: false
+
+      - name: Collect everything into release/
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          echo "=== Artifact tree ==="
+          find artifacts -type f | sort || true
+
+          # Native / cross / BSD binaries
+          find artifacts -type f -name 'forge3d*' -exec cp -v {} release/ \; || true
+
+          # Packaging outputs (AppImage, deb, rpm, zip, dmg, …)
+          find artifacts -type f \( -name 'BlendCraft*' -o -name '*.AppImage' -o -name '*.deb' -o -name '*.rpm' -o -name '*.dmg' -o -name '*.flatpak' -o -name '*.snap' -o -name '*.msi' -o -name '*.exe' \) -exec cp -v {} release/ \; || true
+
+          # Web static site → single zip
+          if [[ -d artifacts/blendcraft-web ]]; then
+            (cd artifacts/blendcraft-web && zip -r "$GITHUB_WORKSPACE/release/BlendCraft-web.zip" .)
+          else
+            webdir=$(find artifacts -type d -name dist 2>/dev/null | head -1 || true)
+            if [[ -n "${webdir:-}" ]]; then
+              (cd "$webdir" && zip -r "$GITHUB_WORKSPACE/release/BlendCraft-web.zip" .)
+            fi
+          fi
+
+          echo "=== Release files ==="
+          ls -la release/
+          # Must have at least one file
+          test -n "$(ls -A release)"
+
+      - name: Resolve tag
+        id: tag
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            echo "tag=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+          elif [[ -n "${{ inputs.release_tag }}" ]]; then
+            echo "tag=${{ inputs.release_tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=v0.0.0-ci-${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish GitHub Release with ALL files
+        uses: softprops/action-gh-release@v2
         with:
-          files: |
-            artifacts/**/forge3d*
-            artifacts/blendcraft-web.zip
-            artifacts/blendcraft-packages-*/**
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: BlendCraft ${{ steps.tag.outputs.tag }}
+          generate_release_notes: true
+          files: release/*
+          fail_on_unmatched_files: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
