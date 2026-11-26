@@ -5,7 +5,9 @@ edition.workspace = true
 license.workspace = true
 
 [features]
-default = ["python-scripting"]
+# Desktop enables `python-scripting` by default; experimental 32-bit / BSD CI can
+# build with `--no-default-features` to skip RustPython (known i686 time_t bugs).
+default = []
 python-scripting = ["dep:rustpython-vm", "dep:rustpython-stdlib", "dep:rustpython-pylib"]
 
 

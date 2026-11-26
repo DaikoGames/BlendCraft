@@ -9,11 +9,15 @@ build = "build.rs"
 name = "forge3d"
 path = "src/main.rs"
 
+[features]
+default = ["python-scripting"]
+python-scripting = ["forge-app/python-scripting"]
+
 [build-dependencies]
 winresource = "0.1"
 
 [dependencies]
-forge-app = { path = "../app" }
+forge-app = { path = "../app", default-features = false }
 winit.workspace = true
 env_logger.workspace = true
 log.workspace = true
