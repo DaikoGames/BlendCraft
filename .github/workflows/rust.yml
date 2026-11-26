@@ -43,7 +43,14 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libx11-dev libxkbcommon-dev libwayland-dev libgtk-3-dev
       - name: Build
-        run: cargo build --release -p forge-desktop --target ${{ matrix.target }}
+        shell: bash
+        run: |
+          if [[ "${{ matrix.target }}" == i686-* ]]; then
+            # rustpython-common 0.4 time_t mismatch on 32-bit Windows
+            cargo build --release -p forge-desktop --target ${{ matrix.target }} --no-default-features
+          else
+            cargo build --release -p forge-desktop --target ${{ matrix.target }}
+          fi
       - name: Test core
         if: matrix.target == 'x86_64-unknown-linux-gnu'
         run: cargo test -p forge-core
@@ -104,7 +111,16 @@ jobs:
       - name: Install cross
         run: cargo install cross --git https://github.com/cross-rs/cross --locked
       - name: Build
-        run: cross build --release -p forge-desktop --target ${{ matrix.target }}
+        run: |
+          # RustPython 0.4 hits i686 time_t (i64 vs i32) bugs on several 32-bit targets.
+          case "${{ matrix.target }}" in
+            i686-*|armv7-*)
+              cross build --release -p forge-desktop --target ${{ matrix.target }} --no-default-features
+              ;;
+            *)
+              cross build --release -p forge-desktop --target ${{ matrix.target }}
+              ;;
+          esac
       - name: Stage artifact
         run: |
           mkdir -p dist
@@ -138,7 +154,10 @@ jobs:
           usesh: true
           prepare: pkg install -y rust pkgconf gtk3 libX11 libxkbcommon wayland
           run: |
-            cargo build --release -p forge-desktop
+            set -e
+            if ! cargo build --release -p forge-desktop; then
+              cargo build --release -p forge-desktop --no-default-features
+            fi
             mkdir -p dist
             cp target/release/forge3d dist/forge3d-x86_64-unknown-freebsd
 
@@ -147,9 +166,13 @@ jobs:
         uses: vmactions/openbsd-vm@v1
         with:
           usesh: true
-          prepare: pkg_add rust gtk+3 libxkbcommon
+          prepare: pkg_add -I rust gtk+3 libxkbcommon
           run: |
-            cargo build --release -p forge-desktop
+            set -e
+            export PATH="$HOME/.cargo/bin:/usr/local/bin:$PATH"
+            if ! cargo build --release -p forge-desktop; then
+              cargo build --release -p forge-desktop --no-default-features
+            fi
             mkdir -p dist
             cp target/release/forge3d dist/forge3d-x86_64-unknown-openbsd
 
@@ -158,9 +181,20 @@ jobs:
         uses: vmactions/netbsd-vm@v1
         with:
           usesh: true
-          prepare: pkgin -y install rust gtk3+ libxkbcommon
+          prepare: |
+            pkgin -y update || true
+            pkgin -y install rust mozilla-rootcerts-openssl gtk3 libX11 libxkbcommon pkgconf || true
+            pkgin -y install rust gtk3+ libxkbcommon || true
           run: |
-            cargo build --release -p forge-desktop
+            set -e
+            export PATH="$HOME/.cargo/bin:/usr/pkg/bin:/usr/local/bin:$PATH"
+            if ! command -v cargo >/dev/null 2>&1; then
+              curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+              . "$HOME/.cargo/env"
+            fi
+            if ! cargo build --release -p forge-desktop; then
+              cargo build --release -p forge-desktop --no-default-features
+            fi
             mkdir -p dist
             cp target/release/forge3d dist/forge3d-x86_64-unknown-netbsd
 
@@ -169,9 +203,19 @@ jobs:
         uses: vmactions/dragonflybsd-vm@v1
         with:
           usesh: true
-          prepare: pkg install -y rust pkgconf gtk3 libxkbcommon
+          prepare: |
+            pkg update || true
+            pkg install -y rust pkgconf gtk3 libxkbcommon libX11 || true
           run: |
-            cargo build --release -p forge-desktop
+            set -e
+            export PATH="$HOME/.cargo/bin:/usr/local/bin:$PATH"
+            if ! command -v cargo >/dev/null 2>&1; then
+              curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+              . "$HOME/.cargo/env"
+            fi
+            if ! cargo build --release -p forge-desktop; then
+              cargo build --release -p forge-desktop --no-default-features
+            fi
             mkdir -p dist
             cp target/release/forge3d dist/forge3d-x86_64-unknown-dragonfly
 
@@ -180,9 +224,19 @@ jobs:
         uses: vmactions/omnios-vm@v1
         with:
           usesh: true
-          prepare: pkg install -q developer/gcc13 ooce/developer/rust
+          prepare: |
+            pkg install -q developer/gcc13 ooce/developer/rust system/header || true
+            pkg install -q developer/gcc ooce/developer/rust || true
           run: |
-            cargo build --release -p forge-desktop
+            set -e
+            export PATH="/opt/ooce/bin:$HOME/.cargo/bin:/usr/bin:$PATH"
+            if ! command -v cargo >/dev/null 2>&1; then
+              curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+              . "$HOME/.cargo/env"
+            fi
+            if ! cargo build --release -p forge-desktop; then
+              cargo build --release -p forge-desktop --no-default-features
+            fi
             mkdir -p dist
             cp target/release/forge3d dist/forge3d-x86_64-unknown-illumos
 
