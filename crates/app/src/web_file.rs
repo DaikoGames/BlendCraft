@@ -10,7 +10,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use wasm_bindgen::closure::Closure;
-use wasm_bindgen::JsCast;
+use wasm_bindgen::{JsCast, JsValue};
 use web_sys::{Blob, BlobPropertyBag, FileReader, HtmlInputElement, Url};
 
 /// What the user just picked (filled asynchronously by the file input).
@@ -107,4 +107,56 @@ pub fn encode_png(rgba: &[u8], width: u32, height: u32) -> Result<Vec<u8>, Strin
         .write_image(rgba, width, height, image::ExtendedColorType::Rgba8)
         .map_err(|e| e.to_string())?;
     Ok(png)
+}
+
+
+
+#[wasm_bindgen::prelude::wasm_bindgen(module = "./encode_video.js")]
+extern "C" {
+    #[wasm_bindgen::prelude::wasm_bindgen(js_name = encodeVideo)]
+    fn js_encode_video(
+        frames: js_sys::Array,
+        width: u32,
+        height: u32,
+        fps: u32,
+    ) -> js_sys::Promise;
+}
+
+/// Encode RGBA frames to a single video via browser APIs (prefers MP4).
+/// Returns (filename, mime, bytes).
+pub async fn encode_animation_video(
+    frames: &[Vec<u8>],
+    width: u32,
+    height: u32,
+    fps: u16,
+) -> Result<(String, String, Vec<u8>), String> {
+    use js_sys::{Array, Reflect, Uint8Array};
+    use wasm_bindgen::JsCast;
+    use wasm_bindgen_futures::JsFuture;
+
+    let frames_js = Array::new();
+    for f in frames {
+        frames_js.push(&Uint8Array::from(f.as_slice()));
+    }
+
+    let promise = js_encode_video(frames_js, width, height, fps as u32);
+    let result = JsFuture::from(promise)
+        .await
+        .map_err(|e| format!("encodeVideo rejected: {e:?}"))?;
+
+    let filename = Reflect::get(&result, &"filename".into())
+        .ok()
+        .and_then(|v| v.as_string())
+        .unwrap_or_else(|| "animation.mp4".into());
+    let mime = Reflect::get(&result, &"mime".into())
+        .ok()
+        .and_then(|v| v.as_string())
+        .unwrap_or_else(|| "video/mp4".into());
+    let data_val = Reflect::get(&result, &"data".into()).map_err(|e| format!("{e:?}"))?;
+    let data = data_val
+        .dyn_into::<Uint8Array>()
+        .map_err(|_| "encodeVideo data is not Uint8Array".to_string())?;
+    let mut bytes = vec![0u8; data.length() as usize];
+    data.copy_to(&mut bytes);
+    Ok((filename, mime, bytes))
 }

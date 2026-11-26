@@ -1241,12 +1241,35 @@ impl App {
         self.camera.fixed = view;
     }
 
-    /// Camera for offline renders — WYSIWYG with the 3D viewport.
-    /// Uses exactly the view currently on screen (orbit *or* locked camera view).
-    /// Does NOT silently switch to a different scene camera object.
+    /// Camera for offline renders (F12 / animation): always the scene Camera object,
+    /// not the free orbit viewport. Matches Blender: render looks through the camera.
     fn render_camera(&self) -> OrbitCamera {
         let mut cam = self.camera.clone();
-        // Refresh fixed view from the active camera-view object so animation keys apply.
+        let is_cam = |o: &forge_core::Object| matches!(o.kind, ObjectKind::Camera(_));
+        let cam_id = self
+            .camera_view
+            .or_else(|| {
+                self.doc
+                    .active_index()
+                    .filter(|&i| is_cam(&self.doc.scene.objects[i]))
+                    .map(|i| self.doc.scene.objects[i].id)
+            })
+            .or_else(|| {
+                self.doc
+                    .scene
+                    .objects
+                    .iter()
+                    .find(|o| is_cam(o))
+                    .map(|o| o.id)
+            });
+        if let Some(id) = cam_id {
+            if let Some(v) = self.fixed_view_for(id) {
+                cam.fixed = Some(v);
+                cam.ortho = false;
+                return cam;
+            }
+        }
+        // Fallback: current viewport if the scene has no camera.
         if let Some(id) = self.camera_view {
             if let Some(v) = self.fixed_view_for(id) {
                 cam.fixed = Some(v);
@@ -4375,15 +4398,18 @@ impl App {
             let cam = self.render_camera();
             let mut settings = self.settings.clone();
             settings.engine = RenderEngine::from_u8(self.ui.render_engine);
-            // Prefer EE capture in the browser (offline Cycles stepping is desktop-oriented).
             if settings.engine == RenderEngine::Cycles {
-                settings.engine = RenderEngine::Eevee;
+                settings.cycles_samples = self.ui.render_samples.max(1);
+                if let Some(g) = self.gfx.as_mut() {
+                    g.renderer.sync_cycles(&self.doc.scene);
+                }
             }
             self.status(format!("Rendering image ({w}×{h})…"));
             let result = {
                 let g = self.gfx.as_mut().unwrap();
+                let present = settings.engine != RenderEngine::Cycles;
                 g.renderer
-                    .capture_with(&cam, &settings, w, h, false)
+                    .capture_with(&cam, &settings, w, h, present)
                     .map_err(|e| e.to_string())
             };
             match result {
@@ -4766,40 +4792,77 @@ impl App {
             let restore = self.doc.scene.animation.frame_current;
             let (w, h) = self.render_resolution();
             let mut settings = self.settings.clone();
-            settings.engine = RenderEngine::Eevee;
-            let frames: Vec<i32> = if end - start > 4 {
-                vec![start, (start + end) / 2, end]
-            } else {
-                (start..=end).collect()
-            };
-            let mut ok = 0u32;
-            for frame in frames {
+            settings.engine = RenderEngine::from_u8(self.ui.render_engine);
+            if settings.engine == RenderEngine::Cycles {
+                settings.cycles_samples = self.ui.render_samples.max(1).min(32);
+            }
+            let fps = self.doc.scene.animation.fps.max(1) as u16;
+            let total = (end - start + 1) as u32;
+            let mut frames_rgba: Vec<Vec<u8>> = Vec::with_capacity(total as usize);
+            for (frame_i, frame) in (start..=end).enumerate() {
                 self.doc.scene.animation.frame_current = frame;
                 self.apply_animation_frame();
                 if let Some(g) = self.gfx.as_mut() {
                     g.renderer
                         .set_scene(&self.doc.scene, &highlights(&self.doc));
+                    if settings.engine == RenderEngine::Cycles {
+                        g.renderer.sync_cycles(&self.doc.scene);
+                    }
                 }
                 let cam = self.render_camera();
                 let result = {
                     let g = self.gfx.as_mut().unwrap();
-                    g.renderer
-                        .capture_with(&cam, &settings, w, h, false)
-                        .map_err(|e| e.to_string())
+                    if settings.engine == RenderEngine::Cycles {
+                        g.renderer.capture_with(&cam, &settings, w, h, false)
+                    } else {
+                        g.renderer.capture_with(&cam, &settings, w, h, true)
+                    }
+                    .map_err(|e| e.to_string())
                 };
-                if let Ok(rgba) = result {
-                    if let Ok(png) = web_file::encode_png(&rgba, w, h) {
-                        let name = format!("frame_{frame:04}.png");
-                        web_file::download_bytes(&name, &png, "image/png");
-                        ok += 1;
+                match result {
+                    Ok(rgba) => {
+                        frames_rgba.push(rgba);
+                        let frac = (frame_i + 1) as f32 / total.max(1) as f32;
+                        self.set_render_progress(
+                            "Rendering animation",
+                            format!(
+                                "Frame {frame} / {end}  ({}/{}) · {w}×{h}",
+                                frame_i + 1,
+                                total
+                            ),
+                            frac,
+                        );
+                    }
+                    Err(e) => {
+                        self.clear_render_progress();
+                        self.status(format!("Animation render failed at frame {frame}: {e}"));
+                        self.doc.scene.animation.frame_current = restore;
+                        self.apply_animation_frame();
+                        return;
                     }
                 }
             }
             self.doc.scene.animation.frame_current = restore;
             self.apply_animation_frame();
+            self.clear_render_progress();
             self.status(format!(
-                "Downloaded {ok} animation frame(s) as PNG (full video encode is desktop-only)"
+                "Encoding animation ({total} frames · {w}×{h} · {fps} fps)…"
             ));
+            // Encode + download off the render loop so the UI can breathe.
+            wasm_bindgen_futures::spawn_local(async move {
+                match web_file::encode_animation_video(&frames_rgba, w, h, fps).await {
+                    Ok((name, mime, bytes)) => {
+                        web_file::download_bytes(&name, &bytes, &mime);
+                        log::info!(
+                            "BlendCraft: downloaded {name} ({} bytes, {total} frames)",
+                            bytes.len()
+                        );
+                    }
+                    Err(e) => {
+                        log::error!("BlendCraft: animation encode failed: {e}");
+                    }
+                }
+            });
             return;
         }
         #[cfg(not(target_arch = "wasm32"))]

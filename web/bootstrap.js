@@ -1,9 +1,26 @@
 // On-page log so problems are visible without opening DevTools.
+const wrap = document.createElement('div');
+wrap.id = 'bc-log-wrap';
+wrap.style.cssText = 'position:fixed;left:0;right:0;bottom:0;z-index:2147483647;display:flex;flex-direction:column;max-height:40vh;';
+const bar = document.createElement('div');
+bar.style.cssText = 'display:flex;align-items:center;justify-content:space-between;padding:4px 10px;' +
+  'background:rgba(20,22,28,.96);color:#9aa3b2;font:12px/1.3 system-ui,sans-serif;border-top:1px solid #2a2e38;';
+bar.innerHTML = '<span>BlendCraft log</span>';
+const closeBtn = document.createElement('button');
+closeBtn.type = 'button';
+closeBtn.textContent = 'Close';
+closeBtn.title = 'Hide this debug log';
+closeBtn.style.cssText = 'cursor:pointer;border:1px solid #3a4150;background:#1c212b;color:#e6ebf2;' +
+  'border-radius:4px;padding:2px 10px;font:12px system-ui,sans-serif;';
+closeBtn.onclick = () => { wrap.remove(); };
+bar.appendChild(closeBtn);
 const panel = document.createElement('pre');
 panel.id = 'bc-log';
-panel.style.cssText = 'position:fixed;left:0;right:0;bottom:0;max-height:40vh;overflow:auto;margin:0;padding:8px 12px;' +
-  'font:12px/1.4 ui-monospace,monospace;background:rgba(10,10,12,.92);color:#cfd4dc;z-index:2147483647;white-space:pre-wrap;';
-document.body.appendChild(panel);
+panel.style.cssText = 'margin:0;padding:8px 12px;overflow:auto;flex:1;' +
+  'font:12px/1.4 ui-monospace,monospace;background:rgba(10,10,12,.92);color:#cfd4dc;white-space:pre-wrap;';
+wrap.appendChild(bar);
+wrap.appendChild(panel);
+document.body.appendChild(wrap);
 const add = (kind, args) => {
   const text = args.map((a) => (a && a.stack) ? a.stack : (typeof a === 'object' ? JSON.stringify(a) : String(a))).join(' ');
   const line = document.createElement('div');
