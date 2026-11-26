@@ -110,19 +110,8 @@ pub fn encode_png(rgba: &[u8], width: u32, height: u32) -> Result<Vec<u8>, Strin
 }
 
 
-
-#[wasm_bindgen::prelude::wasm_bindgen(module = "./encode_video.js")]
-extern "C" {
-    #[wasm_bindgen::prelude::wasm_bindgen(js_name = encodeVideo)]
-    fn js_encode_video(
-        frames: js_sys::Array,
-        width: u32,
-        height: u32,
-        fps: u32,
-    ) -> js_sys::Promise;
-}
-
 /// Encode RGBA frames to a single video via browser APIs (prefers MP4).
+/// Uses `globalThis.__bc_encodeVideo` installed by `bootstrap.js`.
 /// Returns (filename, mime, bytes).
 pub async fn encode_animation_video(
     frames: &[Vec<u8>],
@@ -134,13 +123,31 @@ pub async fn encode_animation_video(
     use wasm_bindgen::JsCast;
     use wasm_bindgen_futures::JsFuture;
 
+    let global = js_sys::global();
+    let encode = Reflect::get(&global, &"__bc_encodeVideo".into())
+        .map_err(|_| "__bc_encodeVideo missing — encode_video.js failed to load".to_string())?;
+    if encode.is_undefined() || encode.is_null() {
+        return Err("__bc_encodeVideo missing — encode_video.js failed to load".into());
+    }
+    let encode_fn = encode
+        .dyn_into::<js_sys::Function>()
+        .map_err(|_| "__bc_encodeVideo is not a function".to_string())?;
+
     let frames_js = Array::new();
     for f in frames {
         frames_js.push(&Uint8Array::from(f.as_slice()));
     }
 
-    let promise = js_encode_video(frames_js, width, height, fps as u32);
-    let result = JsFuture::from(promise)
+    let call = encode_fn
+        .call4(
+            &JsValue::UNDEFINED,
+            &frames_js,
+            &JsValue::from(width),
+            &JsValue::from(height),
+            &JsValue::from(fps as u32),
+        )
+        .map_err(|e| format!("encodeVideo call failed: {e:?}"))?;
+    let result = JsFuture::from(js_sys::Promise::resolve(&call))
         .await
         .map_err(|e| format!("encodeVideo rejected: {e:?}"))?;
 

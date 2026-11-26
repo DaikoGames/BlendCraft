@@ -65,7 +65,13 @@ if (!webgpu && !webgl2) {
   fail('Neither WebGPU nor WebGL2 is available. Enable hardware acceleration in your browser settings and update your graphics driver.');
 } else {
   try {
-    const { default: init } = await import('./forge_web.js');
+    try {
+    const videoMod = await import('./encode_video.js');
+    globalThis.__bc_encodeVideo = videoMod.encodeVideo;
+  } catch (e) {
+    add('warn', ['encode_video.js not loaded:', e]);
+  }
+  const { default: init } = await import('./forge_web.js');
     await init();
     add('info', ['wasm module started']);
     setTimeout(() => loading?.remove(), 1500);
