@@ -181,21 +181,27 @@ jobs:
         uses: vmactions/netbsd-vm@v1
         with:
           usesh: true
+          # NetBSD pkgsrc names vary by version; tolerate missing packages.
           prepare: |
             pkgin -y update || true
-            pkgin -y install rust mozilla-rootcerts-openssl gtk3 libX11 libxkbcommon pkgconf || true
-            pkgin -y install rust gtk3+ libxkbcommon || true
+            pkgin -y install mozilla-rootcerts-openssl ca-certificates curl || true
+            mozilla-rootcerts install || true
+            pkgin -y install pkgconf gmake || true
+            pkgin -y install libX11 libXcursor libXrandr libXi libxkbcommon || true
+            pkgin -y install gtk3 || pkgin -y install gtk3+ || true
           run: |
-            set -e
             export PATH="$HOME/.cargo/bin:/usr/pkg/bin:/usr/local/bin:$PATH"
-            if ! command -v cargo >/dev/null 2>&1; then
-              curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
-              . "$HOME/.cargo/env"
+            # Always prefer rustup — pkgsrc rust is often too old / incomplete for wgpu.
+            if ! command -v rustup >/dev/null 2>&1; then
+              curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
             fi
-            if ! cargo build --release -p forge-desktop; then
-              cargo build --release -p forge-desktop --no-default-features
-            fi
+            . "$HOME/.cargo/env"
+            rustc -vV
+            cargo -vV
+            # No scripting on experimental BSD (fewer deps, avoids RustPython).
+            cargo build --release -p forge-desktop --no-default-features
             mkdir -p dist
+            test -f target/release/forge3d
             cp target/release/forge3d dist/forge3d-x86_64-unknown-netbsd
 
       - name: Build (DragonFlyBSD)
@@ -225,19 +231,24 @@ jobs:
         with:
           usesh: true
           prepare: |
-            pkg install -q developer/gcc13 ooce/developer/rust system/header || true
-            pkg install -q developer/gcc ooce/developer/rust || true
+            pkg refresh || true
+            pkg install -q system/header developer/library/lint || true
+            pkg install -q developer/gcc13 || pkg install -q developer/gcc || true
+            pkg install -q ooce/developer/rust || true
+            pkg install -q library/libx11 library/libxkbcommon || true
           run: |
-            set -e
-            export PATH="/opt/ooce/bin:$HOME/.cargo/bin:/usr/bin:$PATH"
-            if ! command -v cargo >/dev/null 2>&1; then
-              curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
-              . "$HOME/.cargo/env"
+            export PATH="/opt/ooce/bin:$HOME/.cargo/bin:/usr/gcc/13/bin:/usr/gcc/10/bin:/usr/bin:$PATH"
+            # OmniOS package rust is often incomplete; use rustup.
+            if ! command -v rustup >/dev/null 2>&1; then
+              curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
             fi
-            if ! cargo build --release -p forge-desktop; then
-              cargo build --release -p forge-desktop --no-default-features
-            fi
+            . "$HOME/.cargo/env"
+            rustc -vV
+            cargo -vV
+            # Illumos + full GUI stack is fragile in CI; build without scripting first.
+            cargo build --release -p forge-desktop --no-default-features
             mkdir -p dist
+            test -f target/release/forge3d
             cp target/release/forge3d dist/forge3d-x86_64-unknown-illumos
 
       - uses: actions/upload-artifact@v4
