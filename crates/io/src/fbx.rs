@@ -1226,21 +1226,10 @@ fn convert_doc(doc: &FbxDoc, resolver: TexResolver) -> Result<Scene> {
             let model = &doc.models[&mid];
             let mut bone = forge_core::Bone::new(model.name.clone(), head, tail);
             bone.parent = parents.get(&mid).and_then(|p| id_to_bone.get(p)).copied();
-            // Absolute-local TRS (same contract as glTF): animation keys replace pose_* directly.
-            let loc = [
-                model.translation[0] * u,
-                model.translation[1] * u,
-                model.translation[2] * u,
-            ];
+            // Delta pose mode: pose_* is offset from rest (head/tail). Avoids absolute
+            // local TRS fighting hierarchical rest and stretching the skin at frame 0.
             let rot = euler_deg_to_quat(model.rotation_deg, model.rotation_order);
-            let scl = model.scale;
             bone.rest_orientation = Some(rot.to_array());
-            bone.rest_local_loc = Some(loc);
-            bone.rest_local_rot = Some(rot.to_array());
-            bone.rest_local_scale = Some(scl);
-            bone.pose_loc = loc;
-            bone.pose_rot = rot.to_array();
-            bone.pose_scale = scl;
             arm.bones.push(bone);
         }
         if !arm.bones.is_empty() {
@@ -1264,7 +1253,7 @@ fn convert_doc(doc: &FbxDoc, resolver: TexResolver) -> Result<Scene> {
         bail!("FBX contained no usable mesh or armature objects");
     }
     scene.textures = Arc::new(textures);
-    normalize_fbx_scene_scale(&mut scene);
+    // normalize_fbx_scene_scale disabled: auto 0.01 shrink desynced mesh vs armature.
     Ok(scene)
 }
 
@@ -1560,22 +1549,37 @@ fn sample_fbx_animation(
                 let lv = loc.get(&bone).copied().unwrap_or([None; 3]);
                 let rv = rot.get(&bone).copied().unwrap_or([None; 3]);
                 let sv = scl.get(&bone).copied().unwrap_or([None; 3]);
-                let translation = Vec3::new(
+                // Absolute Lcl from curves → delta from rest so delta-pose bones work.
+                let abs_t = Vec3::new(
                     lv[0].unwrap_or(def_t[0]) * doc.unit_to_meters,
                     lv[1].unwrap_or(def_t[1]) * doc.unit_to_meters,
                     lv[2].unwrap_or(def_t[2]) * doc.unit_to_meters,
                 );
+                let rest_t = Vec3::new(
+                    def_t[0] * doc.unit_to_meters,
+                    def_t[1] * doc.unit_to_meters,
+                    def_t[2] * doc.unit_to_meters,
+                );
+                let translation = abs_t - rest_t;
                 let euler = [
                     rv[0].unwrap_or(def_r[0]),
                     rv[1].unwrap_or(def_r[1]),
                     rv[2].unwrap_or(def_r[2]),
                 ];
                 let order = model.map(|m| m.rotation_order).unwrap_or(0);
-                let rotation = euler_deg_to_quat(euler, order);
-                let scale = Vec3::new(
+                let abs_r = euler_deg_to_quat(euler, order);
+                let rest_r = euler_deg_to_quat(def_r, order);
+                let rotation = (rest_r.inverse() * abs_r).normalize();
+                let abs_s = Vec3::new(
                     sv[0].unwrap_or(def_s[0]),
                     sv[1].unwrap_or(def_s[1]),
                     sv[2].unwrap_or(def_s[2]),
+                );
+                let rest_s = Vec3::new(def_s[0], def_s[1], def_s[2]);
+                let scale = Vec3::new(
+                    if rest_s.x.abs() > 1e-8 { abs_s.x / rest_s.x } else { abs_s.x },
+                    if rest_s.y.abs() > 1e-8 { abs_s.y / rest_s.y } else { abs_s.y },
+                    if rest_s.z.abs() > 1e-8 { abs_s.z / rest_s.z } else { abs_s.z },
                 );
                 let track = arm_map.entry(bone).or_default();
                 track.insert_or_merge(frame, Some(translation), Some(rotation), Some(scale));
@@ -1870,34 +1874,24 @@ fn apply_fbx_skins(
             (vec![[0, 0, 0, 0]; nv], vec![[1.0, 0.0, 0.0, 0.0]; nv])
         };
 
-        // Mesh must sit at origin in bind pose (same as glTF). Skinning provides placement.
-        obj.translation = Vec3::ZERO;
-        obj.rotation = Quat::IDENTITY;
-        obj.scale = Vec3::ONE;
+        // Keep the imported mesh transform so the bind-pose silhouette matches the file /
+        // GLB. Empty IBM keeps LBS at identity while pose is rest, so this does not stretch.
         obj.parent = Some(arm_id);
 
         // Rebuild rest from current (undeformed) mesh vertices.
         let rest_p: Vec<[f32; 3]> = obj.mesh.vertices.iter().map(|v| v.position).collect();
         let rest_n: Vec<[f32; 3]> = obj.mesh.vertices.iter().map(|v| v.normal).collect();
 
-        // Only keep IBM when every used bone has a sensible matrix; otherwise the
-        // approximate rest×pose path keeps the mesh from stretching at rest.
-        let ibm_out = if has_any_ibm {
-            inverse_binds
-                .iter()
-                .map(|m| m.to_cols_array())
-                .collect::<Vec<_>>()
-        } else {
-            Vec::new()
-        };
-
+        // Never use FBX Cluster Transform as IBM here: wrong layout/space is what
+        // stretched meshes into spaghetti. Empty IBM → engine uses pose×rest⁻¹
+        // which is identity at rest (undeformed mesh). Weights still drive pose.
         obj.skin = Some(SkinBinding {
             armature_id: arm_id,
             joints: j_out,
             weights: w_out,
             rest_positions: rest_p,
             rest_normals: rest_n,
-            inverse_binds: ibm_out,
+            inverse_binds: Vec::new(),
         });
     }
     let _ = parents;

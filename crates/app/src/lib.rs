@@ -2842,10 +2842,16 @@ impl App {
         #[cfg(target_arch = "wasm32")]
         {
             let only = if selected_only {
-                let s: std::collections::BTreeSet<u64> =
-                    self.doc.scene.objects.iter().filter(|o| o.selected).map(|o| o.id).collect();
+                let s: std::collections::BTreeSet<u64> = self
+                    .doc
+                    .scene
+                    .objects
+                    .iter()
+                    .filter(|o| self.doc.selection.contains(&o.id))
+                    .map(|o| o.id)
+                    .collect();
                 if s.is_empty() {
-                    self.status("Nothing selected to export".into());
+                    self.status("Nothing selected to export");
                     return;
                 }
                 Some(s)
@@ -2857,14 +2863,14 @@ impl App {
                 "glb" => match forge_io::export_glb_to_bytes(&self.doc.scene, only_ref) {
                     Ok(bytes) => {
                         web_file::download_bytes("model.glb", &bytes, "model/gltf-binary");
-                        self.status("Downloaded model.glb".into());
+                        self.status("Downloaded model.glb");
                     }
                     Err(e) => self.status(format!("Export failed: {e:#}")),
                 },
                 "fbx" => match forge_io::export_fbx_bytes(&self.doc.scene, only_ref) {
                     Ok(bytes) => {
                         web_file::download_bytes("model.fbx", &bytes, "application/octet-stream");
-                        self.status("Downloaded model.fbx".into());
+                        self.status("Downloaded model.fbx");
                     }
                     Err(e) => self.status(format!("Export failed: {e:#}")),
                 },
@@ -2924,7 +2930,7 @@ impl App {
                     if self.confirm_discard() {
                         self.pending_pick_kind = "open";
                         web_file::pick_file(".forge,application/octet-stream", self.pending_pick.clone());
-                        self.status("Choose a .forge project…".into());
+                        self.status("Choose a .forge project…");
                     }
                 }
                 #[cfg(not(target_arch = "wasm32"))]
@@ -2966,7 +2972,7 @@ impl App {
                         ".fbx,.glb,.gltf,.forge,model/gltf-binary,application/octet-stream",
                         self.pending_pick.clone(),
                     );
-                    self.status("Choose a model to import…".into());
+                    self.status("Choose a model to import…");
                 }
                 #[cfg(not(target_arch = "wasm32"))]
                 {
@@ -4602,7 +4608,7 @@ impl App {
             match web_file::encode_png(&rgba, width, height) {
                 Ok(png) => {
                     web_file::download_bytes("render.png", &png, "image/png");
-                    self.status("Downloaded render.png".into());
+                    self.status("Downloaded render.png");
                 }
                 Err(e) => self.status(format!("PNG encode failed: {e}")),
             }

@@ -8338,7 +8338,7 @@ fn draw_geometry_nodes_editor(
                     points,
                     false,
                     egui::Color32::TRANSPARENT,
-                    egui::Stroke::new(2.0, egui::Color32::LIGHT_BLUE),
+                    egui::Stroke::new(2.0_f32, egui::Color32::LIGHT_BLUE),
                 ));
             }
         }
@@ -8968,7 +8968,7 @@ fn draw_compositing_editor(
                 points,
                 false,
                 egui::Color32::TRANSPARENT,
-                egui::Stroke::new(2.0, egui::Color32::LIGHT_BLUE),
+                egui::Stroke::new(2.0_f32, egui::Color32::LIGHT_BLUE),
             ));
         }
     }
