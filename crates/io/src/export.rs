@@ -130,8 +130,7 @@ fn add_mesh(b: &mut Builder, o: &Object, nmat: usize) -> Value {
 }
 
 /// `only`: if Some, only objects whose id is in the set are exported.
-#[cfg(not(target_arch = "wasm32"))]
-pub fn export_glb(scene: &Scene, path: &Path, only: Option<&BTreeSet<u64>>) -> Result<()> {
+pub fn export_glb_to_bytes(scene: &Scene, only: Option<&BTreeSet<u64>>) -> Result<Vec<u8>> {
     let mut b = Builder {
         bin: Vec::new(),
         views: Vec::new(),
@@ -438,6 +437,13 @@ pub fn export_glb(scene: &Scene, path: &Path, only: Option<&BTreeSet<u64>>) -> R
     out.extend_from_slice(&(b.bin.len() as u32).to_le_bytes());
     out.extend_from_slice(&0x004E4942u32.to_le_bytes());
     out.extend_from_slice(&b.bin);
+    Ok(out)
+}
+
+/// Write a GLB file to disk.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn export_glb(scene: &Scene, path: &Path, only: Option<&BTreeSet<u64>>) -> Result<()> {
+    let out = export_glb_to_bytes(scene, only)?;
     std::fs::write(path, out).with_context(|| format!("writing {}", path.display()))?;
     Ok(())
 }
@@ -641,10 +647,12 @@ pub fn export_obj(scene: &Scene, path: &Path, only: Option<&BTreeSet<u64>>) -> R
 }
 
 #[cfg(target_arch = "wasm32")]
-pub fn export_glb(_scene: &Scene, _path: &Path, _only: Option<&BTreeSet<u64>>) -> Result<()> {
-    anyhow::bail!("GLB export is not available on WebAssembly")
+pub fn export_glb(scene: &Scene, _path: &Path, only: Option<&BTreeSet<u64>>) -> Result<()> {
+    // Path is unused on wasm; app layer downloads `export_glb_to_bytes` instead.
+    let _ = export_glb_to_bytes(scene, only)?;
+    Ok(())
 }
 #[cfg(target_arch = "wasm32")]
 pub fn export_obj(_scene: &Scene, _path: &Path, _only: Option<&BTreeSet<u64>>) -> Result<()> {
-    anyhow::bail!("OBJ export is not available on WebAssembly")
+    anyhow::bail!("OBJ export on WebAssembly uses the in-app download path")
 }

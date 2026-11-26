@@ -1,4 +1,6 @@
 mod fonts_io;
+#[cfg(target_arch = "wasm32")]
+mod web_file;
 
 /// Load locally cached and system fonts on native platforms. No network access is used.
 pub fn load_cached_fonts() {
@@ -139,6 +141,12 @@ pub struct App {
     web_window: Option<Arc<Window>>,
     #[cfg(target_arch = "wasm32")]
     gpu_init_started: bool,
+    /// Browser file-picker result (Open / Import).
+    #[cfg(target_arch = "wasm32")]
+    pending_pick: web_file::PendingPick,
+    /// `"open"` or `"import"` — how to interpret `pending_pick`.
+    #[cfg(target_arch = "wasm32")]
+    pending_pick_kind: &'static str,
     egui_ctx: egui::Context,
     doc: Document,
     camera: OrbitCamera,
@@ -368,6 +376,10 @@ impl App {
             web_window: None,
             #[cfg(target_arch = "wasm32")]
             gpu_init_started: false,
+            #[cfg(target_arch = "wasm32")]
+            pending_pick: web_file::new_pending(),
+            #[cfg(target_arch = "wasm32")]
+            pending_pick_kind: "open",
             egui_ctx: egui::Context::default(),
             doc: Document::new(),
             camera: OrbitCamera::default(),
@@ -2746,7 +2758,25 @@ impl App {
         #[cfg(target_arch = "wasm32")]
         {
             let _ = save_as;
-            self.status("Save is not available on WebAssembly yet".to_string());
+            self.doc.sync_edit_mesh();
+            let was_weight = self.doc.weight_paint_mode;
+            if was_weight {
+                self.doc.exit_weight_paint_mode();
+            }
+            match project::to_bytes(&self.doc.scene) {
+                Ok(bytes) => {
+                    web_file::download_bytes(
+                        "untitled.forge",
+                        &bytes,
+                        "application/octet-stream",
+                    );
+                    self.status("Downloaded untitled.forge".to_string());
+                }
+                Err(e) => self.status(format!("Save failed: {e}")),
+            }
+            if was_weight {
+                self.doc.enter_weight_paint_mode();
+            }
             return;
         }
         #[cfg(not(target_arch = "wasm32"))]
@@ -2811,8 +2841,35 @@ impl App {
     fn export(&mut self, format: &str, selected_only: bool) {
         #[cfg(target_arch = "wasm32")]
         {
-            let _ = (format, selected_only);
-            self.status("Export is not available on WebAssembly yet".to_string());
+            let only = if selected_only {
+                let s: std::collections::BTreeSet<u64> =
+                    self.doc.scene.objects.iter().filter(|o| o.selected).map(|o| o.id).collect();
+                if s.is_empty() {
+                    self.status("Nothing selected to export".into());
+                    return;
+                }
+                Some(s)
+            } else {
+                None
+            };
+            let only_ref = only.as_ref();
+            match format {
+                "glb" => match forge_io::export_glb_to_bytes(&self.doc.scene, only_ref) {
+                    Ok(bytes) => {
+                        web_file::download_bytes("model.glb", &bytes, "model/gltf-binary");
+                        self.status("Downloaded model.glb".into());
+                    }
+                    Err(e) => self.status(format!("Export failed: {e:#}")),
+                },
+                "fbx" => match forge_io::export_fbx_bytes(&self.doc.scene, only_ref) {
+                    Ok(bytes) => {
+                        web_file::download_bytes("model.fbx", &bytes, "application/octet-stream");
+                        self.status("Downloaded model.fbx".into());
+                    }
+                    Err(e) => self.status(format!("Export failed: {e:#}")),
+                },
+                other => self.status(format!("Browser export supports GLB/FBX (not {other})")),
+            }
             return;
         }
         #[cfg(not(target_arch = "wasm32"))]
@@ -2864,7 +2921,11 @@ impl App {
             A::Open => {
                 #[cfg(target_arch = "wasm32")]
                 {
-                    self.status("Open file is not available on WebAssembly yet".to_string());
+                    if self.confirm_discard() {
+                        self.pending_pick_kind = "open";
+                        web_file::pick_file(".forge,application/octet-stream", self.pending_pick.clone());
+                        self.status("Choose a .forge project…".into());
+                    }
                 }
                 #[cfg(not(target_arch = "wasm32"))]
                 {
@@ -2900,7 +2961,12 @@ impl App {
             A::Import => {
                 #[cfg(target_arch = "wasm32")]
                 {
-                    self.status("Import is not available on WebAssembly yet".to_string());
+                    self.pending_pick_kind = "import";
+                    web_file::pick_file(
+                        ".fbx,.glb,.gltf,.forge,model/gltf-binary,application/octet-stream",
+                        self.pending_pick.clone(),
+                    );
+                    self.status("Choose a model to import…".into());
                 }
                 #[cfg(not(target_arch = "wasm32"))]
                 {
@@ -4289,7 +4355,55 @@ impl App {
     fn render_image(&mut self) {
         #[cfg(target_arch = "wasm32")]
         {
-            self.status("Render Image is not available on WebAssembly yet".to_string());
+            if self.gfx.is_none() {
+                self.status("Renderer not ready");
+                return;
+            }
+            let (w, h) = self.render_resolution();
+            self.apply_animation_frame();
+            if let Some(g) = self.gfx.as_mut() {
+                g.renderer
+                    .set_scene(&self.doc.scene, &highlights(&self.doc));
+            }
+            self.uploaded = self.doc.version;
+            let cam = self.render_camera();
+            let mut settings = self.settings.clone();
+            settings.engine = RenderEngine::from_u8(self.ui.render_engine);
+            // Prefer EE capture in the browser (offline Cycles stepping is desktop-oriented).
+            if settings.engine == RenderEngine::Cycles {
+                settings.engine = RenderEngine::Eevee;
+            }
+            self.status(format!("Rendering image ({w}×{h})…"));
+            let result = {
+                let g = self.gfx.as_mut().unwrap();
+                g.renderer
+                    .capture_with(&cam, &settings, w, h, false)
+                    .map_err(|e| e.to_string())
+            };
+            match result {
+                Ok(rgba) => {
+                    if rgba.len() < (w as usize).saturating_mul(h as usize).saturating_mul(4) {
+                        self.status("Render failed: incomplete pixel buffer");
+                        return;
+                    }
+                    self.ui.compositor_render_rgba = rgba.clone();
+                    self.ui.compositor_render_width = w;
+                    self.ui.compositor_render_height = h;
+                    self.ui.compositor_render_serial =
+                        self.ui.compositor_render_serial.wrapping_add(1).max(1);
+                    match web_file::encode_png(&rgba, w, h) {
+                        Ok(png) => {
+                            web_file::download_bytes("render.png", &png, "image/png");
+                            self.status(format!("Downloaded render.png ({w}×{h})"));
+                            self.ui.render_done_message = Some(format!(
+                                "Render finished.\n\nDownloaded render.png\n{w} × {h}"
+                            ));
+                        }
+                        Err(e) => self.status(format!("PNG encode failed: {e}")),
+                    }
+                }
+                Err(e) => self.status(format!("Render failed: {e}")),
+            }
             return;
         }
         #[cfg(not(target_arch = "wasm32"))]
@@ -4415,7 +4529,8 @@ impl App {
     fn render_compositor(&mut self) {
         #[cfg(target_arch = "wasm32")]
         {
-            self.status("Compositor rendering is not available on WebAssembly yet");
+            // Same path as desktop compositor render → then user can Save Output (download).
+            self.render_image();
         }
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -4460,7 +4575,38 @@ impl App {
     fn save_compositor(&mut self) {
         #[cfg(target_arch = "wasm32")]
         {
-            self.status("Saving compositor output is not available on WebAssembly yet");
+            let (width, height) = (
+                self.ui.compositor_render_width,
+                self.ui.compositor_render_height,
+            );
+            if self.ui.compositor_render_rgba.is_empty() || width == 0 || height == 0 {
+                self.status("Render an image before saving the compositor output");
+                return;
+            }
+            let rgba = self
+                .doc
+                .scene
+                .compositor_graph
+                .evaluate_composite(width, height, &self.ui.compositor_render_rgba)
+                .or_else(|| {
+                    if !self.ui.compositor_output_rgba.is_empty() {
+                        Some(self.ui.compositor_output_rgba.clone())
+                    } else {
+                        Some(self.ui.compositor_render_rgba.clone())
+                    }
+                });
+            let Some(rgba) = rgba else {
+                self.status("Compositor graph produced no output");
+                return;
+            };
+            match web_file::encode_png(&rgba, width, height) {
+                Ok(png) => {
+                    web_file::download_bytes("render.png", &png, "image/png");
+                    self.status("Downloaded render.png".into());
+                }
+                Err(e) => self.status(format!("PNG encode failed: {e}")),
+            }
+            return;
         }
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -4602,7 +4748,52 @@ impl App {
     fn render_animation(&mut self) {
         #[cfg(target_arch = "wasm32")]
         {
-            self.status("Render Animation is not available on WebAssembly yet".to_string());
+            // Full video encode needs desktop forge-video. In the browser we render the
+            // current frame range as individual PNG downloads (first frame + last frame
+            // if the range is large) so users still get an offline sequence path.
+            if self.gfx.is_none() {
+                self.status("Renderer not ready");
+                return;
+            }
+            let start = self.doc.scene.animation.frame_start;
+            let end = self.doc.scene.animation.frame_end.max(start);
+            let restore = self.doc.scene.animation.frame_current;
+            let (w, h) = self.render_resolution();
+            let mut settings = self.settings.clone();
+            settings.engine = RenderEngine::Eevee;
+            let frames: Vec<i32> = if end - start > 4 {
+                vec![start, (start + end) / 2, end]
+            } else {
+                (start..=end).collect()
+            };
+            let mut ok = 0u32;
+            for frame in frames {
+                self.doc.scene.animation.frame_current = frame;
+                self.apply_animation_frame();
+                if let Some(g) = self.gfx.as_mut() {
+                    g.renderer
+                        .set_scene(&self.doc.scene, &highlights(&self.doc));
+                }
+                let cam = self.render_camera();
+                let result = {
+                    let g = self.gfx.as_mut().unwrap();
+                    g.renderer
+                        .capture_with(&cam, &settings, w, h, false)
+                        .map_err(|e| e.to_string())
+                };
+                if let Ok(rgba) = result {
+                    if let Ok(png) = web_file::encode_png(&rgba, w, h) {
+                        let name = format!("frame_{frame:04}.png");
+                        web_file::download_bytes(&name, &png, "image/png");
+                        ok += 1;
+                    }
+                }
+            }
+            self.doc.scene.animation.frame_current = restore;
+            self.apply_animation_frame();
+            self.status(format!(
+                "Downloaded {ok} animation frame(s) as PNG (full video encode is desktop-only)"
+            ));
             return;
         }
         #[cfg(not(target_arch = "wasm32"))]
@@ -5798,6 +5989,57 @@ impl App {
 
     /// WebAssembly: pick up the renderer once the async WebGPU/WebGL init finished.
     #[cfg(target_arch = "wasm32")]
+    fn poll_pending_pick(&mut self) {
+        let picked = self.pending_pick.borrow_mut().take();
+        let Some(picked) = picked else { return };
+        let name = picked.name;
+        let bytes = picked.bytes;
+        let lower = name.to_ascii_lowercase();
+        match self.pending_pick_kind {
+            "open" => {
+                match project::from_bytes(&bytes) {
+                    Ok(scene) => {
+                        self.doc = Document::from_scene(scene, None);
+                        self.physics_runtime = None;
+                        self.reset_view_state();
+                        self.frame(false);
+                        self.status(format!("Opened {name}"));
+                    }
+                    Err(e) => self.status(format!("Open failed: {e}")),
+                }
+            }
+            _ => {
+                // import by extension
+                let res = if lower.ends_with(".fbx") {
+                    forge_io::load_fbx_bytes(&bytes)
+                } else if lower.ends_with(".glb") || lower.ends_with(".gltf") {
+                    forge_io::load_gltf_bytes(&bytes)
+                } else if lower.ends_with(".forge") {
+                    project::from_bytes(&bytes).map_err(|e| e.into())
+                } else {
+                    Err(anyhow::anyhow!("Unsupported type for browser import: {name}"))
+                };
+                match res {
+                    Ok(scene) => {
+                        let n = scene.objects.len();
+                        let has_skin = scene.objects.iter().any(|o| o.skin.is_some());
+                        self.doc.import_scene(scene);
+                        if has_skin {
+                            self.doc.apply_all_skinning();
+                        }
+                        self.frame(false);
+                        self.status(format!("Imported {n} object(s) from {name}"));
+                    }
+                    Err(e) => self.status(format!("Import failed: {e:#}")),
+                }
+            }
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn poll_pending_pick(&mut self) {}
+
+    #[cfg(target_arch = "wasm32")]
     fn poll_pending_gpu(&mut self) {
         if self.gfx.is_some() {
             return;
@@ -5821,6 +6063,9 @@ impl App {
             None => {}
         }
     }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn poll_pending_gpu(&mut self) {}
 }
 
 impl ApplicationHandler for App {
@@ -5885,6 +6130,7 @@ impl ApplicationHandler for App {
         #[cfg(target_arch = "wasm32")]
         {
             self.poll_pending_gpu();
+            self.poll_pending_pick();
         }
         let mut consumed = false;
         if let Some(g) = self.gfx.as_mut() {

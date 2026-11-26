@@ -1371,6 +1371,7 @@ checksum = "aa9a19cbb55df58761df49b23516a86d432839add4af60fc256da840f66ed35b"
 name = "forge-app"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "egui",
  "egui-wgpu",
  "egui-winit",
@@ -1380,6 +1381,7 @@ dependencies = [
  "forge-video",
  "glam",
  "image",
+ "js-sys",
  "log",
  "pollster 0.3.0",
  "rfd",
@@ -1388,30 +1390,10 @@ dependencies = [
  "rustpython-vm",
  "serde",
  "serde_json",
- "web-time",
- "winit",
-]
-
-[[package]]
-name = "forge-desktop"
-version = "0.1.0"
-dependencies = [
- "env_logger",
- "forge-app",
- "log",
- "winit",
- "winresource",
-]
-
-[[package]]
-name = "forge-web"
-version = "0.1.0"
-dependencies = [
- "console_error_panic_hook",
- "console_log",
- "forge-app",
- "log",
  "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
+ "web-time",
  "winit",
 ]
 
@@ -1428,6 +1410,18 @@ dependencies = [
  "rapier3d",
  "serde",
  "ttf-parser",
+ "web-time",
+]
+
+[[package]]
+name = "forge-desktop"
+version = "0.1.0"
+dependencies = [
+ "env_logger",
+ "forge-app",
+ "log",
+ "winit",
+ "winresource",
 ]
 
 [[package]]
@@ -1444,7 +1438,6 @@ dependencies = [
  "image",
  "serde_json",
  "tobj",
- "ufbx",
 ]
 
 [[package]]
@@ -1456,8 +1449,10 @@ dependencies = [
  "forge-core",
  "glam",
  "half 2.7.1",
+ "js-sys",
  "log",
  "naga",
+ "web-time",
  "wgpu",
 ]
 
@@ -1466,6 +1461,18 @@ name = "forge-video"
 version = "0.1.0"
 dependencies = [
  "image",
+]
+
+[[package]]
+name = "forge-web"
+version = "0.1.0"
+dependencies = [
+ "console_error_panic_hook",
+ "console_log",
+ "forge-app",
+ "log",
+ "wasm-bindgen",
+ "winit",
 ]
 
 [[package]]
@@ -5010,15 +5017,6 @@ dependencies = [
  "memoffset",
  "tempfile",
  "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "ufbx"
-version = "0.11.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "260522f1eb74139f0e78b29dd82a58e5437d728c5498024a39e5af7282694240"
-dependencies = [
- "cc",
 ]
 
 [[package]]

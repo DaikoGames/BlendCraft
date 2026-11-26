@@ -28,6 +28,13 @@ web-time = "1"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen-futures.workspace = true
+wasm-bindgen.workspace = true
+js-sys = "0.3"
+web-sys = { workspace = true, features = [
+  "Window", "Document", "Element", "HtmlElement",
+  "HtmlInputElement", "FileList", "File", "Blob",
+  "BlobPropertyBag", "Url", "FileReader", "Event",
+] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 pollster.workspace = true

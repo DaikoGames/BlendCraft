@@ -12,8 +12,6 @@ use std::sync::Arc;
 mod alembic;
 mod export;
 mod fbx;
-#[cfg(not(target_arch = "wasm32"))]
-mod fbx_ufbx;
 mod obj;
 mod usd;
 #[cfg(not(target_arch = "wasm32"))]
@@ -22,8 +20,8 @@ pub use alembic::{
     build_alembic_bytes, export_alembic, load_alembic, parse_alembic_bytes, AlembicImport,
     ImportedObject,
 };
-pub use export::{export_glb, export_obj};
-pub use fbx::{export_fbx, load_fbx, load_fbx_bytes, load_fbx_bytes_with};
+pub use export::{export_glb, export_glb_to_bytes, export_obj};
+pub use fbx::{export_fbx, export_fbx_bytes, load_fbx, load_fbx_bytes, load_fbx_bytes_with};
 pub use obj::load_obj;
 pub use usd::{build_usda_string, export_usda};
 #[cfg(not(target_arch = "wasm32"))]
@@ -125,6 +123,22 @@ pub(crate) fn find_texture_file(dir: &Path, model_stem: &str, name: &str) -> Opt
 pub fn load_gltf(path: &Path) -> Result<Scene> {
     let (doc, buffers, images) =
         gltf::import(path).with_context(|| format!("reading {}", path.display()))?;
+    scene_from_gltf(doc, buffers, images, Some(path))
+}
+
+/// Load glTF / GLB from memory (browser file picker).
+pub fn load_gltf_bytes(bytes: &[u8]) -> Result<Scene> {
+    let (doc, buffers, images) =
+        gltf::import_slice(bytes).context("parsing glTF/GLB bytes")?;
+    scene_from_gltf(doc, buffers, images, None)
+}
+
+fn scene_from_gltf(
+    doc: gltf::Document,
+    buffers: Vec<gltf::buffer::Data>,
+    images: Vec<gltf::image::Data>,
+    source_path: Option<&Path>,
+) -> Result<Scene> {
     let mut scene = Scene::default();
     scene.materials = doc.materials().map(|m| convert_material(&m)).collect();
     // Decode every image. glTF embeds PNG/JPEG in the GLB binary (or as URIs).
@@ -148,15 +162,22 @@ pub fn load_gltf(path: &Path) -> Result<Scene> {
                     }
                 }
                 gltf::image::Source::Uri { uri, .. } => {
-                    if let Some(bytes) = find_texture_file(
-                        path.parent().unwrap_or_else(|| Path::new(".")),
-                        path.file_stem().and_then(|s| s.to_str()).unwrap_or(""),
-                        uri,
-                    ) {
-                        if let Some(decoded) = decode_image_bytes(&bytes, name) {
-                            tex = decoded;
+                    // External URI textures only resolve on desktop when loading from a path.
+                    // Browser imports rely on embedded buffer views in the GLB.
+                    #[cfg(not(target_arch = "wasm32"))]
+                    if let Some(path) = source_path {
+                        if let Some(bytes) = find_texture_file(
+                            path.parent().unwrap_or_else(|| Path::new(".")),
+                            path.file_stem().and_then(|s| s.to_str()).unwrap_or(""),
+                            uri,
+                        ) {
+                            if let Some(decoded) = decode_image_bytes(&bytes, name) {
+                                tex = decoded;
+                            }
                         }
                     }
+                    #[cfg(target_arch = "wasm32")]
+                    let _ = (uri, source_path);
                 }
             }
         }

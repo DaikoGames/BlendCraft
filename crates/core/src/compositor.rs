@@ -851,9 +851,11 @@ mod tests {
     fn graph_applies_effect_and_rejects_cycles() {
         let mut graph = CompositorGraph::default();
         let effect = graph.add_node(CompositorNodeKind::Invert, [220.0, 100.0]);
-        graph.links.retain(|link| link.to_node != 2);
+        // Rewire both Composite (2) and Viewer (3); evaluate() prefers Viewer.
+        graph.links.retain(|link| link.to_node != 2 && link.to_node != 3);
         assert!(graph.connect(1, effect));
         assert!(graph.connect(effect, 2));
+        assert!(graph.connect(effect, 3));
         assert_eq!(
             graph.evaluate(1, 1, &[10, 20, 30, 255]),
             Some(vec![245, 235, 225, 255])

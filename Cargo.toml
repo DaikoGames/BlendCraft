@@ -44,7 +44,16 @@ web-sys = { version = "0.3", features = [
   "Document",
   "Element",
   "HtmlCanvasElement",
+  "HtmlElement",
+  "HtmlInputElement",
   "Window",
+  "Blob",
+  "BlobPropertyBag",
+  "Url",
+  "File",
+  "FileList",
+  "FileReader",
+  "Event",
 ] }
 forge-core = { path = "crates/core" }
 forge-io = { path = "crates/io" }

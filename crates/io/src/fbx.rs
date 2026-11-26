@@ -1,11 +1,11 @@
-//! Local ASCII FBX 7.x import/export — no external FBX crates or online APIs.
+//! Pure-Rust FBX 7.x import/export — no ufbx / C / online APIs.
+//! Works on desktop **and** `wasm32` (browser) via `load_fbx_bytes`.
 //!
-//! Supports a practical subset:
-//! - Import: Vertices, PolygonVertexIndex, Normals, UV, Materials (DiffuseColor),
-//!   Model nodes, Geometry, Connections (OO)
-//! - Export: same subset as static triangle meshes + Phong materials
+//! Import: meshes, materials/textures, LimbNode armatures, Skin/Cluster weights
+//! (bind poses via Transform / TransformLink), OO connections.
+//! Export: static triangle meshes + Phong materials (binary FBX).
 use anyhow::{bail, Context, Result};
-use forge_core::{Material, MeshData, MeshGroup, Object, ObjectKind, Scene, TextureData, Vertex};
+use forge_core::{AnimationClip, Material, MeshData, MeshGroup, Object, ObjectAnimation, ObjectKind, Scene, SkinBinding, TextureData, Vertex};
 use glam::{Mat4, Quat, Vec3};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
@@ -20,9 +20,8 @@ type TexResolver<'a> = &'a dyn Fn(&str) -> Option<Vec<u8>>;
 
 #[cfg(not(target_arch = "wasm32"))]
 pub fn load_fbx(path: &Path) -> Result<Scene> {
-    // Prefer ufbx for skins/bones/animation. Always try the built-in parser for
-    // materials/textures (it follows FBX connections + embedded Video bytes better)
-    // and merge those onto the ufbx scene when needed.
+    // Pure-Rust FBX parser (no ufbx / C toolchain). Works on desktop and matches
+    // the browser path that uses `load_fbx_bytes`.
     let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
     let dir = path.parent().map(|p| p.to_path_buf()).unwrap_or_default();
     let stem = path
@@ -31,107 +30,8 @@ pub fn load_fbx(path: &Path) -> Result<Scene> {
         .unwrap_or("")
         .to_string();
     let resolver = move |name: &str| crate::find_texture_file(&dir, &stem, name);
-    let builtin = load_fbx_bytes_with(&bytes, &resolver);
-
-    match crate::fbx_ufbx::load_fbx_ufbx(path) {
-        Ok(mut scene) => {
-            if let Ok(b) = builtin {
-                merge_fbx_materials_textures(&mut scene, b);
-            }
-            return Ok(scene);
-        }
-        Err(e) => {
-            eprintln!("ufbx FBX import failed ({e:#}); falling back to built-in parser");
-        }
-    }
-    builtin
+    load_fbx_bytes_with(&bytes, &resolver)
 }
-
-/// Copy materials/textures from the built-in parse onto a ufbx scene when the
-/// ufbx path left albedo maps empty (common with embedded FBX Video nodes).
-fn merge_fbx_materials_textures(dst: &mut Scene, src: Scene) {
-    if src.textures.is_empty() && src.materials.is_empty() {
-        eprintln!("FBX: built-in parser found no textures/materials to merge");
-        return;
-    }
-
-    let tex_off = dst.textures.len();
-    let mat_off = dst.materials.len();
-
-    let mut tex = (*dst.textures).clone();
-    tex.extend(src.textures.iter().cloned());
-    dst.textures = Arc::new(tex);
-
-    for mut m in src.materials {
-        m.offset_textures(tex_off);
-        if m.base_color_tex.is_some() {
-            let c = m.base_color;
-            if c[0] + c[1] + c[2] < 0.05 {
-                m.base_color = [1.0, 1.0, 1.0, 1.0];
-            }
-        }
-        // Wire a shading graph so Shading mode keeps the map visible.
-        if m.shader_graph.is_none() {
-            m.shader_graph = Some(forge_core::ShaderGraph::from_imported_material(&m));
-        }
-        dst.materials.push(m);
-    }
-
-    fn norm_name(s: &str) -> String {
-        s.rsplit("::").next().unwrap_or(s).to_ascii_lowercase()
-    }
-
-    // Prefer materials that actually have an albedo map.
-    let textured_mi = dst.materials.iter().enumerate().rev().find_map(|(i, m)| {
-        if i >= mat_off && m.base_color_tex.is_some() {
-            Some(i)
-        } else {
-            None
-        }
-    });
-
-    let mut assigned = 0usize;
-    for o in &mut dst.objects {
-        if o.mesh.indices.is_empty() {
-            continue;
-        }
-        let oname = norm_name(&o.name);
-        let matched = src.objects.iter().find(|x| {
-            norm_name(&x.name) == oname
-                || oname.contains(&norm_name(&x.name))
-                || norm_name(&x.name).contains(&oname)
-        });
-        let new_mi = matched
-            .and_then(|so| so.material.map(|i| i + mat_off))
-            .or(textured_mi);
-        let Some(new_mi) = new_mi else {
-            continue;
-        };
-        o.material = Some(new_mi);
-        let mesh = Arc::make_mut(&mut o.mesh);
-        if mesh.groups.is_empty() {
-            mesh.groups.push(MeshGroup {
-                first_index: 0,
-                index_count: mesh.indices.len() as u32,
-                material: Some(new_mi),
-            });
-        } else {
-            for g in mesh.groups.iter_mut() {
-                g.material = Some(new_mi);
-            }
-        }
-        assigned += 1;
-    }
-
-    eprintln!(
-        "FBX: merged materials/textures ({} textures, {} materials, {} meshes assigned)",
-        dst.textures.len(),
-        dst.materials.len(),
-        assigned
-    );
-}
-
-
 
 #[cfg(target_arch = "wasm32")]
 pub fn load_fbx(_path: &Path) -> Result<Scene> {
@@ -226,9 +126,14 @@ pub fn export_fbx_ascii(scene: &Scene, path: &Path, only: Option<&BTreeSet<u64>>
     Ok(())
 }
 
+pub fn export_fbx_bytes(scene: &Scene, only: Option<&BTreeSet<u64>>) -> Result<Vec<u8>> {
+    build_binary_fbx(scene, only, &HashMap::new())
+}
+
 #[cfg(target_arch = "wasm32")]
-pub fn export_fbx(_scene: &Scene, _path: &Path, _only: Option<&BTreeSet<u64>>) -> Result<()> {
-    bail!("FBX export is not available on WebAssembly")
+pub fn export_fbx(scene: &Scene, _path: &Path, only: Option<&BTreeSet<u64>>) -> Result<()> {
+    let _ = export_fbx_bytes(scene, only)?;
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -247,6 +152,15 @@ struct FbxDoc {
     textures: BTreeMap<i64, Tex>,
     /// id -> video (image) node; may carry the embedded image bytes
     videos: BTreeMap<i64, Video>,
+    /// id -> Skin deformer
+    skins: BTreeMap<i64, SkinDef>,
+    /// id -> Cluster sub-deformer
+    clusters: BTreeMap<i64, ClusterDef>,
+    /// Animation stacks / layers / curve nodes / curves
+    anim_stacks: BTreeMap<i64, AnimStackDef>,
+    anim_layers: BTreeMap<i64, AnimLayerDef>,
+    anim_curve_nodes: BTreeMap<i64, AnimCurveNodeDef>,
+    anim_curves: BTreeMap<i64, AnimCurveDef>,
     /// all connections (OO object links and OP property links)
     connections: Vec<Conn>,
     /// GlobalSettings UpAxis (0 = X, 1 = Y, 2 = Z) and its sign
@@ -265,6 +179,12 @@ impl Default for FbxDoc {
             materials: BTreeMap::new(),
             textures: BTreeMap::new(),
             videos: BTreeMap::new(),
+            skins: BTreeMap::new(),
+            clusters: BTreeMap::new(),
+            anim_stacks: BTreeMap::new(),
+            anim_layers: BTreeMap::new(),
+            anim_curve_nodes: BTreeMap::new(),
+            anim_curves: BTreeMap::new(),
             connections: Vec::new(),
             up_axis: 1,
             up_sign: 1,
@@ -317,6 +237,56 @@ struct Video {
     relative: String,
     /// Embedded image file (png/jpg/...), empty when the texture is external.
     content: Vec<u8>,
+}
+
+/// FBX Deformer of type Skin — groups Cluster sub-deformers for one geometry.
+#[derive(Debug, Default, Clone)]
+struct SkinDef {
+    name: String,
+}
+
+/// FBX SubDeformer Cluster — per-bone vertex indices + weights and bind matrices.
+#[derive(Debug, Default, Clone)]
+struct ClusterDef {
+    name: String,
+    indexes: Vec<i32>,
+    weights: Vec<f32>,
+    /// 16 floats column-major if present (geometry → bone at bind).
+    transform: Option<[f32; 16]>,
+    /// 16 floats column-major if present (bone world at bind = TransformLink).
+    transform_link: Option<[f32; 16]>,
+}
+
+/// FBX time unit: 1 second = 46_186_158_000 KTime ticks (SDK default).
+const FBX_TIME_SECOND: f64 = 46_186_158_000.0;
+
+#[derive(Debug, Default, Clone)]
+struct AnimStackDef {
+    name: String,
+    /// Local start/stop in FBX KTime (optional; may be missing).
+    local_start: Option<i64>,
+    local_stop: Option<i64>,
+}
+
+#[derive(Debug, Default, Clone)]
+struct AnimLayerDef {
+    name: String,
+}
+
+/// AnimationCurveNode — usually Lcl Translation / Rotation / Scaling with 3 channels.
+#[derive(Debug, Default, Clone)]
+struct AnimCurveNodeDef {
+    name: String,
+    /// Default values for X,Y,Z when no curve is connected (from Properties70).
+    defaults: [f32; 3],
+}
+
+#[derive(Debug, Default, Clone)]
+struct AnimCurveDef {
+    name: String,
+    /// Parallel key times (seconds) and values.
+    times: Vec<f64>,
+    values: Vec<f32>,
 }
 
 #[derive(Debug, Clone)]
@@ -1117,8 +1087,10 @@ fn convert_doc(doc: &FbxDoc, resolver: TexResolver) -> Result<Scene> {
     }
 
     // ---- objects -------------------------------------------------------------------
+    // object name → control-point index per mesh vertex (for cluster Indexes)
+    let mut mesh_ctrl_points: HashMap<String, Vec<usize>> = HashMap::new();
     for (&gid, geom) in &doc.geometries {
-        let (base_mesh, tri_slot) = geom_to_mesh(geom)?;
+        let (base_mesh, tri_slot, ctrl_of_vertex) = geom_to_mesh(geom)?;
         if base_mesh.indices.is_empty() || base_mesh.vertices.is_empty() {
             continue;
         }
@@ -1198,17 +1170,23 @@ fn convert_doc(doc: &FbxDoc, resolver: TexResolver) -> Result<Scene> {
                 mesh.groups = groups;
             }
 
-            // World transform (hierarchy baked in), translation converted to meters.
+            // World transform; unit scale applied uniformly (glTF-compatible scene units).
             let world = match mid {
                 Some(m) => root_fix * model_world(m, doc, &parents),
                 None => root_fix,
             };
+            let world = if (u - 1.0).abs() > 1e-8 {
+                Mat4::from_scale(Vec3::splat(u)) * world
+            } else {
+                world
+            };
             let (scale, rotation, translation) = world.to_scale_rotation_translation();
             let mut obj = Object::new(model.name.clone(), mesh);
-            obj.translation = translation * u;
+            obj.translation = translation;
             obj.rotation = rotation;
             obj.scale = scale;
             obj.material = material;
+            mesh_ctrl_points.insert(model.name.to_ascii_lowercase(), ctrl_of_vertex.clone());
             scene.objects.push(obj);
         }
     }
@@ -1248,11 +1226,21 @@ fn convert_doc(doc: &FbxDoc, resolver: TexResolver) -> Result<Scene> {
             let model = &doc.models[&mid];
             let mut bone = forge_core::Bone::new(model.name.clone(), head, tail);
             bone.parent = parents.get(&mid).and_then(|p| id_to_bone.get(p)).copied();
-            // Store rest orientation from the model world rotation so pose
-            // evaluation starts from the correct bind frame.
-            let w = root_fix * model_world(mid, doc, &parents);
-            let (_, rot, _) = w.to_scale_rotation_translation();
+            // Absolute-local TRS (same contract as glTF): animation keys replace pose_* directly.
+            let loc = [
+                model.translation[0] * u,
+                model.translation[1] * u,
+                model.translation[2] * u,
+            ];
+            let rot = euler_deg_to_quat(model.rotation_deg, model.rotation_order);
+            let scl = model.scale;
             bone.rest_orientation = Some(rot.to_array());
+            bone.rest_local_loc = Some(loc);
+            bone.rest_local_rot = Some(rot.to_array());
+            bone.rest_local_scale = Some(scl);
+            bone.pose_loc = loc;
+            bone.pose_rot = rot.to_array();
+            bone.pose_scale = scl;
             arm.bones.push(bone);
         }
         if !arm.bones.is_empty() {
@@ -1265,12 +1253,681 @@ fn convert_doc(doc: &FbxDoc, resolver: TexResolver) -> Result<Scene> {
             scene.objects.push(arm_obj);
         }
     }
+
+    // Pure-Rust skin weights (replaces former ufbx SkinDeformer path).
+    if let Some(arm_id) = _armature_object_id {
+        apply_fbx_skins(&mut scene, doc, &parents, arm_id, &mesh_ctrl_points);
+        sample_fbx_animation(&mut scene, doc, &parents, arm_id);
+    }
+
     if scene.objects.is_empty() {
         bail!("FBX contained no usable mesh or armature objects");
     }
     scene.textures = Arc::new(textures);
+    normalize_fbx_scene_scale(&mut scene);
     Ok(scene)
 }
+
+/// If the imported FBX is clearly in centimetres (common when UnitScaleFactor is wrong)
+/// shrink it so it matches typical glTF/GLB metre-scale assets.
+fn normalize_fbx_scene_scale(scene: &mut Scene) {
+    let mut max_e = 0.0f32;
+    for o in &scene.objects {
+        for v in &o.mesh.vertices {
+            max_e = max_e.max(v.position[0].abs()).max(v.position[1].abs()).max(v.position[2].abs());
+        }
+        max_e = max_e
+            .max(o.translation[0].abs())
+            .max(o.translation[1].abs())
+            .max(o.translation[2].abs());
+        if let ObjectKind::Armature(arm) = &o.kind {
+            for b in &arm.bones {
+                max_e = max_e
+                    .max(b.head[0].abs())
+                    .max(b.head[1].abs())
+                    .max(b.head[2].abs())
+                    .max(b.tail[0].abs())
+                    .max(b.tail[1].abs())
+                    .max(b.tail[2].abs());
+            }
+        }
+    }
+    // Characters / props in metres rarely exceed ~20 units; cm models are hundreds+.
+    if max_e < 50.0 {
+        return;
+    }
+    let s = 0.01f32;
+    let scale = Mat4::from_scale(Vec3::splat(s));
+    for o in &mut scene.objects {
+        for v in &mut Arc::make_mut(&mut o.mesh).vertices {
+            v.position[0] *= s;
+            v.position[1] *= s;
+            v.position[2] *= s;
+        }
+        o.translation *= s;
+        if let ObjectKind::Armature(arm) = &mut o.kind {
+            for b in &mut arm.bones {
+                b.head = (Vec3::from(b.head) * s).to_array();
+                b.tail = (Vec3::from(b.tail) * s).to_array();
+                if let Some(loc) = b.rest_local_loc.as_mut() {
+                    loc[0] *= s;
+                    loc[1] *= s;
+                    loc[2] *= s;
+                }
+                b.pose_loc[0] *= s;
+                b.pose_loc[1] *= s;
+                b.pose_loc[2] *= s;
+            }
+        }
+        if let Some(skin) = o.skin.as_mut() {
+            for p in &mut skin.rest_positions {
+                p[0] *= s;
+                p[1] *= s;
+                p[2] *= s;
+            }
+            for m in &mut skin.inverse_binds {
+                m[12] *= s;
+                m[13] *= s;
+                m[14] *= s;
+            }
+        }
+    }
+    // Scale animation location keys
+    for clip in &mut scene.animation.bone_tracks {
+        for bones in clip.values_mut() {
+            for track in bones.values_mut() {
+                for k in &mut track.keys {
+                    if let Some(loc) = k.location.as_mut() {
+                        *loc *= s;
+                    }
+                }
+            }
+        }
+    }
+    let _ = scale;
+}
+
+
+/// Sample FBX AnimationStacks into `scene.animation.bone_tracks` (desktop + wasm).
+fn sample_fbx_animation(
+    scene: &mut Scene,
+    doc: &FbxDoc,
+    parents: &HashMap<i64, i64>,
+    arm_id: u64,
+) {
+    if doc.anim_stacks.is_empty() || doc.anim_curves.is_empty() {
+        return;
+    }
+    let fps = scene.animation.fps.max(1) as f64;
+
+    // Bone model id → bone index (same classification as armature build)
+    let has_explicit_limb = doc.models.values().any(|m| {
+        let k = m.kind.to_ascii_lowercase();
+        k == "limbnode" || k == "limb" || k == "root"
+    });
+    let mut id_to_bone: HashMap<i64, u32> = HashMap::new();
+    let mut bi = 0u32;
+    for (id, m) in &doc.models {
+        let k = m.kind.to_ascii_lowercase();
+        let is_bone = k == "limbnode"
+            || k == "root"
+            || k == "limb"
+            || k == "bone"
+            || k.contains("limb");
+        let is_null = has_explicit_limb && (k == "null" || k == "locator" || k.is_empty());
+        if is_bone || is_null {
+            id_to_bone.insert(*id, bi);
+            bi += 1;
+        }
+    }
+    if id_to_bone.is_empty() {
+        return;
+    }
+
+    // layer → stack (OO both directions)
+    let mut layer_to_stack: HashMap<i64, i64> = HashMap::new();
+    // curve → curve_node + channel prop (OP)
+    let mut curve_to_node: HashMap<i64, (i64, String)> = HashMap::new();
+    // curve_node → (model id, property e.g. "Lcl Translation")
+    let mut node_to_model: HashMap<i64, (i64, String)> = HashMap::new();
+    // curve_node → layer
+    let mut node_to_layer: HashMap<i64, i64> = HashMap::new();
+
+    for c in &doc.connections {
+        if c.ty == "OO" {
+            if doc.anim_layers.contains_key(&c.child) && doc.anim_stacks.contains_key(&c.parent) {
+                layer_to_stack.insert(c.child, c.parent);
+            }
+            if doc.anim_layers.contains_key(&c.parent) && doc.anim_stacks.contains_key(&c.child) {
+                layer_to_stack.insert(c.parent, c.child);
+            }
+            if doc.anim_curve_nodes.contains_key(&c.child) && doc.anim_layers.contains_key(&c.parent) {
+                node_to_layer.insert(c.child, c.parent);
+            }
+            if doc.anim_curve_nodes.contains_key(&c.parent) && doc.anim_layers.contains_key(&c.child) {
+                node_to_layer.insert(c.parent, c.child);
+            }
+        } else if c.ty == "OP" {
+            if doc.anim_curves.contains_key(&c.child) && doc.anim_curve_nodes.contains_key(&c.parent) {
+                curve_to_node.insert(c.child, (c.parent, c.prop.clone()));
+            }
+            if doc.anim_curves.contains_key(&c.parent) && doc.anim_curve_nodes.contains_key(&c.child) {
+                curve_to_node.insert(c.parent, (c.child, c.prop.clone()));
+            }
+            if doc.anim_curve_nodes.contains_key(&c.child) && doc.models.contains_key(&c.parent) {
+                node_to_model.insert(c.child, (c.parent, c.prop.clone()));
+            }
+            if doc.anim_curve_nodes.contains_key(&c.parent) && doc.models.contains_key(&c.child) {
+                node_to_model.insert(c.parent, (c.child, c.prop.clone()));
+            }
+        }
+    }
+
+    // Build per-stack list of (bone_idx, channel kind, component 0/1/2, curve id)
+    // channel kind: 0=loc 1=rot 2=scale
+    #[derive(Clone)]
+    struct Chan {
+        bone: u32,
+        kind: u8,
+        axis: usize,
+        curve: i64,
+        default: f32,
+    }
+
+    let mut stack_chans: HashMap<i64, Vec<Chan>> = HashMap::new();
+    for (curve_id, (node_id, prop)) in &curve_to_node {
+        let Some((model_id, model_prop)) = node_to_model.get(node_id) else { continue };
+        let Some(&bone) = id_to_bone.get(model_id) else { continue };
+        let Some(&layer) = node_to_layer.get(node_id) else { continue };
+        let Some(&stack) = layer_to_stack.get(&layer) else {
+            // Some files connect curve nodes to stack without a layer; try any stack.
+            if let Some((sid, _)) = doc.anim_stacks.iter().next() {
+                let axis = channel_axis(prop);
+                let kind = channel_kind(model_prop);
+                let default = doc
+                    .anim_curve_nodes
+                    .get(node_id)
+                    .map(|n| n.defaults[axis])
+                    .unwrap_or(0.0);
+                stack_chans.entry(*sid).or_default().push(Chan {
+                    bone,
+                    kind,
+                    axis,
+                    curve: *curve_id,
+                    default,
+                });
+            }
+            continue;
+        };
+        let axis = channel_axis(prop);
+        let kind = channel_kind(model_prop);
+        let default = doc
+            .anim_curve_nodes
+            .get(node_id)
+            .map(|n| n.defaults[axis])
+            .unwrap_or(0.0);
+        stack_chans.entry(stack).or_default().push(Chan {
+            bone,
+            kind,
+            axis,
+            curve: *curve_id,
+            default,
+        });
+    }
+
+    if stack_chans.is_empty() {
+        // Fallback: no OP wiring found — nothing to sample.
+        return;
+    }
+
+    for (stack_i, (stack_id, stack)) in doc.anim_stacks.iter().enumerate() {
+        let Some(chans) = stack_chans.get(stack_id) else { continue };
+        if chans.is_empty() {
+            continue;
+        }
+        // Determine time range from stack props or from keys
+        let mut t0 = stack
+            .local_start
+            .map(|k| k as f64 / FBX_TIME_SECOND)
+            .unwrap_or(f64::INFINITY);
+        let mut t1 = stack
+            .local_stop
+            .map(|k| k as f64 / FBX_TIME_SECOND)
+            .unwrap_or(f64::NEG_INFINITY);
+        for ch in chans {
+            if let Some(curve) = doc.anim_curves.get(&ch.curve) {
+                if let (Some(&a), Some(&b)) = (curve.times.first(), curve.times.last()) {
+                    t0 = t0.min(a);
+                    t1 = t1.max(b);
+                }
+            }
+        }
+        if !(t1 > t0) || !t0.is_finite() || !t1.is_finite() {
+            continue;
+        }
+        let n_frames = (((t1 - t0) * fps).ceil() as i32).max(1);
+        // Cap very long clips so browser import stays responsive
+        let n_frames = n_frames.min(10_000);
+        let frame_start = 1i32;
+        let frame_end = frame_start + n_frames;
+        let clip_name = if stack.name.is_empty() {
+            format!("AnimStack {}", stack_i + 1)
+        } else {
+            stack.name.clone()
+        };
+        scene.animation.clips.push(AnimationClip {
+            name: clip_name,
+            frame_start,
+            frame_end,
+        });
+
+        let mut clip_tracks: HashMap<u64, HashMap<u32, ObjectAnimation>> = HashMap::new();
+        // Per-bone accumulated LRS for each frame
+        for fi in 0..=n_frames {
+            let time = t0 + (fi as f64) / fps;
+            let frame = frame_start + fi;
+            // bone → (loc, euler_deg, scale) components present
+            let mut loc: HashMap<u32, [Option<f32>; 3]> = HashMap::new();
+            let mut rot: HashMap<u32, [Option<f32>; 3]> = HashMap::new();
+            let mut scl: HashMap<u32, [Option<f32>; 3]> = HashMap::new();
+            for ch in chans {
+                let v = doc
+                    .anim_curves
+                    .get(&ch.curve)
+                    .map(|c| eval_anim_curve(c, time))
+                    .unwrap_or(ch.default);
+                let slot = match ch.kind {
+                    0 => loc.entry(ch.bone).or_insert([None; 3]),
+                    1 => rot.entry(ch.bone).or_insert([None; 3]),
+                    _ => scl.entry(ch.bone).or_insert([None; 3]),
+                };
+                if ch.axis < 3 {
+                    slot[ch.axis] = Some(v);
+                }
+            }
+            let arm_map = clip_tracks.entry(arm_id).or_default();
+            let bones: BTreeSet<u32> = loc.keys().chain(rot.keys()).chain(scl.keys()).copied().collect();
+            for bone in bones {
+                // Defaults from rest model if channel missing
+                let model_id = id_to_bone
+                    .iter()
+                    .find(|(_, b)| **b == bone)
+                    .map(|(id, _)| *id);
+                let model = model_id.and_then(|id| doc.models.get(&id));
+                let def_t = model.map(|m| m.translation).unwrap_or([0.0; 3]);
+                let def_r = model.map(|m| m.rotation_deg).unwrap_or([0.0; 3]);
+                let def_s = model.map(|m| m.scale).unwrap_or([1.0; 3]);
+                let lv = loc.get(&bone).copied().unwrap_or([None; 3]);
+                let rv = rot.get(&bone).copied().unwrap_or([None; 3]);
+                let sv = scl.get(&bone).copied().unwrap_or([None; 3]);
+                let translation = Vec3::new(
+                    lv[0].unwrap_or(def_t[0]) * doc.unit_to_meters,
+                    lv[1].unwrap_or(def_t[1]) * doc.unit_to_meters,
+                    lv[2].unwrap_or(def_t[2]) * doc.unit_to_meters,
+                );
+                let euler = [
+                    rv[0].unwrap_or(def_r[0]),
+                    rv[1].unwrap_or(def_r[1]),
+                    rv[2].unwrap_or(def_r[2]),
+                ];
+                let order = model.map(|m| m.rotation_order).unwrap_or(0);
+                let rotation = euler_deg_to_quat(euler, order);
+                let scale = Vec3::new(
+                    sv[0].unwrap_or(def_s[0]),
+                    sv[1].unwrap_or(def_s[1]),
+                    sv[2].unwrap_or(def_s[2]),
+                );
+                let track = arm_map.entry(bone).or_default();
+                track.insert_or_merge(frame, Some(translation), Some(rotation), Some(scale));
+            }
+        }
+        scene.animation.bone_tracks.push(clip_tracks);
+    }
+
+    if !scene.animation.clips.is_empty() {
+        scene.animation.select_clip(Some(0));
+        if let Some(c) = scene.animation.clips.first() {
+            scene.animation.frame_start = c.frame_start;
+            scene.animation.frame_end = c.frame_end;
+            scene.animation.frame_current = c.frame_start;
+        }
+    }
+    let _ = parents;
+}
+
+fn channel_axis(prop: &str) -> usize {
+    let p = prop.to_ascii_lowercase();
+    if p.ends_with("|x") || p == "x" || p.ends_with(".x") {
+        0
+    } else if p.ends_with("|y") || p == "y" || p.ends_with(".y") {
+        1
+    } else if p.ends_with("|z") || p == "z" || p.ends_with(".z") {
+        2
+    } else if p.contains("x") && !p.contains("y") && !p.contains("z") {
+        0
+    } else if p.contains("y") && !p.contains("z") {
+        1
+    } else if p.contains("z") {
+        2
+    } else {
+        0
+    }
+}
+
+fn channel_kind(model_prop: &str) -> u8 {
+    let p = model_prop.to_ascii_lowercase();
+    if p.contains("translation") || p.contains("location") || p.contains("position") {
+        0
+    } else if p.contains("rotation") || p.contains("rotate") {
+        1
+    } else if p.contains("scaling") || p.contains("scale") {
+        2
+    } else {
+        0
+    }
+}
+
+fn eval_anim_curve(curve: &AnimCurveDef, time: f64) -> f32 {
+    if curve.times.is_empty() || curve.values.is_empty() {
+        return 0.0;
+    }
+    if time <= curve.times[0] {
+        return curve.values[0];
+    }
+    let last = curve.times.len() - 1;
+    if time >= curve.times[last] {
+        return curve.values[last];
+    }
+    // Linear search is fine for typical curves; binary would be better for long takes
+    for i in 0..last {
+        let t0 = curve.times[i];
+        let t1 = curve.times[i + 1];
+        if time >= t0 && time <= t1 {
+            let u = if (t1 - t0).abs() < 1e-12 {
+                0.0
+            } else {
+                ((time - t0) / (t1 - t0)) as f32
+            };
+            return curve.values[i] * (1.0 - u) + curve.values[i + 1] * u;
+        }
+    }
+    curve.values[last]
+}
+
+fn euler_deg_to_quat(euler_deg: [f32; 3], order: i32) -> Quat {
+    let x = euler_deg[0].to_radians();
+    let y = euler_deg[1].to_radians();
+    let z = euler_deg[2].to_radians();
+    let qx = Quat::from_rotation_x(x);
+    let qy = Quat::from_rotation_y(y);
+    let qz = Quat::from_rotation_z(z);
+    // FBX RotationOrder: 0 XYZ, 1 XZY, 2 YZX, 3 YXZ, 4 ZXY, 5 ZYX
+    match order {
+        1 => qx * qz * qy,
+        2 => qy * qz * qx,
+        3 => qy * qx * qz,
+        4 => qz * qx * qy,
+        5 => qz * qy * qx,
+        _ => qx * qy * qz, // XYZ
+    }
+}
+
+
+/// Attach SkinBinding to mesh objects from FBX Skin/Cluster deformers.
+///
+/// Inverse-bind matrices use FBX Cluster `Transform` (geometry→bone) when present.
+/// If they look invalid we leave `inverse_binds` empty so the engine uses
+/// pose×rest⁻¹ from bone head/tail — that keeps the rest pose undeformed.
+fn apply_fbx_skins(
+    scene: &mut Scene,
+    doc: &FbxDoc,
+    parents: &HashMap<i64, i64>,
+    arm_id: u64,
+    mesh_ctrl_points: &HashMap<String, Vec<usize>>,
+) {
+    if doc.clusters.is_empty() {
+        return;
+    }
+    let has_explicit_limb = doc.models.values().any(|m| {
+        let k = m.kind.to_ascii_lowercase();
+        k == "limbnode" || k == "limb" || k == "root"
+    });
+    // Must match the order used when building the armature.
+    let limb_ids: Vec<i64> = doc
+        .models
+        .iter()
+        .filter_map(|(&id, m)| {
+            let k = m.kind.to_ascii_lowercase();
+            let is_bone = k == "limbnode"
+                || k == "root"
+                || k == "limb"
+                || k == "bone"
+                || k.contains("limb");
+            let is_null = has_explicit_limb && (k == "null" || k == "locator" || k == "empty");
+            (is_bone || is_null).then_some(id)
+        })
+        .collect();
+    let id_to_bone: HashMap<i64, u32> = limb_ids
+        .iter()
+        .enumerate()
+        .map(|(i, id)| (*id, i as u32))
+        .collect();
+    if id_to_bone.is_empty() {
+        return;
+    }
+    let bone_count = limb_ids.len();
+
+    let mut geom_skins: HashMap<i64, Vec<i64>> = HashMap::new();
+    let mut skin_clusters: HashMap<i64, Vec<i64>> = HashMap::new();
+    let mut cluster_bone: HashMap<i64, i64> = HashMap::new();
+    let mut geom_model: HashMap<i64, i64> = HashMap::new();
+
+    for c in &doc.connections {
+        if c.ty != "OO" {
+            continue;
+        }
+        if doc.skins.contains_key(&c.child) && doc.geometries.contains_key(&c.parent) {
+            geom_skins.entry(c.parent).or_default().push(c.child);
+        }
+        if doc.skins.contains_key(&c.parent) && doc.geometries.contains_key(&c.child) {
+            geom_skins.entry(c.child).or_default().push(c.parent);
+        }
+        if doc.clusters.contains_key(&c.child) && doc.skins.contains_key(&c.parent) {
+            skin_clusters.entry(c.parent).or_default().push(c.child);
+        }
+        if doc.clusters.contains_key(&c.parent) && doc.skins.contains_key(&c.child) {
+            skin_clusters.entry(c.child).or_default().push(c.parent);
+        }
+        if doc.clusters.contains_key(&c.child) && doc.models.contains_key(&c.parent) {
+            cluster_bone.insert(c.child, c.parent);
+        }
+        if doc.clusters.contains_key(&c.parent) && doc.models.contains_key(&c.child) {
+            cluster_bone.insert(c.parent, c.child);
+        }
+        if doc.geometries.contains_key(&c.child) && doc.models.contains_key(&c.parent) {
+            geom_model.insert(c.child, c.parent);
+        }
+        if doc.geometries.contains_key(&c.parent) && doc.models.contains_key(&c.child) {
+            geom_model.insert(c.parent, c.child);
+        }
+    }
+
+    let mut name_to_obj: HashMap<String, usize> = HashMap::new();
+    for (i, o) in scene.objects.iter().enumerate() {
+        if !o.mesh.indices.is_empty() {
+            name_to_obj.insert(o.name.to_ascii_lowercase(), i);
+        }
+    }
+
+    let u = doc.unit_to_meters;
+
+    for (gid, skin_ids) in &geom_skins {
+        let Some(g) = doc.geometries.get(gid) else { continue };
+        let nverts = g.vertices.len();
+        if nverts == 0 {
+            continue;
+        }
+        let model_name = geom_model
+            .get(gid)
+            .and_then(|mid| doc.models.get(mid))
+            .map(|m| m.name.to_ascii_lowercase())
+            .unwrap_or_else(|| g.name.to_ascii_lowercase());
+        let Some(&obj_i) = name_to_obj.get(&model_name).or_else(|| {
+            name_to_obj
+                .iter()
+                .find(|(n, _)| n.contains(&model_name) || model_name.contains(n.as_str()))
+                .map(|(_, i)| i)
+        }) else {
+            continue;
+        };
+
+        // Accumulator: per control-point list of (bone, weight)
+        let mut raw: Vec<Vec<(u16, f32)>> = vec![Vec::new(); nverts];
+        let mut inverse_binds = vec![Mat4::IDENTITY; bone_count];
+        let mut has_any_ibm = false;
+
+        for &sid in skin_ids {
+            let Some(cids) = skin_clusters.get(&sid) else { continue };
+            for &cid in cids {
+                let Some(cluster) = doc.clusters.get(&cid) else { continue };
+                let Some(&bone_model) = cluster_bone.get(&cid) else { continue };
+                let Some(&bone_idx) = id_to_bone.get(&bone_model) else { continue };
+                let bi = bone_idx as usize;
+
+                // Prefer Transform (geometry→bone). Fall back to inverse(TransformLink).
+                if let Some(xf) = cluster.transform {
+                    let m = mat4_from_fbx_row_major(xf, u);
+                    if mat4_is_reasonable(m) {
+                        inverse_binds[bi] = m;
+                        has_any_ibm = true;
+                    }
+                } else if let Some(link) = cluster.transform_link {
+                    let link_m = mat4_from_fbx_row_major(link, u);
+                    if mat4_is_reasonable(link_m) {
+                        inverse_binds[bi] = link_m.inverse();
+                        has_any_ibm = true;
+                    }
+                }
+
+                for (ii, &vi) in cluster.indexes.iter().enumerate() {
+                    if vi < 0 {
+                        continue;
+                    }
+                    let vi = vi as usize;
+                    if vi >= nverts {
+                        continue;
+                    }
+                    let w = cluster.weights.get(ii).copied().unwrap_or(0.0);
+                    if w > 1e-8 {
+                        raw[vi].push((bone_idx as u16, w));
+                    }
+                }
+            }
+        }
+
+        let mut joints = vec![[0u16; 4]; nverts];
+        let mut weights = vec![[0f32; 4]; nverts];
+        for vi in 0..nverts {
+            let mut pairs = raw[vi].clone();
+            if pairs.is_empty() {
+                // Unweighted control point: bind fully to root so it doesn't fly away
+                pairs.push((0, 1.0));
+            }
+            pairs.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            // Merge duplicate bones
+            let mut merged: Vec<(u16, f32)> = Vec::new();
+            for (j, w) in pairs {
+                if let Some(slot) = merged.iter_mut().find(|(jj, _)| *jj == j) {
+                    slot.1 += w;
+                } else {
+                    merged.push((j, w));
+                }
+            }
+            merged.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            merged.truncate(4);
+            let sum: f32 = merged.iter().map(|p| p.1).sum::<f32>().max(1e-8);
+            for (k, (j, w)) in merged.into_iter().enumerate() {
+                joints[vi][k] = j;
+                weights[vi][k] = w / sum;
+            }
+        }
+
+        let obj = &mut scene.objects[obj_i];
+        let nv = obj.mesh.vertices.len();
+        let ctrl = mesh_ctrl_points.get(&model_name);
+        let (j_out, w_out) = if let Some(map) = ctrl {
+            let mut j2 = vec![[0u16; 4]; nv];
+            let mut w2 = vec![[0f32; 4]; nv];
+            for i in 0..nv {
+                let cp = map.get(i).copied().unwrap_or(0).min(nverts.saturating_sub(1));
+                j2[i] = joints[cp];
+                w2[i] = weights[cp];
+            }
+            (j2, w2)
+        } else if nv == nverts {
+            (joints, weights)
+        } else {
+            (vec![[0, 0, 0, 0]; nv], vec![[1.0, 0.0, 0.0, 0.0]; nv])
+        };
+
+        // Mesh must sit at origin in bind pose (same as glTF). Skinning provides placement.
+        obj.translation = Vec3::ZERO;
+        obj.rotation = Quat::IDENTITY;
+        obj.scale = Vec3::ONE;
+        obj.parent = Some(arm_id);
+
+        // Rebuild rest from current (undeformed) mesh vertices.
+        let rest_p: Vec<[f32; 3]> = obj.mesh.vertices.iter().map(|v| v.position).collect();
+        let rest_n: Vec<[f32; 3]> = obj.mesh.vertices.iter().map(|v| v.normal).collect();
+
+        // Only keep IBM when every used bone has a sensible matrix; otherwise the
+        // approximate rest×pose path keeps the mesh from stretching at rest.
+        let ibm_out = if has_any_ibm {
+            inverse_binds
+                .iter()
+                .map(|m| m.to_cols_array())
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+
+        obj.skin = Some(SkinBinding {
+            armature_id: arm_id,
+            joints: j_out,
+            weights: w_out,
+            rest_positions: rest_p,
+            rest_normals: rest_n,
+            inverse_binds: ibm_out,
+        });
+    }
+    let _ = parents;
+}
+
+fn mat4_from_fbx_row_major(a: [f32; 16], unit: f32) -> Mat4 {
+    // FBX dumps matrices row-major:
+    //   [m00 m01 m02 m03 | m10 m11 m12 m13 | m20 m21 m22 m23 | m30 m31 m32 m33]
+    // Translation is (m03, m13, m23) → indices 3, 7, 11. glam columns are
+    // (m00,m10,m20,m30), (m01,m11,m21,m31), …
+    Mat4::from_cols(
+        glam::Vec4::new(a[0], a[4], a[8], a[12]),
+        glam::Vec4::new(a[1], a[5], a[9], a[13]),
+        glam::Vec4::new(a[2], a[6], a[10], a[14]),
+        glam::Vec4::new(a[3] * unit, a[7] * unit, a[11] * unit, a[15]),
+    )
+}
+
+fn mat4_is_reasonable(m: Mat4) -> bool {
+    let a = m.to_cols_array();
+    if a.iter().any(|v| !v.is_finite()) {
+        return false;
+    }
+    // Reject near-zero scale (would explode vertices)
+    let sx = Vec3::new(a[0], a[1], a[2]).length();
+    let sy = Vec3::new(a[4], a[5], a[6]).length();
+    let sz = Vec3::new(a[8], a[9], a[10]).length();
+    sx > 1e-5 && sy > 1e-5 && sz > 1e-5 && sx < 1e5 && sy < 1e5 && sz < 1e5
+}
+
 
 /// Read one layer-element value (normal / uv) honouring FBX mapping + reference modes.
 #[allow(clippy::too_many_arguments)]
@@ -1315,7 +1972,7 @@ fn layer_value<T: Copy>(
 
 /// Triangulate the polygons and resolve per-corner normals / UVs. Returns the mesh and the
 /// material slot of each triangle.
-fn geom_to_mesh(g: &Geom) -> Result<(MeshData, Vec<u32>)> {
+fn geom_to_mesh(g: &Geom) -> Result<(MeshData, Vec<u32>, Vec<usize>)> {
     let nv = g.vertices.len();
     // polygon corners: (position index, polygon number)
     let mut corners: Vec<(usize, usize)> = Vec::with_capacity(g.polygon_vertex_index.len());
@@ -1376,6 +2033,13 @@ fn geom_to_mesh(g: &Geom) -> Result<(MeshData, Vec<u32>)> {
         });
         corner_vertex[k] = id;
     }
+    // Parallel to `vertices`: FBX control-point index for skin cluster Indexes.
+    let mut ctrl_of_vertex = vec![0usize; vertices.len()];
+    for ((vi, _, _), &vid) in weld.iter() {
+        if (vid as usize) < ctrl_of_vertex.len() {
+            ctrl_of_vertex[vid as usize] = *vi;
+        }
+    }
 
     let mut indices: Vec<u32> = Vec::new();
     let mut tri_slot: Vec<u32> = Vec::new();
@@ -1408,7 +2072,7 @@ fn geom_to_mesh(g: &Geom) -> Result<(MeshData, Vec<u32>)> {
     if !has_normals {
         md.compute_normals();
     }
-    Ok((md, tri_slot))
+    Ok((md, tri_slot, ctrl_of_vertex))
 }
 
 // ---------------------------------------------------------------------------
@@ -2049,6 +2713,135 @@ fn ingest_object(node: &BinNode, doc: &mut FbxDoc) {
             }
             doc.textures.insert(id, t);
         }
+        "Deformer" => {
+            let id = prop_i64(node.props.get(0)).unwrap_or(0);
+            let name = prop_string(node.props.get(1)).unwrap_or_default();
+            let class = prop_string(node.props.get(2)).unwrap_or_default();
+            let class_l = class.to_ascii_lowercase();
+            if class_l == "skin" || class_l.contains("skin") {
+                doc.skins.insert(id, SkinDef { name: strip_name(&name) });
+            } else if class_l == "cluster" || class_l.contains("cluster") {
+                let mut c = ClusterDef {
+                    name: strip_name(&name),
+                    ..Default::default()
+                };
+                for ch in &node.children {
+                    match ch.name.as_str() {
+                        "Indexes" | "Indices" => {
+                            if let Some(BinProp::I32Arr(a)) = ch.props.first() {
+                                c.indexes = a.clone();
+                            } else if let Some(BinProp::I64Arr(a)) = ch.props.first() {
+                                c.indexes = a.iter().map(|&x| x as i32).collect();
+                            }
+                        }
+                        "Weights" => {
+                            if let Some(BinProp::F64Arr(a)) = ch.props.first() {
+                                c.weights = a.iter().map(|&x| x as f32).collect();
+                            } else if let Some(BinProp::F32Arr(a)) = ch.props.first() {
+                                c.weights = a.clone();
+                            }
+                        }
+                        "Transform" => {
+                            c.transform = bin_mat4(ch.props.first());
+                        }
+                        "TransformLink" => {
+                            c.transform_link = bin_mat4(ch.props.first());
+                        }
+                        _ => {}
+                    }
+                }
+                doc.clusters.insert(id, c);
+            }
+        }
+        "AnimationStack" => {
+            let id = prop_i64(node.props.get(0)).unwrap_or(0);
+            let name = prop_string(node.props.get(1)).unwrap_or_default();
+            let mut s = AnimStackDef {
+                name: strip_name(&name),
+                ..Default::default()
+            };
+            for ch in &node.children {
+                if ch.name == "Properties70" || ch.name == "Properties60" {
+                    for p in &ch.children {
+                        if p.name != "P" {
+                            continue;
+                        }
+                        let key = prop_string(p.props.get(0)).unwrap_or_default();
+                        // LocalStart / LocalStop are KTime (int64) in some writers; also as double.
+                        if key == "LocalStart" || key == "ReferenceStart" {
+                            s.local_start = prop_ktime(p);
+                        } else if key == "LocalStop" || key == "ReferenceStop" {
+                            s.local_stop = prop_ktime(p);
+                        }
+                    }
+                }
+            }
+            doc.anim_stacks.insert(id, s);
+        }
+        "AnimationLayer" => {
+            let id = prop_i64(node.props.get(0)).unwrap_or(0);
+            let name = prop_string(node.props.get(1)).unwrap_or_default();
+            doc.anim_layers.insert(id, AnimLayerDef { name: strip_name(&name) });
+        }
+        "AnimationCurveNode" => {
+            let id = prop_i64(node.props.get(0)).unwrap_or(0);
+            let name = prop_string(node.props.get(1)).unwrap_or_default();
+            let mut n = AnimCurveNodeDef {
+                name: strip_name(&name),
+                defaults: [0.0, 0.0, 0.0],
+            };
+            for ch in &node.children {
+                if ch.name == "Properties70" || ch.name == "Properties60" {
+                    for p in &ch.children {
+                        if p.name != "P" {
+                            continue;
+                        }
+                        let key = prop_string(p.props.get(0)).unwrap_or_default();
+                        let nums = prop_trailing_f32(p);
+                        let v = nums.last().copied().unwrap_or(0.0);
+                        match key.as_str() {
+                            "d|X" | "X" => n.defaults[0] = v,
+                            "d|Y" | "Y" => n.defaults[1] = v,
+                            "d|Z" | "Z" => n.defaults[2] = v,
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            doc.anim_curve_nodes.insert(id, n);
+        }
+        "AnimationCurve" => {
+            let id = prop_i64(node.props.get(0)).unwrap_or(0);
+            let name = prop_string(node.props.get(1)).unwrap_or_default();
+            let mut c = AnimCurveDef {
+                name: strip_name(&name),
+                ..Default::default()
+            };
+            for ch in &node.children {
+                match ch.name.as_str() {
+                    "KeyTime" => {
+                        if let Some(BinProp::I64Arr(a)) = ch.props.first() {
+                            c.times = a.iter().map(|&k| k as f64 / FBX_TIME_SECOND).collect();
+                        } else if let Some(BinProp::I32Arr(a)) = ch.props.first() {
+                            c.times = a.iter().map(|&k| k as f64 / FBX_TIME_SECOND).collect();
+                        }
+                    }
+                    "KeyValueFloat" => {
+                        if let Some(BinProp::F32Arr(a)) = ch.props.first() {
+                            c.values = a.clone();
+                        } else if let Some(BinProp::F64Arr(a)) = ch.props.first() {
+                            c.values = a.iter().map(|&x| x as f32).collect();
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            // Align lengths
+            let n = c.times.len().min(c.values.len());
+            c.times.truncate(n);
+            c.values.truncate(n);
+            doc.anim_curves.insert(id, c);
+        }
         "Video" => {
             let id = prop_i64(node.props.get(0)).unwrap_or(0);
             let mut v = Video::default();
@@ -2070,6 +2863,24 @@ fn ingest_object(node: &BinNode, doc: &mut FbxDoc) {
                 ingest_object(ch, doc);
             }
         }
+    }
+}
+
+fn bin_mat4(p: Option<&BinProp>) -> Option<[f32; 16]> {
+    match p {
+        Some(BinProp::F64Arr(a)) if a.len() >= 16 => {
+            let mut m = [0f32; 16];
+            for i in 0..16 {
+                m[i] = a[i] as f32;
+            }
+            Some(m)
+        }
+        Some(BinProp::F32Arr(a)) if a.len() >= 16 => {
+            let mut m = [0f32; 16];
+            m.copy_from_slice(&a[..16]);
+            Some(m)
+        }
+        _ => None,
     }
 }
 
@@ -2301,6 +3112,20 @@ fn parse_bin_connection(node: &BinNode, doc: &mut FbxDoc) {
     });
 }
 
+fn prop_ktime(p: &BinNode) -> Option<i64> {
+    // Properties70 P entries: name, type, ..., value
+    for prop in &p.props {
+        match prop {
+            BinProp::I64(v) => return Some(*v),
+            BinProp::I32(v) => return Some(*v as i64),
+            BinProp::F64(v) => return Some((*v) as i64),
+            BinProp::F32(v) => return Some((*v) as i64),
+            _ => {}
+        }
+    }
+    None
+}
+
 fn prop_i64(p: Option<&BinProp>) -> Option<i64> {
     match p? {
         BinProp::I64(v) => Some(*v),
@@ -2336,7 +3161,7 @@ fn prop_trailing_f32(node: &BinNode) -> Vec<f32> {
 // Version 7400 uses 32-bit offsets.
 // ===========================================================================
 
-fn build_binary_fbx(
+pub fn build_binary_fbx(
     scene: &Scene,
     only: Option<&BTreeSet<u64>>,
     tex_rel: &HashMap<usize, String>,
