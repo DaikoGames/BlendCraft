@@ -203,7 +203,7 @@ jobs:
           if-no-files-found: ignore
 
   # ---------------------------------------------------------------
-  # FreeBSD x64 VM (full features incl. scripting). Release runs only.
+  # FreeBSD x64 VM (full features incl. scripting).
   # OpenBSD / DragonFly are not built: rustpython-vm 0.4.0 does not
   # compile on them (missing libc constants), so no scripting there.
   # ---------------------------------------------------------------
@@ -211,9 +211,6 @@ jobs:
     name: FreeBSD x64 (VM, experimental)
     runs-on: ubuntu-latest
     continue-on-error: true
-    if: >-
-      startsWith(github.ref, 'refs/tags/v') ||
-      (github.event_name == 'workflow_dispatch' && inputs.create_release == true)
 
     steps:
       - uses: actions/checkout@v4
@@ -624,21 +621,21 @@ jobs:
           [Setup]
           AppId={{B1E7DC4A-5D0A-4C55-9F0B-BC0000000001}
           AppName=BlendCraft
-          AppVersion={#Ver}
+          AppVersion=@VER@
           AppPublisher=DaikoGames
           DefaultDirName={autopf}\BlendCraft
           DefaultGroupName=BlendCraft
-          OutputDir={#Out}
-          OutputBaseFilename=BlendCraft-setup-{#Arch}
+          OutputDir=@OUT@
+          OutputBaseFilename=BlendCraft-setup-@ARCH@
           Compression=lzma2
           SolidCompression=yes
-          ArchitecturesAllowed={#Allowed}
-          ArchitecturesInstallIn64BitMode={#In64}
+          ArchitecturesAllowed=@ALLOWED@
+          ArchitecturesInstallIn64BitMode=@IN64@
           PrivilegesRequiredOverridesAllowed=dialog
           UninstallDisplayIcon={app}\forge3d.exe
 
           [Files]
-          Source: "{#Src}"; DestDir: "{app}"; Flags: ignoreversion
+          Source: "@SRC@"; DestDir: "{app}"; Flags: ignoreversion
 
           [Icons]
           Name: "{group}\BlendCraft"; Filename: "{app}\forge3d.exe"
@@ -650,12 +647,16 @@ jobs:
           [Run]
           Filename: "{app}\forge3d.exe"; Description: "Launch BlendCraft"; Flags: nowait postinstall skipifsilent
           '@
+
+          $iss = $iss.Replace('@VER@', $ver).
+                      Replace('@ARCH@', '${{ matrix.arch }}').
+                      Replace('@ALLOWED@', '${{ matrix.allowed }}').
+                      Replace('@IN64@', '${{ matrix.in64 }}').
+                      Replace('@SRC@', (Resolve-Path 'stage/forge3d.exe').Path).
+                      Replace('@OUT@', (Resolve-Path 'dist/packaging').Path)
           Set-Content -Path installer.iss -Value $iss -Encoding UTF8
 
-          & $iscc "/DVer=$ver" "/DArch=${{ matrix.arch }}" `
-            "/DAllowed=${{ matrix.allowed }}" "/DIn64=${{ matrix.in64 }}" `
-            "/DSrc=$((Resolve-Path 'stage/forge3d.exe').Path)" `
-            "/DOut=$((Resolve-Path 'dist/packaging').Path)" installer.iss
+          & $iscc installer.iss
           if ($LASTEXITCODE -ne 0) { throw "ISCC failed" }
 
           Get-ChildItem dist/packaging
