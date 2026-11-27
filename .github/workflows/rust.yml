@@ -33,8 +33,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { name: "Linux x64",     os: ubuntu-latest,    target: x86_64-unknown-linux-gnu, ext: "" }
-          - { name: "Linux ARM64",  os: ubuntu-24.04-arm,  target: aarch64-unknown-linux-gnu, ext: "" }
+          - { name: "Linux x64",     os: ubuntu-22.04,        target: x86_64-unknown-linux-gnu, ext: "" }
+          - { name: "Linux ARM64",  os: ubuntu-22.04-arm,    target: aarch64-unknown-linux-gnu, ext: "" }
           - { name: "Windows x64",  os: windows-latest,    target: x86_64-pc-windows-msvc, ext: ".exe" }
           - { name: "Windows x86",  os: windows-latest,    target: i686-pc-windows-msvc, ext: ".exe" }
           - { name: "Windows ARM64", os: windows-latest,    target: aarch64-pc-windows-msvc, ext: ".exe" }
@@ -141,6 +141,7 @@ jobs:
           - { name: "Linux PowerPC64 LE", target: powerpc64le-unknown-linux-gnu, ext: "" }
           - { name: "Windows x64 (MinGW)", target: x86_64-pc-windows-gnu, ext: ".exe" }
           - { name: "Windows x86 (MinGW)", target: i686-pc-windows-gnu, ext: ".exe" }
+          - { name: "FreeBSD x64", target: x86_64-unknown-freebsd, ext: "" }
           - { name: "FreeBSD ARM64", target: aarch64-unknown-freebsd, ext: "" }
           - { name: "FreeBSD x86", target: i686-unknown-freebsd, ext: "" }
 
@@ -189,73 +190,6 @@ jobs:
           if-no-files-found: ignore
 
   # ---------------------------------------------------------------
-  # Experimental: BSD VMs
-  # ---------------------------------------------------------------
-  bsd:
-    name: ${{ matrix.name }} (VM, experimental)
-    runs-on: ubuntu-latest
-    continue-on-error: true
-
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - { name: "FreeBSD x64", id: freebsd, target: x86_64-unknown-freebsd }
-          - { name: "OpenBSD x64", id: openbsd, target: x86_64-unknown-openbsd }
-          - { name: "DragonFlyBSD x64", id: dragonfly, target: x86_64-unknown-dragonfly }
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Build (FreeBSD x64)
-        if: matrix.id == 'freebsd'
-        uses: vmactions/freebsd-vm@v1
-        with:
-          usesh: true
-          prepare: pkg install -y rust pkgconf gtk3 libX11 libxkbcommon wayland
-          run: |
-            set -e
-            cargo build --release -p forge-desktop \
-              || cargo build --release -p forge-desktop --no-default-features
-            mkdir -p dist
-            cp target/release/forge3d dist/forge3d-x86_64-unknown-freebsd
-
-      - name: Build (OpenBSD)
-        if: matrix.id == 'openbsd'
-        uses: vmactions/openbsd-vm@v1
-        with:
-          usesh: true
-          prepare: pkg_add -I rust gtk+3 libxkbcommon
-          run: |
-            set -e
-            export PATH="$HOME/.cargo/bin:/usr/local/bin:$PATH"
-            cargo build --release -p forge-desktop \
-              || cargo build --release -p forge-desktop --no-default-features
-            mkdir -p dist
-            cp target/release/forge3d dist/forge3d-x86_64-unknown-openbsd
-
-      - name: Build (DragonFlyBSD)
-        if: matrix.id == 'dragonfly'
-        uses: vmactions/dragonflybsd-vm@v1
-        with:
-          usesh: true
-          prepare: pkg install -y rust pkgconf gtk3 libxkbcommon libX11
-          run: |
-            set -e
-            export PATH="$HOME/.cargo/bin:/usr/local/bin:$PATH"
-            cargo build --release -p forge-desktop \
-              || cargo build --release -p forge-desktop --no-default-features
-            mkdir -p dist
-            cp target/release/forge3d dist/forge3d-x86_64-unknown-dragonfly
-
-      - uses: actions/upload-artifact@v4
-        if: success()
-        with:
-          name: blendcraft-${{ matrix.target }}
-          path: dist/*
-          if-no-files-found: ignore
-
-  # ---------------------------------------------------------------
   # Web
   # ---------------------------------------------------------------
   web:
@@ -286,11 +220,236 @@ jobs:
           if-no-files-found: error
 
   # ---------------------------------------------------------------
-  # Linux packaging
+  # Linux packaging: tar.gz, deb, rpm, AppImage (x64 + arm64)
   # ---------------------------------------------------------------
   package-linux:
-    name: Package Linux
+    name: Package Linux (${{ matrix.arch }})
+    runs-on: ${{ matrix.os }}
+    needs: native
+    continue-on-error: true
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: x86_64,  os: ubuntu-22.04,     target: x86_64-unknown-linux-gnu,  nfpm_arch: amd64 }
+          - { arch: aarch64, os: ubuntu-22.04-arm, target: aarch64-unknown-linux-gnu, nfpm_arch: arm64 }
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: blendcraft-${{ matrix.target }}
+          path: in
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache: false
+
+      - name: Prepare files
+        shell: bash
+        run: |
+          set -euxo pipefail
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            VERSION="${GITHUB_REF#refs/tags/v}"
+          else
+            VERSION="0.0.${GITHUB_RUN_NUMBER}"
+          fi
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+
+          mkdir -p stage dist/packaging
+          cp "in/${BIN}-${{ matrix.target }}" "stage/${BIN}"
+          chmod +x "stage/${BIN}"
+
+          cat > stage/blendcraft.desktop <<EOF
+          [Desktop Entry]
+          Type=Application
+          Name=BlendCraft
+          Comment=BlendCraft 3D
+          Exec=${BIN}
+          Icon=blendcraft
+          Categories=Graphics;3DGraphics;
+          Terminal=false
+          EOF
+          sed -i 's/^          //' stage/blendcraft.desktop
+
+          # Placeholder icon. Drop your own at packaging/icons/blendcraft.svg to override.
+          if [[ -f packaging/icons/blendcraft.svg ]]; then
+            cp packaging/icons/blendcraft.svg stage/blendcraft.svg
+          else
+            cat > stage/blendcraft.svg <<'EOF'
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128"><rect width="128" height="128" rx="24" fill="#f5792a"/><path d="M64 24 100 44v40L64 104 28 84V44z" fill="none" stroke="#fff" stroke-width="8" stroke-linejoin="round"/></svg>
+          EOF
+            sed -i 's/^          //' stage/blendcraft.svg
+          fi
+
+      - name: Tarball
+        run: |
+          set -euxo pipefail
+          D="BlendCraft-linux-${{ matrix.arch }}"
+          mkdir -p "$D"
+          cp stage/* "$D/"
+          [[ -f README.md ]] && cp README.md "$D/" || true
+          [[ -f LICENSE* ]] && cp LICENSE* "$D/" || true
+          tar -czf "dist/packaging/${D}.tar.gz" "$D"
+
+      - name: deb + rpm (nfpm)
+        run: |
+          set -euxo pipefail
+          go install github.com/goreleaser/nfpm/v2/cmd/nfpm@latest
+          export PATH="$PATH:$(go env GOPATH)/bin"
+
+          cat > nfpm.yaml <<EOF
+          name: blendcraft
+          arch: ${{ matrix.nfpm_arch }}
+          platform: linux
+          version: ${VERSION}
+          section: graphics
+          maintainer: DaikoGames
+          description: BlendCraft 3D
+          homepage: https://github.com/${GITHUB_REPOSITORY}
+          contents:
+            - src: stage/${BIN}
+              dst: /usr/bin/${BIN}
+              file_info: { mode: 0755 }
+            - src: stage/blendcraft.desktop
+              dst: /usr/share/applications/blendcraft.desktop
+            - src: stage/blendcraft.svg
+              dst: /usr/share/icons/hicolor/scalable/apps/blendcraft.svg
+          overrides:
+            deb:
+              depends: [libgtk-3-0, libxkbcommon0, libx11-6]
+            rpm:
+              depends: [gtk3, libxkbcommon, libX11]
+          EOF
+          sed -i 's/^          //' nfpm.yaml
+
+          nfpm package -p deb -t dist/packaging/
+          nfpm package -p rpm -t dist/packaging/
+
+      - name: AppImage
+        run: |
+          set -euxo pipefail
+          A="${{ matrix.arch }}"
+          curl -fsSL -o appimagetool \
+            "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-${A}.AppImage"
+          chmod +x appimagetool
+
+          mkdir -p AppDir/usr/bin
+          cp "stage/${BIN}" AppDir/usr/bin/
+          cp stage/blendcraft.desktop stage/blendcraft.svg AppDir/
+          ln -sf "usr/bin/${BIN}" AppDir/AppRun
+
+          ARCH="$A" APPIMAGE_EXTRACT_AND_RUN=1 \
+            ./appimagetool AppDir "dist/packaging/BlendCraft-linux-${A}.AppImage"
+
+      - name: List output
+        run: ls -lah dist/packaging
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: blendcraft-packages-linux-${{ matrix.arch }}
+          path: dist/packaging/*
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------
+  # Flatpak (x64)
+  # ---------------------------------------------------------------
+  package-flatpak:
+    name: Package Flatpak
     runs-on: ubuntu-latest
+    needs: native
+    continue-on-error: true
+    container:
+      image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-47
+      options: --privileged
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: blendcraft-x86_64-unknown-linux-gnu
+          path: in
+
+      - name: Generate manifest
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p flatpak-build
+          cp "in/${BIN}-x86_64-unknown-linux-gnu" "flatpak-build/${BIN}"
+
+          cat > flatpak-build/io.github.DaikoGames.BlendCraft.desktop <<EOF
+          [Desktop Entry]
+          Type=Application
+          Name=BlendCraft
+          Comment=BlendCraft 3D
+          Exec=${BIN}
+          Icon=io.github.DaikoGames.BlendCraft
+          Categories=Graphics;3DGraphics;
+          Terminal=false
+          EOF
+          sed -i 's/^          //' flatpak-build/io.github.DaikoGames.BlendCraft.desktop
+
+          if [[ -f packaging/icons/blendcraft.svg ]]; then
+            cp packaging/icons/blendcraft.svg flatpak-build/io.github.DaikoGames.BlendCraft.svg
+          else
+            cat > flatpak-build/io.github.DaikoGames.BlendCraft.svg <<'EOF'
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128"><rect width="128" height="128" rx="24" fill="#f5792a"/><path d="M64 24 100 44v40L64 104 28 84V44z" fill="none" stroke="#fff" stroke-width="8" stroke-linejoin="round"/></svg>
+          EOF
+            sed -i 's/^          //' flatpak-build/io.github.DaikoGames.BlendCraft.svg
+          fi
+
+          cat > flatpak-build/io.github.DaikoGames.BlendCraft.yml <<EOF
+          app-id: io.github.DaikoGames.BlendCraft
+          runtime: org.gnome.Platform
+          runtime-version: '47'
+          sdk: org.gnome.Sdk
+          command: ${BIN}
+          finish-args:
+            - --share=ipc
+            - --share=network
+            - --socket=x11
+            - --socket=wayland
+            - --socket=fallback-x11
+            - --device=dri
+            - --socket=pulseaudio
+            - --filesystem=home
+          modules:
+            - name: blendcraft
+              buildsystem: simple
+              build-commands:
+                - install -Dm755 ${BIN} /app/bin/${BIN}
+                - install -Dm644 io.github.DaikoGames.BlendCraft.desktop /app/share/applications/io.github.DaikoGames.BlendCraft.desktop
+                - install -Dm644 io.github.DaikoGames.BlendCraft.svg /app/share/icons/hicolor/scalable/apps/io.github.DaikoGames.BlendCraft.svg
+              sources:
+                - { type: file, path: ${BIN} }
+                - { type: file, path: io.github.DaikoGames.BlendCraft.desktop }
+                - { type: file, path: io.github.DaikoGames.BlendCraft.svg }
+          EOF
+          sed -i 's/^          //' flatpak-build/io.github.DaikoGames.BlendCraft.yml
+
+      - uses: flatpak/flatpak-github-actions/flatpak-builder@v6
+        with:
+          bundle: BlendCraft-linux-x86_64.flatpak
+          manifest-path: flatpak-build/io.github.DaikoGames.BlendCraft.yml
+          cache-key: flatpak-builder-${{ github.sha }}
+          upload-artifact: false
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: blendcraft-packages-flatpak
+          path: BlendCraft-linux-x86_64.flatpak
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------
+  # Snap (x64)
+  # ---------------------------------------------------------------
+  package-snap:
+    name: Package Snap
+    runs-on: ubuntu-22.04
     needs: native
     continue-on-error: true
 
@@ -302,61 +461,147 @@ jobs:
           name: blendcraft-x86_64-unknown-linux-gnu
           path: in
 
-      - name: Stage binary
+      - name: Generate snapcraft.yaml
+        shell: bash
         run: |
-          mkdir -p target/x86_64-unknown-linux-gnu/release
-          cp in/forge3d-x86_64-unknown-linux-gnu \
-            target/x86_64-unknown-linux-gnu/release/forge3d
-          chmod +x target/x86_64-unknown-linux-gnu/release/forge3d
+          set -euxo pipefail
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            VERSION="${GITHUB_REF#refs/tags/v}"
+          else
+            VERSION="0.0.${GITHUB_RUN_NUMBER}"
+          fi
 
-      - name: Build packages
+          mkdir -p snapbuild/snap snapbuild/app/bin
+          cp "in/${BIN}-x86_64-unknown-linux-gnu" "snapbuild/app/bin/${BIN}"
+          chmod +x "snapbuild/app/bin/${BIN}"
+
+          cat > snapbuild/snap/snapcraft.yaml <<EOF
+          name: blendcraft
+          base: core22
+          version: '${VERSION}'
+          summary: BlendCraft 3D
+          description: BlendCraft 3D editor.
+          grade: stable
+          confinement: strict
+          architectures:
+            - build-on: amd64
+          apps:
+            blendcraft:
+              command: bin/${BIN}
+              extensions: [gnome]
+              plugs: [home, network, opengl, audio-playback, removable-media]
+          parts:
+            app:
+              plugin: dump
+              source: app
+              stage-packages: [libx11-6, libxkbcommon0, libwayland-client0]
+          EOF
+          sed -i 's/^          //' snapbuild/snap/snapcraft.yaml
+
+      - uses: snapcore/action-build@v1
+        id: snap
+        with:
+          path: snapbuild
+
+      - name: Rename
         run: |
-          sudo apt-get update
-          sudo apt-get install -y curl fuse libfuse2 zip || true
-          bash packaging/linux/build-tarball.sh dist/packaging
-          bash packaging/linux/build-deb-rpm.sh dist/packaging || true
-          bash packaging/appimage/build.sh dist/packaging || true
+          mkdir -p dist/packaging
+          cp "${{ steps.snap.outputs.snap }}" dist/packaging/BlendCraft-linux-x86_64.snap
 
       - uses: actions/upload-artifact@v4
         with:
-          name: blendcraft-packages-linux
+          name: blendcraft-packages-snap
           path: dist/packaging/*
-          if-no-files-found: ignore
+          if-no-files-found: error
 
   # ---------------------------------------------------------------
-  # Windows packaging
+  # Windows packaging: portable zip + installer (x64, x86, arm64)
   # ---------------------------------------------------------------
   package-windows:
-    name: Package Windows
+    name: Package Windows (${{ matrix.arch }})
     runs-on: windows-latest
     needs: native
     continue-on-error: true
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: x64,   target: x86_64-pc-windows-msvc,  allowed: "x64compatible", in64: "x64compatible" }
+          - { arch: x86,   target: i686-pc-windows-msvc,    allowed: "",              in64: "" }
+          - { arch: arm64, target: aarch64-pc-windows-msvc, allowed: "arm64",         in64: "arm64" }
 
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/download-artifact@v4
         with:
-          name: blendcraft-x86_64-pc-windows-msvc
+          name: blendcraft-${{ matrix.target }}
           path: in
 
-      - name: Portable ZIP
+      - name: Portable ZIP + Installer
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force -Path target/x86_64-pc-windows-msvc/release | Out-Null
-          Copy-Item in/forge3d-x86_64-pc-windows-msvc.exe target/x86_64-pc-windows-msvc/release/forge3d.exe
+          $ErrorActionPreference = "Stop"
+          if ($env:GITHUB_REF -like "refs/tags/v*") { $ver = $env:GITHUB_REF -replace "refs/tags/v","" }
+          else { $ver = "0.0.$($env:GITHUB_RUN_NUMBER)" }
 
-          $bin = Join-Path $pwd "target/x86_64-pc-windows-msvc/release/forge3d.exe"
+          New-Item -ItemType Directory -Force -Path dist/packaging, stage | Out-Null
+          Copy-Item "in/forge3d-${{ matrix.target }}.exe" "stage/forge3d.exe"
 
-          powershell -File packaging/windows/build-portable.ps1 `
-            -OutDir dist/packaging `
-            -Bin $bin
+          # Portable zip
+          Compress-Archive -Path "stage/forge3d.exe" -DestinationPath "dist/packaging/BlendCraft-windows-${{ matrix.arch }}.zip" -Force
+
+          # Installer (Inno Setup)
+          choco install innosetup -y --no-progress
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { $iscc = "$env:ProgramFiles\Inno Setup 6\ISCC.exe" }
+
+          $iss = @'
+          [Setup]
+          AppId={{B1E7DC4A-5D0A-4C55-9F0B-BC0000000001}
+          AppName=BlendCraft
+          AppVersion={#Ver}
+          AppPublisher=DaikoGames
+          DefaultDirName={autopf}\BlendCraft
+          DefaultGroupName=BlendCraft
+          OutputDir={#Out}
+          OutputBaseFilename=BlendCraft-setup-{#Arch}
+          Compression=lzma2
+          SolidCompression=yes
+          ArchitecturesAllowed={#Allowed}
+          ArchitecturesInstallIn64BitMode={#In64}
+          PrivilegesRequiredOverridesAllowed=dialog
+          UninstallDisplayIcon={app}\forge3d.exe
+
+          [Files]
+          Source: "{#Src}"; DestDir: "{app}"; Flags: ignoreversion
+
+          [Icons]
+          Name: "{group}\BlendCraft"; Filename: "{app}\forge3d.exe"
+          Name: "{autodesktop}\BlendCraft"; Filename: "{app}\forge3d.exe"; Tasks: desktopicon
+
+          [Tasks]
+          Name: "desktopicon"; Description: "Create a desktop shortcut"
+
+          [Run]
+          Filename: "{app}\forge3d.exe"; Description: "Launch BlendCraft"; Flags: nowait postinstall skipifsilent
+          '@
+          Set-Content -Path installer.iss -Value $iss -Encoding UTF8
+
+          & $iscc "/DVer=$ver" "/DArch=${{ matrix.arch }}" `
+            "/DAllowed=${{ matrix.allowed }}" "/DIn64=${{ matrix.in64 }}" `
+            "/DSrc=$((Resolve-Path 'stage/forge3d.exe').Path)" `
+            "/DOut=$((Resolve-Path 'dist/packaging').Path)" installer.iss
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed" }
+
+          Get-ChildItem dist/packaging
 
       - uses: actions/upload-artifact@v4
         with:
-          name: blendcraft-packages-windows
+          name: blendcraft-packages-windows-${{ matrix.arch }}
           path: dist/packaging/*
-          if-no-files-found: ignore
+          if-no-files-found: error
 
   # ---------------------------------------------------------------
   # macOS packaging
@@ -386,7 +631,7 @@ jobs:
         with:
           name: blendcraft-packages-macos
           path: dist/packaging/*
-          if-no-files-found: ignore
+          if-no-files-found: error
 
   # ---------------------------------------------------------------
   # Web packaging
@@ -443,9 +688,10 @@ jobs:
       - native
       - macos-universal
       - cross
-      - bsd
       - web
       - package-linux
+      - package-flatpak
+      - package-snap
       - package-windows
       - package-macos
       - package-web
@@ -506,6 +752,8 @@ jobs:
             (cd artifacts/blendcraft-web &&
               zip -qr "$GITHUB_WORKSPACE/release/BlendCraft-web.zip" .)
           fi
+
+          (cd release && sha256sum * > SHA256SUMS.txt)
 
           echo "=== Release files ==="
           ls -lah release/
