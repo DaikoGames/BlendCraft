@@ -14,7 +14,7 @@ on:
         type: boolean
         default: false
       release_tag:
-        description: "Tag name for the release (e.g. v0.1.0). Required if create_release is true and you are not already on a tag."
+        description: "Release tag (e.g. v0.1.0)"
         type: string
         default: ""
 
@@ -23,7 +23,9 @@ env:
   BIN: forge3d
 
 jobs:
-  # --------------------------------------------------------------- Tier 1: native
+  # ---------------------------------------------------------------
+  # Tier 1: Native builds
+  # ---------------------------------------------------------------
   native:
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
@@ -31,109 +33,154 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { name: "Linux x64",     os: ubuntu-latest,    target: x86_64-unknown-linux-gnu,  ext: "" }
-          - { name: "Linux ARM64",   os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu, ext: "" }
-          - { name: "Windows x64",   os: windows-latest,   target: x86_64-pc-windows-msvc,    ext: ".exe" }
-          - { name: "Windows x86",   os: windows-latest,   target: i686-pc-windows-msvc,      ext: ".exe" }
-          - { name: "Windows ARM64", os: windows-latest,   target: aarch64-pc-windows-msvc,   ext: ".exe" }
-          - { name: "macOS ARM64",   os: macos-latest,     target: aarch64-apple-darwin,      ext: "" }
-          - { name: "macOS x64",     os: macos-latest,     target: x86_64-apple-darwin,       ext: "" }
+          - { name: "Linux x64",     os: ubuntu-latest,    target: x86_64-unknown-linux-gnu, ext: "" }
+          - { name: "Linux ARM64",  os: ubuntu-24.04-arm,  target: aarch64-unknown-linux-gnu, ext: "" }
+          - { name: "Windows x64",  os: windows-latest,    target: x86_64-pc-windows-msvc, ext: ".exe" }
+          - { name: "Windows x86",  os: windows-latest,    target: i686-pc-windows-msvc, ext: ".exe" }
+          - { name: "Windows ARM64", os: windows-latest,    target: aarch64-pc-windows-msvc, ext: ".exe" }
+          - { name: "macOS ARM64",   os: macos-latest,     target: aarch64-apple-darwin, ext: "" }
+          - { name: "macOS x64",     os: macos-latest,     target: x86_64-apple-darwin, ext: "" }
+
     steps:
       - uses: actions/checkout@v4
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
+
       - name: Linux system libraries
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libx11-dev libxkbcommon-dev libwayland-dev libgtk-3-dev
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libx11-dev \
+            libxkbcommon-dev \
+            libwayland-dev \
+            libgtk-3-dev
+
       - name: Build
         shell: bash
         run: |
           if [[ "${{ matrix.target }}" == i686-* ]]; then
-            cargo build --release -p forge-desktop --target ${{ matrix.target }} --no-default-features
+            cargo build --release -p forge-desktop \
+              --target ${{ matrix.target }} \
+              --no-default-features
           else
-            cargo build --release -p forge-desktop --target ${{ matrix.target }}
+            cargo build --release -p forge-desktop \
+              --target ${{ matrix.target }}
           fi
+
       - name: Test core
         if: matrix.target == 'x86_64-unknown-linux-gnu'
         run: cargo test -p forge-core
+
       - name: Stage artifact
         shell: bash
         run: |
           mkdir -p dist
-          cp "target/${{ matrix.target }}/release/${BIN}${{ matrix.ext }}" "dist/${BIN}-${{ matrix.target }}${{ matrix.ext }}"
+          cp "target/${{ matrix.target }}/release/${BIN}${{ matrix.ext }}" \
+             "dist/${BIN}-${{ matrix.target }}${{ matrix.ext }}"
+
       - uses: actions/upload-artifact@v4
         with:
           name: blendcraft-${{ matrix.target }}
           path: dist/*
+          if-no-files-found: error
 
+  # ---------------------------------------------------------------
+  # macOS Universal
+  # ---------------------------------------------------------------
   macos-universal:
     name: macOS Universal
     runs-on: macos-latest
     needs: native
+
     steps:
       - uses: actions/download-artifact@v4
         with:
           pattern: blendcraft-*-apple-darwin
           path: in
-      - name: lipo
+          merge-multiple: false
+
+      - name: Create Universal Binary
         run: |
           mkdir -p dist
-          lipo -create -output dist/${BIN}-universal-apple-darwin \
+
+          lipo -create \
+            -output dist/${BIN}-universal-apple-darwin \
             in/blendcraft-aarch64-apple-darwin/${BIN}-aarch64-apple-darwin \
             in/blendcraft-x86_64-apple-darwin/${BIN}-x86_64-apple-darwin
+
       - uses: actions/upload-artifact@v4
         with:
           name: blendcraft-universal-apple-darwin
           path: dist/*
+          if-no-files-found: error
 
-  # --------------------------------------------------------------- Experimental: cross
+  # ---------------------------------------------------------------
+  # Experimental: Cross compilation
+  # ---------------------------------------------------------------
   cross:
     name: ${{ matrix.name }} (cross, experimental)
     runs-on: ubuntu-latest
     continue-on-error: true
+
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { name: "Linux x86 (i686)",    target: i686-unknown-linux-gnu,        ext: "" }
-          - { name: "Linux ARMv7",         target: armv7-unknown-linux-gnueabihf,  ext: "" }
-          - { name: "Linux x64 musl",      target: x86_64-unknown-linux-musl,      ext: "" }
-          - { name: "Linux ARM64 musl",    target: aarch64-unknown-linux-musl,     ext: "" }
-          - { name: "Linux RISC-V 64",     target: riscv64gc-unknown-linux-gnu,    ext: "" }
-          - { name: "Linux PowerPC64 LE",  target: powerpc64le-unknown-linux-gnu,  ext: "" }
-          - { name: "Windows x64 (MinGW)", target: x86_64-pc-windows-gnu,          ext: ".exe" }
-          - { name: "Windows x86 (MinGW)", target: i686-pc-windows-gnu,            ext: ".exe" }
-          - { name: "FreeBSD ARM64",       target: aarch64-unknown-freebsd,        ext: "" }
-          - { name: "FreeBSD x86",         target: i686-unknown-freebsd,           ext: "" }
+          - { name: "Linux x86 (i686)", target: i686-unknown-linux-gnu, ext: "" }
+          - { name: "Linux ARMv7", target: armv7-unknown-linux-gnueabihf, ext: "" }
+          - { name: "Linux x64 musl", target: x86_64-unknown-linux-musl, ext: "" }
+          - { name: "Linux ARM64 musl", target: aarch64-unknown-linux-musl, ext: "" }
+          - { name: "Linux RISC-V 64", target: riscv64gc-unknown-linux-gnu, ext: "" }
+          - { name: "Linux PowerPC64 LE", target: powerpc64le-unknown-linux-gnu, ext: "" }
+          - { name: "Windows x64 (MinGW)", target: x86_64-pc-windows-gnu, ext: ".exe" }
+          - { name: "Windows x86 (MinGW)", target: i686-pc-windows-gnu, ext: ".exe" }
+          - { name: "FreeBSD ARM64", target: aarch64-unknown-freebsd, ext: "" }
+          - { name: "FreeBSD x86", target: i686-unknown-freebsd, ext: "" }
+
     steps:
       - uses: actions/checkout@v4
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+
       - uses: Swatinem/rust-cache@v2
         with:
           key: cross-${{ matrix.target }}
+
       - name: Install cross
         run: cargo install cross --git https://github.com/cross-rs/cross --locked
+
       - name: Build
         run: |
           case "${{ matrix.target }}" in
             i686-*|armv7-*|*-freebsd)
-              cross build --release -p forge-desktop --target ${{ matrix.target }} --no-default-features \
-                || cargo build --release -p forge-desktop --target ${{ matrix.target }} --no-default-features
+              cross build --release -p forge-desktop \
+                --target ${{ matrix.target }} \
+                --no-default-features \
+                || cargo build --release -p forge-desktop \
+                  --target ${{ matrix.target }} \
+                  --no-default-features
               ;;
             *)
-              cross build --release -p forge-desktop --target ${{ matrix.target }}
+              cross build --release -p forge-desktop \
+                --target ${{ matrix.target }}
               ;;
           esac
+
       - name: Stage artifact
         run: |
           mkdir -p dist
-          cp "target/${{ matrix.target }}/release/${BIN}${{ matrix.ext }}" "dist/${BIN}-${{ matrix.target }}${{ matrix.ext }}"
+          cp "target/${{ matrix.target }}/release/${BIN}${{ matrix.ext }}" \
+             "dist/${BIN}-${{ matrix.target }}${{ matrix.ext }}"
+
       - uses: actions/upload-artifact@v4
         if: success()
         with:
@@ -141,19 +188,22 @@ jobs:
           path: dist/*
           if-no-files-found: ignore
 
-  # --------------------------------------------------------------- Experimental: BSD VMs
+  # ---------------------------------------------------------------
+  # Experimental: BSD VMs
+  # ---------------------------------------------------------------
   bsd:
     name: ${{ matrix.name }} (VM, experimental)
     runs-on: ubuntu-latest
     continue-on-error: true
+
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { name: "FreeBSD x64",          id: freebsd,   target: x86_64-unknown-freebsd }
-          - { name: "OpenBSD x64",          id: openbsd,   target: x86_64-unknown-openbsd }
-          - { name: "DragonFlyBSD x64",     id: dragonfly, target: x86_64-unknown-dragonfly }
-          # NetBSD + illumos VM images consistently fail on GHA (ssh exit 2); omitted.
+          - { name: "FreeBSD x64", id: freebsd, target: x86_64-unknown-freebsd }
+          - { name: "OpenBSD x64", id: openbsd, target: x86_64-unknown-openbsd }
+          - { name: "DragonFlyBSD x64", id: dragonfly, target: x86_64-unknown-dragonfly }
+
     steps:
       - uses: actions/checkout@v4
 
@@ -165,7 +215,8 @@ jobs:
           prepare: pkg install -y rust pkgconf gtk3 libX11 libxkbcommon wayland
           run: |
             set -e
-            cargo build --release -p forge-desktop || cargo build --release -p forge-desktop --no-default-features
+            cargo build --release -p forge-desktop \
+              || cargo build --release -p forge-desktop --no-default-features
             mkdir -p dist
             cp target/release/forge3d dist/forge3d-x86_64-unknown-freebsd
 
@@ -178,7 +229,8 @@ jobs:
           run: |
             set -e
             export PATH="$HOME/.cargo/bin:/usr/local/bin:$PATH"
-            cargo build --release -p forge-desktop || cargo build --release -p forge-desktop --no-default-features
+            cargo build --release -p forge-desktop \
+              || cargo build --release -p forge-desktop --no-default-features
             mkdir -p dist
             cp target/release/forge3d dist/forge3d-x86_64-unknown-openbsd
 
@@ -191,11 +243,10 @@ jobs:
           run: |
             set -e
             export PATH="$HOME/.cargo/bin:/usr/local/bin:$PATH"
-            cargo build --release -p forge-desktop || cargo build --release -p forge-desktop --no-default-features
+            cargo build --release -p forge-desktop \
+              || cargo build --release -p forge-desktop --no-default-features
             mkdir -p dist
             cp target/release/forge3d dist/forge3d-x86_64-unknown-dragonfly
-
-
 
       - uses: actions/upload-artifact@v4
         if: success()
@@ -204,44 +255,60 @@ jobs:
           path: dist/*
           if-no-files-found: ignore
 
-  # --------------------------------------------------------------- Web
+  # ---------------------------------------------------------------
+  # Web
+  # ---------------------------------------------------------------
   web:
     name: Web (wasm32)
     runs-on: ubuntu-latest
+
     steps:
       - uses: actions/checkout@v4
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
+
       - uses: Swatinem/rust-cache@v2
         with:
           key: wasm
+
       - name: Install wasm-bindgen CLI
         run: cargo install wasm-bindgen-cli --version 0.2.130 --locked
+
       - name: Build web app
         run: bash web/build.sh
+
       - uses: actions/upload-artifact@v4
         with:
           name: blendcraft-web
           path: web/dist
+          if-no-files-found: error
 
-  # --------------------------------------------------------------- Packaging
+  # ---------------------------------------------------------------
+  # Linux packaging
+  # ---------------------------------------------------------------
   package-linux:
-    name: Package Linux (AppImage, deb, rpm, tarball)
+    name: Package Linux
     runs-on: ubuntu-latest
     needs: native
     continue-on-error: true
+
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/download-artifact@v4
         with:
           name: blendcraft-x86_64-unknown-linux-gnu
           path: in
+
       - name: Stage binary
         run: |
           mkdir -p target/x86_64-unknown-linux-gnu/release
-          cp in/forge3d-x86_64-unknown-linux-gnu target/x86_64-unknown-linux-gnu/release/forge3d
+          cp in/forge3d-x86_64-unknown-linux-gnu \
+            target/x86_64-unknown-linux-gnu/release/forge3d
           chmod +x target/x86_64-unknown-linux-gnu/release/forge3d
+
       - name: Build packages
         run: |
           sudo apt-get update
@@ -249,97 +316,125 @@ jobs:
           bash packaging/linux/build-tarball.sh dist/packaging
           bash packaging/linux/build-deb-rpm.sh dist/packaging || true
           bash packaging/appimage/build.sh dist/packaging || true
+
       - uses: actions/upload-artifact@v4
         with:
           name: blendcraft-packages-linux
           path: dist/packaging/*
           if-no-files-found: ignore
 
+  # ---------------------------------------------------------------
+  # Windows packaging
+  # ---------------------------------------------------------------
   package-windows:
-    name: Package Windows (portable ZIP)
+    name: Package Windows
     runs-on: windows-latest
     needs: native
     continue-on-error: true
+
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/download-artifact@v4
         with:
           name: blendcraft-x86_64-pc-windows-msvc
           path: in
+
       - name: Portable ZIP
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path target/x86_64-pc-windows-msvc/release | Out-Null
           Copy-Item in/forge3d-x86_64-pc-windows-msvc.exe target/x86_64-pc-windows-msvc/release/forge3d.exe
+
           $bin = Join-Path $pwd "target/x86_64-pc-windows-msvc/release/forge3d.exe"
-          powershell -File packaging/windows/build-portable.ps1 -OutDir dist/packaging -Bin $bin
+
+          powershell -File packaging/windows/build-portable.ps1 `
+            -OutDir dist/packaging `
+            -Bin $bin
+
       - uses: actions/upload-artifact@v4
         with:
           name: blendcraft-packages-windows
           path: dist/packaging/*
           if-no-files-found: ignore
 
+  # ---------------------------------------------------------------
+  # macOS packaging
+  # ---------------------------------------------------------------
   package-macos:
-    name: Package macOS (app + DMG)
+    name: Package macOS
     runs-on: macos-latest
     needs: macos-universal
     continue-on-error: true
+
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/download-artifact@v4
         with:
           name: blendcraft-universal-apple-darwin
           path: in
-      - name: DMG
+
+      - name: Create DMG
         run: |
           mkdir -p dist
           cp in/forge3d-universal-apple-darwin dist/forge3d-universal-apple-darwin
           chmod +x dist/forge3d-universal-apple-darwin
           bash packaging/macos/build-app-dmg.sh dist/packaging
+
       - uses: actions/upload-artifact@v4
         with:
           name: blendcraft-packages-macos
           path: dist/packaging/*
           if-no-files-found: ignore
 
+  # ---------------------------------------------------------------
+  # Web packaging
+  # ---------------------------------------------------------------
   package-web:
-    name: Package Web (ZIP)
+    name: Package Web
     runs-on: ubuntu-latest
     needs: web
     continue-on-error: true
+
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/download-artifact@v4
         with:
           name: blendcraft-web
           path: web/dist
-      - name: Zip
+
+      - name: Create Web ZIP
         run: |
           mkdir -p "$GITHUB_WORKSPACE/dist/packaging"
           bash packaging/web/build-zip.sh "$GITHUB_WORKSPACE/dist/packaging"
           ls -la "$GITHUB_WORKSPACE/dist/packaging"
+
       - uses: actions/upload-artifact@v4
         with:
           name: blendcraft-packages-web
           path: dist/packaging/*
           if-no-files-found: ignore
 
-  # --------------------------------------------------------------- Release (ALL artifacts)
-  # Runs when:
-  #   - you push a tag v*  (e.g. git tag v0.1.0 && git push --tags)
-  #   - or workflow_dispatch with create_release=true
-  # Waits for every build/package job, but does NOT fail if experimental
-  # cross/BSD packaging soft-failed (continue-on-error).
+  # ---------------------------------------------------------------
+  # Release
+  # ---------------------------------------------------------------
   release:
     name: GitHub Release (everything)
+
+    # IMPORTANT:
+    # always() prevents skipped experimental/packaging jobs from
+    # automatically skipping this job.
     if: >-
-      always()
-      && needs.native.result == 'success'
-      && needs.web.result == 'success'
-      && (
-        startsWith(github.ref, 'refs/tags/v')
-        || (github.event_name == 'workflow_dispatch' && inputs.create_release == true)
+      always() &&
+      needs.native.result == 'success' &&
+      needs.web.result == 'success' &&
+      (
+        startsWith(github.ref, 'refs/tags/v') ||
+        (github.event_name == 'workflow_dispatch' && inputs.create_release == true)
       )
+
     needs:
       - native
       - macos-universal
@@ -350,9 +445,12 @@ jobs:
       - package-windows
       - package-macos
       - package-web
+
     runs-on: ubuntu-latest
+
     permissions:
       contents: write
+
     steps:
       - name: Download all artifacts
         uses: actions/download-artifact@v4
@@ -360,46 +458,76 @@ jobs:
           path: artifacts
           merge-multiple: false
 
-      - name: Collect everything into release/
+      - name: Collect release files
+        shell: bash
         run: |
           set -euo pipefail
+
           mkdir -p release
-          echo "=== Artifact tree ==="
+
+          echo "=== Available artifacts ==="
           find artifacts -type f | sort || true
 
-          # Native / cross / BSD binaries
-          find artifacts -type f -name 'forge3d*' -exec cp -v {} release/ \; || true
+          # -------------------------------------------------------
+          # Collect binaries
+          # -------------------------------------------------------
+          find artifacts -type f -name 'forge3d*' -print0 |
+          while IFS= read -r -d '' file; do
+            cp "$file" release/
+          done
 
-          # Packaging outputs (AppImage, deb, rpm, zip, dmg, …)
-          find artifacts -type f \( -name 'BlendCraft*' -o -name '*.AppImage' -o -name '*.deb' -o -name '*.rpm' -o -name '*.dmg' -o -name '*.flatpak' -o -name '*.snap' -o -name '*.msi' -o -name '*.exe' \) -exec cp -v {} release/ \; || true
+          # -------------------------------------------------------
+          # Collect packages
+          # -------------------------------------------------------
+          find artifacts -type f \( \
+            -name '*.AppImage' -o \
+            -name '*.deb' -o \
+            -name '*.rpm' -o \
+            -name '*.dmg' -o \
+            -name '*.flatpak' -o \
+            -name '*.snap' -o \
+            -name '*.msi' -o \
+            -name '*.exe' -o \
+            -name '*.zip' -o \
+            -name '*.tar.gz' \
+          \) -print0 |
+          while IFS= read -r -d '' file; do
+            cp -n "$file" release/ || true
+          done
 
-          # Web static site → single zip
+          # -------------------------------------------------------
+          # Package Web build as ZIP
+          # -------------------------------------------------------
           if [[ -d artifacts/blendcraft-web ]]; then
-            (cd artifacts/blendcraft-web && zip -r "$GITHUB_WORKSPACE/release/BlendCraft-web.zip" .)
-          else
-            webdir=$(find artifacts -type d -name dist 2>/dev/null | head -1 || true)
-            if [[ -n "${webdir:-}" ]]; then
-              (cd "$webdir" && zip -r "$GITHUB_WORKSPACE/release/BlendCraft-web.zip" .)
-            fi
+            (cd artifacts/blendcraft-web &&
+              zip -qr "$GITHUB_WORKSPACE/release/BlendCraft-web.zip" .)
           fi
 
           echo "=== Release files ==="
-          ls -la release/
-          # Must have at least one file
+          ls -lah release/
+
           test -n "$(ls -A release)"
 
-      - name: Resolve tag
+      - name: Resolve release tag
         id: tag
+        shell: bash
         run: |
+          set -e
+
           if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
-            echo "tag=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+            TAG="${GITHUB_REF#refs/tags/}"
+
           elif [[ -n "${{ inputs.release_tag }}" ]]; then
-            echo "tag=${{ inputs.release_tag }}" >> "$GITHUB_OUTPUT"
+            TAG="${{ inputs.release_tag }}"
+
           else
-            echo "tag=v0.0.0-ci-${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
+            TAG="v0.0.0-ci-${GITHUB_RUN_NUMBER}"
           fi
 
-      - name: Publish GitHub Release with ALL files
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Using release tag: $TAG"
+
+      - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.tag.outputs.tag }}
