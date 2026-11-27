@@ -204,16 +204,13 @@ jobs:
           if-no-files-found: ignore
 
   # ---------------------------------------------------------------
-  # OpenBSD + DragonFlyBSD (VM, release runs only, NO scripting:
-  # rustpython-vm 0.4.0 does not compile on these systems)
+  # OpenBSD + DragonFlyBSD. These only exist as VMs (no cross images, no
+  # prebuilt std). NO scripting: rustpython-vm 0.4.0 does not compile there.
   # ---------------------------------------------------------------
   bsd-extra:
-    name: OpenBSD + DragonFlyBSD (VM, release only, no scripting)
+    name: ${{ matrix.name }} (VM, experimental, no scripting)
     runs-on: ubuntu-latest
     continue-on-error: true
-    if: >-
-      startsWith(github.ref, 'refs/tags/v') ||
-      (github.event_name == 'workflow_dispatch' && inputs.create_release == true)
 
     strategy:
       fail-fast: false
@@ -225,15 +222,29 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Cargo home + target inside the workspace -> synced into the VM
+      # and cached between runs (first run slow, later runs fast).
+      - uses: actions/cache@v4
+        with:
+          path: |
+            .cargo-home/registry
+            .cargo-home/git
+            target
+          key: bsd-${{ matrix.id }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: bsd-${{ matrix.id }}-
+
       - name: Build (OpenBSD)
         if: matrix.id == 'openbsd'
         uses: vmactions/openbsd-vm@v1
         with:
           usesh: true
+          cpu: 4
+          mem: 8192
           prepare: pkg_add -I rust gtk+3 libxkbcommon
           run: |
             set -e
             export PATH="$HOME/.cargo/bin:/usr/local/bin:$PATH"
+            export CARGO_HOME="$PWD/.cargo-home"
             cargo build --release -p forge-desktop --no-default-features
             mkdir -p dist
             cp target/release/forge3d dist/forge3d-x86_64-unknown-openbsd-headless
@@ -243,10 +254,13 @@ jobs:
         uses: vmactions/dragonflybsd-vm@v1
         with:
           usesh: true
+          cpu: 4
+          mem: 8192
           prepare: pkg install -y rust pkgconf gtk3 libxkbcommon libX11
           run: |
             set -e
             export PATH="$HOME/.cargo/bin:/usr/local/bin:$PATH"
+            export CARGO_HOME="$PWD/.cargo-home"
             cargo build --release -p forge-desktop --no-default-features
             mkdir -p dist
             cp target/release/forge3d dist/forge3d-x86_64-unknown-dragonfly-headless
@@ -364,7 +378,79 @@ jobs:
           [[ -f LICENSE* ]] && cp LICENSE* "$D/" || true
           tar -czf "dist/packaging/${D}.tar.gz" "$D"
 
-      - name: Install nfpm
+      - name: Package tree
+        run: |
+          set -euxo pipefail
+          install -Dm755 "stage/${BIN}"          "pkgroot/usr/bin/${BIN}"
+          install -Dm644 stage/blendcraft.desktop "pkgroot/usr/share/applications/blendcraft.desktop"
+          install -Dm644 stage/blendcraft.svg     "pkgroot/usr/share/icons/hicolor/scalable/apps/blendcraft.svg"
+
+      - name: .deb package (dpkg-deb)
+        run: |
+          set -euxo pipefail
+          rm -rf debroot
+          cp -a pkgroot debroot
+          mkdir -p debroot/DEBIAN
+          cat > debroot/DEBIAN/control <<EOF
+          Package: blendcraft
+          Version: ${VERSION}
+          Section: graphics
+          Priority: optional
+          Architecture: ${{ matrix.nfpm_arch }}
+          Maintainer: DaikoGames <noreply@users.noreply.github.com>
+          Depends: libx11-6, libxkbcommon0, libwayland-client0
+          Recommends: libvulkan1, libgl1
+          Homepage: https://github.com/${GITHUB_REPOSITORY}
+          Description: BlendCraft 3D
+           BlendCraft 3D editor.
+          EOF
+          dpkg-deb --root-owner-group --build debroot \
+            "dist/packaging/blendcraft_${VERSION}_${{ matrix.nfpm_arch }}.deb"
+          dpkg-deb --info "dist/packaging/blendcraft_${VERSION}_${{ matrix.nfpm_arch }}.deb"
+
+      - name: Arch Linux package (.pkg.tar.zst)
+        run: |
+          set -euxo pipefail
+          sudo apt-get install -y zstd || true
+          cat > pkgroot/.PKGINFO <<EOF
+          pkgname = blendcraft
+          pkgbase = blendcraft
+          pkgver = ${VERSION}-1
+          pkgdesc = BlendCraft 3D
+          url = https://github.com/${GITHUB_REPOSITORY}
+          builddate = $(date +%s)
+          packager = DaikoGames
+          size = $(du -sb pkgroot/usr | cut -f1)
+          arch = ${{ matrix.arch }}
+          license = custom
+          depend = libx11
+          depend = libxkbcommon
+          optdepend = vulkan-icd-loader: Vulkan rendering
+          EOF
+          (cd pkgroot && tar --owner=0 --group=0 --numeric-owner --zstd \
+            -cf "$GITHUB_WORKSPACE/dist/packaging/blendcraft-${VERSION}-1-${{ matrix.arch }}.pkg.tar.zst" \
+            .PKGINFO usr)
+          tar --zstd -tf "dist/packaging/blendcraft-${VERSION}-1-${{ matrix.arch }}.pkg.tar.zst"
+
+      - name: AppImage
+        continue-on-error: true
+        run: |
+          set -euxo pipefail
+          A="${{ matrix.arch }}"
+          curl -fsSL -o appimagetool \
+            "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-${A}.AppImage"
+          chmod +x appimagetool
+
+          mkdir -p AppDir/usr/bin
+          cp "stage/${BIN}" AppDir/usr/bin/
+          cp stage/blendcraft.desktop stage/blendcraft.svg AppDir/
+          ln -sf "usr/bin/${BIN}" AppDir/AppRun
+
+          ARCH="$A" APPIMAGE_EXTRACT_AND_RUN=1 \
+            ./appimagetool AppDir "dist/packaging/BlendCraft-linux-${A}.AppImage"
+
+      - name: Install nfpm (for .rpm)
+        continue-on-error: true
         run: |
           set -euxo pipefail
           go install github.com/goreleaser/nfpm/v2/cmd/nfpm@latest
@@ -388,42 +474,14 @@ jobs:
             - src: stage/blendcraft.svg
               dst: /usr/share/icons/hicolor/scalable/apps/blendcraft.svg
           overrides:
-            deb:
-              depends: [libgtk-3-0, libxkbcommon0, libx11-6]
             rpm:
-              depends: [gtk3, libxkbcommon, libX11]
-            archlinux:
-              depends: [gtk3, libxkbcommon, libx11]
+              depends: [libxkbcommon, libX11]
           EOF
           cat nfpm.yaml
 
-      - name: .deb
-        continue-on-error: true
-        run: nfpm package -p deb -t dist/packaging/
-
-      - name: .rpm
+      - name: .rpm package
         continue-on-error: true
         run: nfpm package -p rpm -t dist/packaging/
-
-      - name: Arch Linux (.pkg.tar.zst)
-        continue-on-error: true
-        run: nfpm package -p archlinux -t dist/packaging/
-
-      - name: AppImage
-        run: |
-          set -euxo pipefail
-          A="${{ matrix.arch }}"
-          curl -fsSL -o appimagetool \
-            "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-${A}.AppImage"
-          chmod +x appimagetool
-
-          mkdir -p AppDir/usr/bin
-          cp "stage/${BIN}" AppDir/usr/bin/
-          cp stage/blendcraft.desktop stage/blendcraft.svg AppDir/
-          ln -sf "usr/bin/${BIN}" AppDir/AppRun
-
-          ARCH="$A" APPIMAGE_EXTRACT_AND_RUN=1 \
-            ./appimagetool AppDir "dist/packaging/BlendCraft-linux-${A}.AppImage"
 
       - name: List output
         run: ls -lah dist/packaging
