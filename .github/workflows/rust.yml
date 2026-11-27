@@ -204,59 +204,11 @@ jobs:
           if-no-files-found: ignore
 
   # ---------------------------------------------------------------
-  # FreeBSD x64 built NATIVELY in a VM (slow, ~10 min). Release runs only.
-  # The fast FreeBSD x64 build is in the cross job above.
-  # ---------------------------------------------------------------
-  bsd:
-    name: FreeBSD x64 (native VM, experimental)
-    runs-on: ubuntu-latest
-    continue-on-error: true
-    if: >-
-      startsWith(github.ref, 'refs/tags/v') ||
-      (github.event_name == 'workflow_dispatch' && inputs.create_release == true)
-
-    steps:
-      - uses: actions/checkout@v4
-
-      # Cargo home + target live inside the workspace so they get synced
-      # into the VM and can be cached between runs.
-      - uses: actions/cache@v4
-        with:
-          path: |
-            .cargo-home/registry
-            .cargo-home/git
-            target
-          key: freebsd-vm-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: freebsd-vm-
-
-      - name: Build (FreeBSD x64)
-        uses: vmactions/freebsd-vm@v1
-        with:
-          usesh: true
-          cpu: 4
-          mem: 8192
-          prepare: pkg install -y rust pkgconf gtk3 libX11 libxkbcommon wayland
-          run: |
-            set -e
-            export CARGO_HOME="$PWD/.cargo-home"
-            cargo build --release -p forge-desktop \
-              || cargo build --release -p forge-desktop --no-default-features
-            mkdir -p dist
-            cp target/release/forge3d dist/forge3d-x86_64-unknown-freebsd-native
-
-      - uses: actions/upload-artifact@v4
-        if: success()
-        with:
-          name: blendcraft-x86_64-unknown-freebsd-native
-          path: dist/*
-          if-no-files-found: ignore
-
-  # ---------------------------------------------------------------
   # OpenBSD + DragonFlyBSD (VM, release runs only, NO scripting:
   # rustpython-vm 0.4.0 does not compile on these systems)
   # ---------------------------------------------------------------
   bsd-extra:
-    name: ${{ matrix.name }} (VM, experimental, no scripting)
+    name: OpenBSD + DragonFlyBSD (VM, release only, no scripting)
     runs-on: ubuntu-latest
     continue-on-error: true
     if: >-
@@ -827,7 +779,6 @@ jobs:
       - native
       - macos-universal
       - cross
-      - bsd
       - bsd-extra
       - web
       - package-linux
