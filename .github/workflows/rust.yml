@@ -50,7 +50,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: ${{ matrix.target }}
+          key: v2-${{ matrix.os }}-${{ matrix.target }}
 
       - name: Linux system libraries
         if: runner.os == 'Linux'
@@ -141,7 +141,6 @@ jobs:
           - { name: "Linux PowerPC64 LE", target: powerpc64le-unknown-linux-gnu, ext: "" }
           - { name: "Windows x64 (MinGW)", target: x86_64-pc-windows-gnu, ext: ".exe" }
           - { name: "Windows x86 (MinGW)", target: i686-pc-windows-gnu, ext: ".exe" }
-          - { name: "FreeBSD x64", target: x86_64-unknown-freebsd, ext: "" }
           - { name: "FreeBSD ARM64", target: aarch64-unknown-freebsd, ext: "" }
           - { name: "FreeBSD x86", target: i686-unknown-freebsd, ext: "" }
 
@@ -186,6 +185,56 @@ jobs:
         if: success()
         with:
           name: blendcraft-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: ignore
+
+  # ---------------------------------------------------------------
+  # FreeBSD x64 VM (full features incl. scripting). Release runs only.
+  # OpenBSD / DragonFly are not built: rustpython-vm 0.4.0 does not
+  # compile on them (missing libc constants), so no scripting there.
+  # ---------------------------------------------------------------
+  bsd:
+    name: FreeBSD x64 (VM, experimental)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    if: >-
+      startsWith(github.ref, 'refs/tags/v') ||
+      (github.event_name == 'workflow_dispatch' && inputs.create_release == true)
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Cargo home + target live inside the workspace so they get synced
+      # into the VM and can be cached between runs (first run is slow,
+      # later runs only rebuild your own crates).
+      - uses: actions/cache@v4
+        with:
+          path: |
+            .cargo-home/registry
+            .cargo-home/git
+            target
+          key: freebsd-vm-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: freebsd-vm-
+
+      - name: Build (FreeBSD x64)
+        uses: vmactions/freebsd-vm@v1
+        with:
+          usesh: true
+          cpu: 4
+          mem: 8192
+          prepare: pkg install -y rust pkgconf gtk3 libX11 libxkbcommon wayland
+          run: |
+            set -e
+            export CARGO_HOME="$PWD/.cargo-home"
+            cargo build --release -p forge-desktop \
+              || cargo build --release -p forge-desktop --no-default-features
+            mkdir -p dist
+            cp target/release/forge3d dist/forge3d-x86_64-unknown-freebsd
+
+      - uses: actions/upload-artifact@v4
+        if: success()
+        with:
+          name: blendcraft-x86_64-unknown-freebsd
           path: dist/*
           if-no-files-found: ignore
 
@@ -688,6 +737,7 @@ jobs:
       - native
       - macos-universal
       - cross
+      - bsd
       - web
       - package-linux
       - package-flatpak
