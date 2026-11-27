@@ -161,7 +161,21 @@ jobs:
       - name: Build
         run: |
           case "${{ matrix.target }}" in
-            i686-*|armv7-*|*-freebsd)
+            *-freebsd)
+              # Try the FULL build first (GUI + scripting). Only if that
+              # fails fall back to the headless build and tag the file.
+              if cross build --release -p forge-desktop \
+                   --target ${{ matrix.target }}; then
+                echo "Full feature build OK"
+              else
+                echo "::warning::Full build failed for ${{ matrix.target }}, building headless fallback"
+                cross build --release -p forge-desktop \
+                  --target ${{ matrix.target }} \
+                  --no-default-features
+                echo "SUFFIX=-headless" >> "$GITHUB_ENV"
+              fi
+              ;;
+            i686-*|armv7-*)
               cross build --release -p forge-desktop \
                 --target ${{ matrix.target }} \
                 --no-default-features \
@@ -179,7 +193,7 @@ jobs:
         run: |
           mkdir -p dist
           cp "target/${{ matrix.target }}/release/${BIN}${{ matrix.ext }}" \
-             "dist/${BIN}-${{ matrix.target }}${{ matrix.ext }}"
+             "dist/${BIN}-${{ matrix.target }}${SUFFIX:-}${{ matrix.ext }}"
 
       - uses: actions/upload-artifact@v4
         if: success()
